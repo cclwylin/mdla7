@@ -195,8 +195,30 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "test_model: " << argv[1] << "  ("
               << N << " layers, " << file.size() / 1024 << " KB)\n";
 
+    // v8.22: size the DRAM model to fit this program's highest-used address.
+    // compile_model places weights/inputs/outputs in 3 disjoint regions
+    // (DRAM_BASE + {0, 64, 128} MB), each growing per-layer; for big segmentation
+    // models (deeplab_v3_plus has ~1 GB of activations) the default 256 MB
+    // segfaults `sys.dram.write` out-of-bounds.
+    constexpr uint32_t DRAM_BASE_ADDR = 0x10000000u;
+    uint64_t max_addr = 256ull * 1024 * 1024;     // floor: keep small models cheap
+    for (uint32_t i = 0; i < N; ++i) {
+        const auto& L = metas[i];
+        max_addr = std::max<uint64_t>(max_addr, uint64_t(L.dram_in)  + L.in_size  - DRAM_BASE_ADDR);
+        max_addr = std::max<uint64_t>(max_addr, uint64_t(L.dram_wgt) + L.wgt_size - DRAM_BASE_ADDR);
+        max_addr = std::max<uint64_t>(max_addr, uint64_t(L.dram_out) + L.ref_size - DRAM_BASE_ADDR);
+    }
+    // Round up to 64 MB so the size reads sanely in error messages and gives
+    // a small safety pad above the last-used byte.
+    const uint64_t pad   = 64ull * 1024 * 1024;
+    const uint64_t dram_bytes = ((max_addr + pad + (64ull * 1024 * 1024) - 1)
+                                 / (64ull * 1024 * 1024)) * (64ull * 1024 * 1024);
+    std::cout << "  DRAM sized to " << (dram_bytes / (1024 * 1024)) << " MB"
+              << " (max layer addr offset = "
+              << (max_addr / (1024 * 1024)) << " MB)\n";
+
     // --- Build sim, populate DRAM, build descriptor program ----
-    Mdla7System sys("mdla7");
+    Mdla7System sys("mdla7", static_cast<std::size_t>(dram_bytes));
 
     for (uint32_t i = 0; i < N; ++i) {
         const auto& L = metas[i];
@@ -273,6 +295,18 @@ int sc_main(int argc, char* argv[]) {
     bool     fuse_prev_single_tile  = false;
     bool     fuse_prev_is_conv_class = false;
     int      fused_count = 0;          // for reporting
+
+    // v8.21: ping-pong allocator state. The fused chain places each layer's
+    // L1_OUT at alternating ends of L1 (low / high) so the next layer's
+    // PARAMS/WGT/OUT block has a contiguous free region on the OPPOSITE side
+    // of `live_in` (= prev L1_OUT). Without ping-pong, the chain stack-allocs
+    // upward and busts L1 after a few layers (mobilenet_v3 L0→L1→L2→L3
+    // collapsed at L3 because chain footprint exceeded 2 MB even though no
+    // single layer needed >2 MB). chain_alt = 0 means try_low first (OUT at
+    // addr 0); chain_alt = 1 means try_high first (OUT at L1_BUDGET-out_size).
+    // After every successful fused layer, chain_alt toggles. Reset to 0 on
+    // chain break (non-fused layer).
+    uint8_t  chain_alt = 0;
 
     // v8.14: pending udma_w for fusion-source skip.  When the prev layer is
     // single-tile CONV/DWCONV/FC, we defer its udma_w descriptor until we
@@ -378,16 +412,51 @@ int sc_main(int argc, char* argv[]) {
             uint32_t L1_PARAMS, L1_WGT, L1_IN, L1_OUT;
             uint32_t tile_oh = L.out_h;
             bool fused_this_layer = false;
+            bool fused_used_low = false;   // which side this layer's OUT landed on
 
             if (fuse_eligible) {
-                L1_IN              = fuse_prev_l1_out_addr;
-                const uint32_t in_end = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
-                L1_PARAMS          = align64(in_end);
-                L1_WGT             = align64(L1_PARAMS + uint32_t(params_blob));
-                L1_OUT             = align64(L1_WGT + tile_wgt_max);
+                L1_IN = fuse_prev_l1_out_addr;
                 const uint64_t worst_out =
                     uint64_t(L.out_h) * L.out_w * tile_oc * out_elem;
-                if (uint64_t(L1_OUT) + worst_out + safety <= L1_BUDGET) {
+                const uint32_t in_lo = fuse_prev_l1_out_addr;
+                const uint32_t in_hi = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
+
+                // v8.21: try_low — OUT at addr 0; PARAMS/WGT placed above OUT,
+                // all below live_in. Net layout: [OUT | WGT | PARAMS | … free … | live_in | …].
+                auto try_low = [&]() -> bool {
+                    const uint64_t out_addr = 0;
+                    const uint64_t wgt_addr = align64(uint32_t(out_addr + worst_out));
+                    const uint64_t par_addr = align64(uint32_t(wgt_addr + tile_wgt_max));
+                    const uint64_t top      = align64(uint32_t(par_addr + params_blob));
+                    if (top + safety > in_lo) return false;
+                    L1_OUT    = uint32_t(out_addr);
+                    L1_WGT    = uint32_t(wgt_addr);
+                    L1_PARAMS = uint32_t(par_addr);
+                    return true;
+                };
+                // v8.21: try_high — OUT at top end (BUDGET-out_size, floor-aligned);
+                // PARAMS/WGT immediately above live_in. Layout:
+                // [… | live_in | PARAMS | WGT | … free … | OUT].
+                auto try_high = [&]() -> bool {
+                    if (worst_out + safety > L1_BUDGET) return false;
+                    const uint64_t out_addr  = (uint64_t(L1_BUDGET) - worst_out) & ~uint64_t(63);
+                    const uint64_t par_addr  = align64(in_hi);
+                    const uint64_t wgt_addr  = align64(uint32_t(par_addr + params_blob));
+                    const uint64_t wgt_end   = align64(uint32_t(wgt_addr + tile_wgt_max));
+                    if (wgt_end + safety > out_addr) return false;
+                    L1_OUT    = uint32_t(out_addr);
+                    L1_WGT    = uint32_t(wgt_addr);
+                    L1_PARAMS = uint32_t(par_addr);
+                    return true;
+                };
+
+                bool ok = (chain_alt == 0) ? try_low() : try_high();
+                if (ok) fused_used_low = (chain_alt == 0);
+                else {
+                    ok = (chain_alt == 0) ? try_high() : try_low();
+                    if (ok) fused_used_low = (chain_alt != 0);
+                }
+                if (ok) {
                     fused_this_layer = true;
                     fused_count++;
                 }
@@ -457,9 +526,14 @@ int sc_main(int argc, char* argv[]) {
             // ---- load full params (+ corr) blob once per layer ----
             const uint8_t params_tag = alloc_tag();
             const uint32_t params_dram = L.dram_wgt + uint32_t(pure_wgt);
+            // v8.21: when ping-pong put this layer's params/wgt region into the
+            // "low" zone, those addresses overlap with prev layer's L1_IN
+            // (still being read by prev's CONV). Wait on prev REQUANT done
+            // before any UDMA write into L1, so we don't race.
             program.push_back(make_udma(params_dram, L1_PARAMS,
                                         uint32_t(params_blob),
-                                        /*dir*/ 0, params_tag));
+                                        /*dir*/ 0, params_tag,
+                                        fused_this_layer ? fuse_prev_done_tag : 0));
             acc[i].dram_r += params_blob;
             acc[i].sram_w += params_blob;
 
@@ -629,32 +703,191 @@ int sc_main(int argc, char* argv[]) {
             fuse_prev_dtype         = L.dtype;
             fuse_prev_single_tile   = single_tile;
             fuse_prev_is_conv_class = single_tile;
+            // v8.21: if this layer fused, toggle chain_alt so the next fused
+            // layer's OUT lands at the OPPOSITE end. Otherwise reset to 0
+            // (chain restart starts with try_low first).
+            if (fused_this_layer) chain_alt = fused_used_low ? 1 : 0;
+            else                  chain_alt = 0;
             break;
         }
         case OK_AVG_POOL: case OK_MAX_POOL: {
-            // v8.14: pool can't fuse with prev — flush any deferred udma_w.
-            flush_pending();
-            const uint32_t L1_IN  = 0;
-            const uint32_t L1_OUT = align64(L.in_size);
-            if (uint64_t(L1_OUT) + L.ref_size > L1_BUDGET) {
-                std::cerr << "layer " << i << ": pool input+output exceed 2 MB L1\n";
-                return 4;
+            // v8.20: pool fuse — consumer skips udma_r, producer's udma_w
+            // deferred to pending. v8.21: ping-pong allocator places L1_OUT
+            // at alternating ends so deep chains don't bust 2 MB L1.
+            const bool fuse_eligible =
+                fuse_prev_is_conv_class && fuse_prev_single_tile
+                && fuse_prev_dtype == L.dtype
+                && fuse_prev_out_h == L.in_h
+                && fuse_prev_out_w == L.in_w
+                && fuse_prev_out_c == L.in_c;
+            uint32_t L1_IN, L1_OUT;
+            bool fused_this_layer = false;
+            bool fused_used_low = false;
+            if (fuse_eligible) {
+                L1_IN = fuse_prev_l1_out_addr;
+                const uint32_t in_lo = fuse_prev_l1_out_addr;
+                const uint32_t in_hi = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
+                const uint64_t safety = 4096;
+                auto try_low = [&]() -> bool {
+                    const uint64_t out_addr = 0;
+                    const uint64_t top = align64(uint32_t(out_addr + L.ref_size));
+                    if (top + safety > in_lo) return false;
+                    L1_OUT = uint32_t(out_addr);
+                    return true;
+                };
+                auto try_high = [&]() -> bool {
+                    if (L.ref_size + safety > L1_BUDGET) return false;
+                    const uint64_t out_addr = (uint64_t(L1_BUDGET) - L.ref_size) & ~uint64_t(63);
+                    if (in_hi + safety > out_addr) return false;
+                    L1_OUT = uint32_t(out_addr);
+                    return true;
+                };
+                bool ok = (chain_alt == 0) ? try_low() : try_high();
+                if (ok) fused_used_low = (chain_alt == 0);
+                else {
+                    ok = (chain_alt == 0) ? try_high() : try_low();
+                    if (ok) fused_used_low = (chain_alt != 0);
+                }
+                if (ok) fused_this_layer = true;
+            }
+            // Resolve prev pending — drop if this layer fuses, flush if not.
+            if (pending.active) {
+                if (fused_this_layer) {
+                    udma_w_skipped[pending.layer_idx] = true;
+                    pending.active = false;
+                } else {
+                    flush_pending();
+                }
+            }
+            // v8.22: try non-fused single-tile layout first; fall through to
+            // H-tiled path if input doesn't fit (deeplab_v3_plus has a 2.5 MB
+            // 64x64x320 FP16 avgpool input that busts L1 for the standard
+            // load-then-compute layout).
+            bool tile_mode = false;
+            if (!fused_this_layer) {
+                L1_IN  = 0;
+                L1_OUT = align64(L.in_size);
+                if (uint64_t(L1_OUT) + L.ref_size > L1_BUDGET) {
+                    tile_mode = true;
+                }
+            }
+            prog_start = program.size();
+            if (tile_mode) {
+                // ---- v8.22: H-tiled POOL ----
+                // Output stays fully in L1 (pool typically shrinks tensors);
+                // input is loaded one OH-tile at a time. POOL writes each
+                // tile's output rows directly into the right offset of L1_OUT.
+                const uint32_t per_row_in  =
+                    uint32_t(L.in_w)  * L.in_c  * (L.dtype == DT_INT16x16
+                        || L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8 ? 2u : 1u);
+                const uint32_t per_row_out =
+                    uint32_t(L.out_w) * L.out_c * (L.dtype == DT_INT16x16
+                        || L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8 ? 2u : 1u);
+                const uint64_t safety = 4096;
+                const uint64_t out_total = uint64_t(L.out_h) * per_row_out;
+                if (out_total + safety >= L1_BUDGET) {
+                    std::cerr << "layer " << i << ": pool output (" << out_total
+                              << " B) doesn't fit in L1\n";
+                    return 4;
+                }
+                const uint32_t L1_OUT_t = 0;
+                const uint32_t L1_IN_t  = align64(uint32_t(out_total));
+                const uint64_t in_budget = (uint64_t(L1_BUDGET) - L1_IN_t > safety)
+                                         ? (L1_BUDGET - L1_IN_t - safety) : 0;
+                // tile_oh chosen so worst-case input window fits:
+                //   (tile_oh * s_h + k_h) * per_row_in <= in_budget.
+                int64_t cand = (int64_t(in_budget / per_row_in) - L.k_h)
+                             / std::max<int>(L.s_h, 1);
+                uint32_t tile_oh = uint32_t(std::max<int64_t>(1, cand));
+                tile_oh = std::min(tile_oh, uint32_t(L.out_h));
+                uint8_t prev_tag = 0;
+                uint32_t oh_done = 0;
+                while (oh_done < L.out_h) {
+                    const uint32_t this_oh = std::min<uint32_t>(tile_oh, L.out_h - oh_done);
+                    const int ih_lo_u = int(oh_done) * int(L.s_h) - int(L.p_t);
+                    const int ih_hi_u = int(oh_done + this_oh - 1) * int(L.s_h) + int(L.k_h) - 1 - int(L.p_t);
+                    const int ih_lo = std::max(0, ih_lo_u);
+                    const int ih_hi = std::min(int(L.in_h) - 1, ih_hi_u);
+                    const uint32_t this_in_h    = uint32_t(ih_hi - ih_lo + 1);
+                    const uint32_t tile_in_size = this_in_h * per_row_in;
+                    const uint32_t dram_in_off  = uint32_t(ih_lo) * per_row_in;
+                    const uint8_t  in_tag_t  = alloc_tag();
+                    const uint8_t  pool_tag  = alloc_tag();
+                    program.push_back(make_udma(uint32_t(L.dram_in + dram_in_off),
+                                                L1_IN_t, tile_in_size,
+                                                /*dir*/ 0, in_tag_t, prev_tag));
+                    acc[i].dram_r += tile_in_size;
+                    acc[i].sram_w += tile_in_size;
+                    LayerMeta tile_L = L;
+                    tile_L.in_h  = uint16_t(this_in_h);
+                    tile_L.out_h = uint16_t(this_oh);
+                    tile_L.p_t   = uint8_t((oh_done == 0) ? L.p_t : 0);
+                    tile_L.p_b   = uint8_t((oh_done + this_oh == L.out_h) ? L.p_b : 0);
+                    const uint32_t L1_OUT_tile = L1_OUT_t + uint32_t(oh_done) * per_row_out;
+                    program.push_back(make_pool(tile_L, L1_IN_t, L1_OUT_tile,
+                                                in_tag_t, pool_tag));
+                    acc[i].sram_r += tile_in_size;
+                    acc[i].sram_w += this_oh * per_row_out;
+                    prev_tag = pool_tag;
+                    oh_done += this_oh;
+                }
+                // Final udma_w deferred to pending for source-fusion eligibility.
+                const uint8_t st_tag_t = alloc_tag();
+                Descriptor wd_t = make_udma(L1_OUT_t, L.dram_out, uint32_t(out_total),
+                                            /*dir*/ 1, st_tag_t, prev_tag);
+                pending.active    = true;
+                pending.desc      = wd_t;
+                pending.bytes     = out_total;
+                pending.layer_idx = i;
+                layer_done_tag[i] = st_tag_t;
+                fuse_prev_l1_out_addr   = L1_OUT_t;
+                fuse_prev_l1_out_size   = uint32_t(out_total);
+                fuse_prev_done_tag      = prev_tag;
+                fuse_prev_out_h         = L.out_h;
+                fuse_prev_out_w         = L.out_w;
+                fuse_prev_out_c         = L.out_c;
+                fuse_prev_dtype         = L.dtype;
+                fuse_prev_single_tile   = true;
+                fuse_prev_is_conv_class = true;
+                chain_alt = 1;     // OUT at addr 0 → next layer try high
+                break;
             }
             const uint8_t in_tag  = alloc_tag();
             const uint8_t req_tag = alloc_tag();
             const uint8_t st_tag  = alloc_tag();
-            program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
-                                        /*dir*/ 0, in_tag));
-            program.push_back(make_pool(L, L1_IN, L1_OUT, in_tag, req_tag));
-            program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
-                                        /*dir*/ 1, st_tag, req_tag));
-            acc[i].dram_r += L.in_size;
-            acc[i].sram_w += L.in_size;
+            uint8_t pool_in_tag;
+            if (fused_this_layer) {
+                pool_in_tag = fuse_prev_done_tag;     // input already in L1
+            } else {
+                pool_in_tag = in_tag;
+                program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
+                                            /*dir*/ 0, in_tag));
+                acc[i].dram_r += L.in_size;
+                acc[i].sram_w += L.in_size;
+            }
+            program.push_back(make_pool(L, L1_IN, L1_OUT, pool_in_tag, req_tag));
             acc[i].sram_r += L.in_size;
             acc[i].sram_w += L.ref_size;
-            acc[i].sram_r += L.ref_size;
-            acc[i].dram_w += L.ref_size;
+            // Defer udma_w to pending; resolved by next layer.
+            Descriptor wd = make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                      /*dir*/ 1, st_tag, req_tag);
+            pending.active    = true;
+            pending.desc      = wd;
+            pending.bytes     = L.ref_size;
+            pending.layer_idx = i;
             layer_done_tag[i] = st_tag;
+            // Pool is a single-tile-equivalent CONSUMER for the next layer.
+            fuse_prev_l1_out_addr   = L1_OUT;
+            fuse_prev_l1_out_size   = L.ref_size;
+            fuse_prev_done_tag      = req_tag;          // POOL done = data in L1
+            fuse_prev_out_h         = L.out_h;
+            fuse_prev_out_w         = L.out_w;
+            fuse_prev_out_c         = L.out_c;
+            fuse_prev_dtype         = L.dtype;
+            fuse_prev_single_tile   = true;
+            fuse_prev_is_conv_class = true;
+            if (fused_this_layer) chain_alt = fused_used_low ? 1 : 0;
+            else                  chain_alt = 0;
             break;
         }
         case OK_SOFTMAX: {
@@ -683,35 +916,194 @@ int sc_main(int argc, char* argv[]) {
             break;
         }
         case OK_ADD: {
-            flush_pending();
-            // wgt_b blob = input-B bytes followed by 48-byte ADD params blob.
-            const uint32_t L1_WGT  = 0;          // input-B + params
-            const uint32_t L1_IN   = align64(L.wgt_size);
-            const uint32_t L1_OUT  = align64(L1_IN + L.in_size);
-            if (uint64_t(L1_OUT) + L.ref_size > L1_BUDGET) {
-                std::cerr << "layer " << i << ": ADD exceeds 2 MB L1\n";
-                return 4;
+            // v8.20: ADD fuse — input-A from prev L1_OUT (skip udma_r), input-B
+            // still loads. wgt_b layout: [input-B bytes | 48-byte params].
+            // v8.21: ping-pong allocator (see CONV path).
+            const bool fuse_eligible =
+                fuse_prev_is_conv_class && fuse_prev_single_tile
+                && fuse_prev_dtype == L.dtype
+                && fuse_prev_out_h == L.in_h
+                && fuse_prev_out_w == L.in_w
+                && fuse_prev_out_c == L.in_c;
+            uint32_t L1_WGT, L1_IN, L1_OUT;
+            bool fused_this_layer = false;
+            bool fused_used_low = false;
+            if (fuse_eligible) {
+                L1_IN = fuse_prev_l1_out_addr;
+                const uint32_t in_lo = fuse_prev_l1_out_addr;
+                const uint32_t in_hi = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
+                const uint64_t safety = 4096;
+                auto try_low = [&]() -> bool {
+                    const uint64_t out_addr = 0;
+                    const uint64_t wgt_addr = align64(uint32_t(out_addr + L.ref_size));
+                    const uint64_t top      = align64(uint32_t(wgt_addr + L.wgt_size));
+                    if (top + safety > in_lo) return false;
+                    L1_OUT = uint32_t(out_addr);
+                    L1_WGT = uint32_t(wgt_addr);
+                    return true;
+                };
+                auto try_high = [&]() -> bool {
+                    if (L.ref_size + safety > L1_BUDGET) return false;
+                    const uint64_t out_addr = (uint64_t(L1_BUDGET) - L.ref_size) & ~uint64_t(63);
+                    const uint64_t wgt_addr = align64(in_hi);
+                    const uint64_t wgt_end  = align64(uint32_t(wgt_addr + L.wgt_size));
+                    if (wgt_end + safety > out_addr) return false;
+                    L1_OUT = uint32_t(out_addr);
+                    L1_WGT = uint32_t(wgt_addr);
+                    return true;
+                };
+                bool ok = (chain_alt == 0) ? try_low() : try_high();
+                if (ok) fused_used_low = (chain_alt == 0);
+                else {
+                    ok = (chain_alt == 0) ? try_high() : try_low();
+                    if (ok) fused_used_low = (chain_alt != 0);
+                }
+                if (ok) fused_this_layer = true;
+            }
+            if (pending.active) {
+                if (fused_this_layer) {
+                    udma_w_skipped[pending.layer_idx] = true;
+                    pending.active = false;
+                } else {
+                    flush_pending();
+                }
+            }
+            // v8.22: try non-fused single-tile layout first; if input-A +
+            // input-B + output don't all fit in 2 MB L1, fall through to the
+            // H-tiled path further below (deeplab_v3_plus has 256x256x24 FP16
+            // ADDs = 3 MB per tensor, way over L1 budget).
+            bool tile_mode = false;
+            if (!fused_this_layer) {
+                L1_WGT = 0;          // input-B + params
+                L1_IN  = align64(L.wgt_size);
+                L1_OUT = align64(L1_IN + L.in_size);
+                if (uint64_t(L1_OUT) + L.ref_size > L1_BUDGET) {
+                    tile_mode = true;
+                }
+            }
+            prog_start = program.size();
+            if (tile_mode) {
+                // ---- v8.22: H-tiled ADD ----
+                // L1 layout per tile:
+                //   PARAMS (48 B, loaded once) | IN_A_tile | IN_B_tile | OUT_tile
+                // Each tile is `tile_oh` rows of (W * C * elem) bytes.
+                const uint32_t per_row =
+                    uint32_t(L.in_w) * L.in_c * (L.dtype == DT_INT16x16
+                        || L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8 ? 2u : 1u);
+                const uint64_t safety = 4096;
+                const uint64_t budget = (uint64_t(L1_BUDGET) > 64 + safety)
+                                      ? (L1_BUDGET - 64 - safety) : 0;
+                uint32_t tile_oh = (per_row && 3 * per_row <= budget)
+                                 ? uint32_t(budget / (3 * per_row)) : 0;
+                if (tile_oh < 1) {
+                    std::cerr << "layer " << i << ": ADD per-row " << per_row
+                              << " B > L1 budget — cannot tile\n";
+                    return 4;
+                }
+                tile_oh = std::min(tile_oh, uint32_t(L.in_h));
+                const uint32_t L1_PARAMS_t = 0;
+                const uint32_t L1_IN_A_t   = align64(48);
+                const uint32_t L1_IN_B_t   = align64(L1_IN_A_t + tile_oh * per_row);
+                const uint32_t L1_OUT_t    = align64(L1_IN_B_t + tile_oh * per_row);
+                // Load 48 B params once at top of L1.
+                const uint8_t params_tag = alloc_tag();
+                program.push_back(make_udma(L.dram_wgt + L.wgt_size - 48,
+                                            L1_PARAMS_t, 48,
+                                            /*dir*/ 0, params_tag));
+                acc[i].dram_r += 48;
+                acc[i].sram_w += 48;
+                // Per-tile loop along H.
+                uint8_t prev_st_tag = 0;
+                uint32_t oh_done = 0;
+                while (oh_done < L.in_h) {
+                    const uint32_t this_oh = std::min<uint32_t>(tile_oh, L.in_h - oh_done);
+                    const uint64_t dram_off = uint64_t(oh_done) * per_row;
+                    const uint64_t tile_bytes = uint64_t(this_oh) * per_row;
+                    const uint8_t a_tag = alloc_tag();
+                    const uint8_t b_tag = alloc_tag();
+                    const uint8_t r_tag = alloc_tag();
+                    const uint8_t s_tag = alloc_tag();
+                    program.push_back(make_udma(uint32_t(L.dram_in  + dram_off),
+                                                L1_IN_A_t, uint32_t(tile_bytes),
+                                                /*dir*/ 0, a_tag, prev_st_tag));
+                    program.push_back(make_udma(uint32_t(L.dram_wgt + dram_off),
+                                                L1_IN_B_t, uint32_t(tile_bytes),
+                                                /*dir*/ 0, b_tag));
+                    acc[i].dram_r += 2 * tile_bytes;
+                    acc[i].sram_w += 2 * tile_bytes;
+                    LayerMeta tile_L = L;
+                    tile_L.in_h = uint16_t(this_oh);
+                    tile_L.out_h = uint16_t(this_oh);
+                    program.push_back(make_ewe_add(tile_L, L1_IN_A_t, L1_IN_B_t, L1_OUT_t,
+                                                   L1_PARAMS_t, b_tag, a_tag, r_tag));
+                    acc[i].sram_r += 2 * tile_bytes;
+                    acc[i].sram_w += tile_bytes;
+                    program.push_back(make_udma(L1_OUT_t,
+                                                uint32_t(L.dram_out + dram_off),
+                                                uint32_t(tile_bytes),
+                                                /*dir*/ 1, s_tag, r_tag));
+                    acc[i].sram_r += tile_bytes;
+                    acc[i].dram_w += tile_bytes;
+                    prev_st_tag = s_tag;
+                    oh_done += this_oh;
+                }
+                layer_done_tag[i] = prev_st_tag;
+                // Multi-tile ADD: only the LAST tile's output sits at L1_OUT_t
+                // — full tensor is split across DRAM. NOT a fusion source.
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                chain_alt = 0;
+                break;
             }
             const uint32_t params_l1 = L1_WGT + (L.wgt_size - 48);
             const uint8_t wgt_tag = alloc_tag();
             const uint8_t in_tag  = alloc_tag();
             const uint8_t req_tag = alloc_tag();
             const uint8_t st_tag  = alloc_tag();
+            // Input-B + params always needs udma_r (synth tensor, not chained).
+            // v8.21: when fused via ping-pong, this load can target a region
+            // overlapping prev layer's L1_IN — gate on prev REQUANT done.
             program.push_back(make_udma(L.dram_wgt, L1_WGT, L.wgt_size,
-                                        /*dir*/ 0, wgt_tag));
-            program.push_back(make_udma(L.dram_in,  L1_IN,  L.in_size,
-                                        /*dir*/ 0, in_tag));
+                                        /*dir*/ 0, wgt_tag,
+                                        fused_this_layer ? fuse_prev_done_tag : 0));
+            acc[i].dram_r += L.wgt_size;
+            acc[i].sram_w += L.wgt_size;
+            uint8_t add_in_tag;
+            if (fused_this_layer) {
+                add_in_tag = fuse_prev_done_tag;       // input-A already in L1
+            } else {
+                add_in_tag = in_tag;
+                program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
+                                            /*dir*/ 0, in_tag));
+                acc[i].dram_r += L.in_size;
+                acc[i].sram_w += L.in_size;
+            }
             program.push_back(make_ewe_add(L, L1_IN, L1_WGT, L1_OUT, params_l1,
-                                           wgt_tag, in_tag, req_tag));
-            program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
-                                        /*dir*/ 1, st_tag, req_tag));
-            acc[i].dram_r += L.in_size + L.wgt_size;
-            acc[i].sram_w += L.in_size + L.wgt_size;
+                                           wgt_tag, add_in_tag, req_tag));
             acc[i].sram_r += L.in_size + L.wgt_size;
             acc[i].sram_w += L.ref_size;
-            acc[i].sram_r += L.ref_size;
-            acc[i].dram_w += L.ref_size;
+            // Defer udma_w to pending.
+            Descriptor wd = make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                      /*dir*/ 1, st_tag, req_tag);
+            pending.active    = true;
+            pending.desc      = wd;
+            pending.bytes     = L.ref_size;
+            pending.layer_idx = i;
             layer_done_tag[i] = st_tag;
+            // ADD output is single-tile L1-resident → can source-fuse.
+            fuse_prev_l1_out_addr   = L1_OUT;
+            fuse_prev_l1_out_size   = L.ref_size;
+            fuse_prev_done_tag      = req_tag;          // EWE ADD done = data in L1
+            fuse_prev_out_h         = L.out_h;
+            fuse_prev_out_w         = L.out_w;
+            fuse_prev_out_c         = L.out_c;
+            fuse_prev_dtype         = L.dtype;
+            fuse_prev_single_tile   = true;
+            fuse_prev_is_conv_class = true;
+            if (fused_this_layer) chain_alt = fused_used_low ? 1 : 0;
+            else                  chain_alt = 0;
             break;
         }
         case OK_RESHAPE:
@@ -731,9 +1123,13 @@ int sc_main(int argc, char* argv[]) {
             std::cerr << "unknown op_kind " << L.op_kind << "\n";
             return 3;
         }
-        // v8.13: reset fusion state for any op that wasn't CONV/DWCONV/FC.
-        // CONV/DWCONV/FC branch sets these explicitly above.
-        if (L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC) {
+        // v8.13: reset fusion state for any op that can't be a fusion source.
+        // v8.20: ADD / POOL also produce single-tile L1-resident outputs and
+        // set fuse_prev_* explicitly inside their cases — don't clobber them.
+        // RESHAPE / CONCAT / GATHER / SOFTMAX go to DRAM directly → reset.
+        if (L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC
+            && L.op_kind != OK_ADD
+            && L.op_kind != OK_AVG_POOL && L.op_kind != OK_MAX_POOL) {
             fuse_prev_is_conv_class = false;
             fuse_prev_single_tile   = false;
             fuse_prev_l1_out_size   = 0;

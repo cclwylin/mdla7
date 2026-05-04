@@ -48,10 +48,14 @@ public:
     Host          host;
 
     SC_HAS_PROCESS(Mdla7System);
-    Mdla7System(sc_core::sc_module_name nm)
+    // v8.22: dram_bytes parameterised so test_model can size the DRAM model
+    // to fit the program (deeplab_v3_plus + similar large segmentation models
+    // need >256 MB; default 256 MB segfaults on `sys.dram.write` out-of-bounds).
+    Mdla7System(sc_core::sc_module_name nm,
+                std::size_t dram_bytes = 256 * 1024 * 1024)
       : sc_module(nm),
         l1mesh ("l1mesh"),
-        dram   ("dram"),
+        dram   ("dram", dram_bytes),
         l1mgr  ("l1mgr",    l1mesh, dram),
         udma   ("udma",     l1mgr),
         conv   ("conv",     l1mgr),

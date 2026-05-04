@@ -502,7 +502,9 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             f"<td style='text-align:right'>{int(L.get('cycles_cum',0)):,}</td>" +
             f"<td style='text-align:right'>{util:.1f}%</td>" +
             f"<td style='text-align:right'>{_kb(L.get('dram_r',0))}</td>" +
-            f"<td style='text-align:right'>{_kb(L.get('dram_w',0))}</td>" +
+            (f"<td style='text-align:right;color:#b00020;font-weight:600'>{_kb(L.get('dram_w',0))}</td>"
+             if int(L.get('dram_w', 0) or 0) > 0
+             else f"<td style='text-align:right'>{_kb(L.get('dram_w',0))}</td>") +
             f"<td style='text-align:right'>{_kb(L.get('sram_r',0))}</td>" +
             f"<td style='text-align:right'>{_kb(L.get('sram_w',0))}</td>" +
             pass_cell + "</tr>")
