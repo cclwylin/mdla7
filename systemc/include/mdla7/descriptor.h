@@ -1,0 +1,186 @@
+#pragma once
+
+// MDLA7 descriptor format — see spec §3A.10
+// 64 byte total: 16 byte common header + 48 byte op-specific body union.
+
+#include <cstdint>
+#include <ostream>
+#include <type_traits>
+
+namespace mdla7 {
+
+enum OpClass : uint8_t {
+    OC_CONV    = 0,
+    OC_REQUANT = 1,
+    OC_EWE     = 2,
+    OC_POOL    = 3,
+    OC_UDMA    = 4,
+    OC_NUM     = 5,
+};
+
+enum DType : uint8_t {
+    DT_INT8x4  = 0,
+    DT_INT8x8  = 1,
+    DT_INT16x4 = 2,
+    DT_INT16x8 = 3,
+    DT_INT16x16= 4,
+    DT_FP8     = 8,   // E4M3
+    DT_FP16    = 9,   // E5M10
+    DT_BFP16   = 10,  // E8M7
+};
+
+enum UdmaMode : uint8_t {
+    UM_LINEAR_COPY    = 0,
+    UM_STRIDED_2D     = 1,
+    UM_INDEXED_GATHER = 2,
+    UM_SCATTER_CONCAT = 3,
+    UM_STRIDED_SLICE  = 4,
+};
+
+enum PoolMode : uint8_t {
+    PM_MAX    = 0,
+    PM_AVG    = 1,
+    PM_GLOBAL = 2,
+};
+
+// EWE engine subtypes (v6) — distinguishes softmax vs binary ADD vs other elwise ops.
+// Stored in EweBody._r[0] (see below); avoids needing a new dispatch tag.
+enum EweSubtype : uint8_t {
+    ES_SOFTMAX = 0,
+    ES_ADD     = 1,
+};
+
+// 16 bytes — common header.
+struct DescriptorHeader {
+    uint8_t  op_class_subtype;   // [3:0]=op_class, [7:4]=op_subtype
+    uint8_t  flags;              // bit0 preempt, bit1 chain-src, bit2 chain-sink, bit3 trace
+    uint8_t  dtype;              // DType enum
+    uint8_t  signal_tag;         // 0 = no signal
+    uint8_t  wait_count;         // 0..4
+    uint8_t  wait_tags[4];
+    uint16_t layer_id;
+    uint8_t  _reserved[4];
+
+    OpClass op_class()   const { return static_cast<OpClass>(op_class_subtype & 0xF); }
+    uint8_t op_subtype() const { return (op_class_subtype >> 4) & 0xF; }
+};
+static_assert(sizeof(DescriptorHeader) == 16, "header must be 16 bytes");
+
+// CONV body — 48 bytes.
+struct ConvBody {
+    uint32_t in_addr;
+    uint32_t wgt_addr;
+    uint32_t out_addr;
+    uint16_t in_h, in_w, in_c, out_c;
+    uint8_t  k_h;            // 1..11
+    uint8_t  k_w;            // 1..11
+    uint8_t  stride_dilation;// [1:0]=s_h, [3:2]=s_w, [5:4]=d_h, [7:6]=d_w (enum 0=>1, 1=>2, 2=>4)
+    uint8_t  pad_tb;         // [2:0]=pad_t, [5:3]=pad_b
+    uint8_t  pad_lr;         // [2:0]=pad_l, [5:3]=pad_r
+    uint8_t  _r0;
+    uint16_t group;
+    uint16_t cluster_mask;   // 16 cluster active bits
+    int16_t  in_pad_value;   // v7: padding value (= zp_in for asymmetric int8 input; 0 = TFLite-default)
+    uint32_t bias_addr;          // 0 = no bias
+    uint32_t scale_lut_addr;
+    uint16_t scale_count;
+    uint8_t  _r2[6];
+};
+static_assert(sizeof(ConvBody) == 48, "ConvBody must be 48 bytes");
+
+struct RequantBody {
+    uint32_t in_addr, out_addr;
+    uint16_t n, h, w, c;            // c = this dispatch's OC slice (== scale_count if no OC tile)
+    uint32_t scale_lut_addr;
+    uint16_t scale_count;           // total OC channels packed in the params blob (i.e. layer's full OC)
+    uint8_t  per_channel_flag;
+    uint8_t  shift_global;
+    int16_t  zp_global;
+    uint16_t oc_start;              // v7: OC-tile offset into params blob (0 = no tiling)
+    uint16_t out_w_layer;           // v7: layer's full OW (for indexing into per-pixel corr map)
+    uint16_t oh_start;              // v7: OH-tile offset (global oh of this tile's first row)
+    uint32_t corr_addr;             // v7: per-pixel correction map (0 = none)
+    uint8_t  corr_per_oc;           // v7: 1 = corr is shape [OH, OW, OC_layer] (dwconv); 0 = [OH, OW]
+    uint8_t  _r[11];
+};
+static_assert(sizeof(RequantBody) == 48, "RequantBody must be 48 bytes");
+
+struct EweBody {
+    uint32_t in_a_addr, in_b_addr, out_addr;     // in_b_addr=0 => unary op
+    uint16_t n, h, w, c;
+    uint8_t  broadcast_axes;
+    uint8_t  reduce_axes;
+    int16_t  scalar_imm;
+    uint32_t lut_addr;
+    uint8_t  subtype;                            // v6: EweSubtype (0=softmax, 1=add)
+    uint8_t  _r[19];
+};
+static_assert(sizeof(EweBody) == 48, "EweBody must be 48 bytes");
+
+struct PoolBody {
+    uint32_t in_addr, out_addr;
+    uint16_t in_n, in_h, in_w, in_c;
+    uint16_t out_n, out_h, out_w, out_c;
+    uint8_t  mode;            // PoolMode
+    uint8_t  k_h, k_w;
+    uint8_t  stride;          // [1:0]=s_h, [3:2]=s_w (enum 0=>1, 1=>2)
+    uint8_t  pad_tb;          // [2:0]=pad_t, [5:3]=pad_b
+    uint8_t  pad_lr;          // [2:0]=pad_l, [5:3]=pad_r
+    uint8_t  count_include_pad;
+    uint8_t  _r[17];
+};
+static_assert(sizeof(PoolBody) == 48, "PoolBody must be 48 bytes");
+
+struct UdmaBody {
+    uint8_t  mode;            // UdmaMode
+    uint8_t  direction;       // 0: DRAM->L1, 1: L1->DRAM
+    uint16_t _r0;
+    uint32_t src_addr;
+    uint32_t dst_addr;
+    uint32_t length;          // bytes
+    uint32_t src_stride;
+    uint32_t dst_stride;
+    uint16_t num_chunks;
+    uint16_t _r1;
+    uint32_t idx_table_addr;
+    uint16_t slice_begin[4];
+    uint16_t slice_end[4];
+};
+static_assert(sizeof(UdmaBody) == 48, "UdmaBody must be 48 bytes");
+
+union DescriptorBody {
+    ConvBody    conv;
+    RequantBody requant;
+    EweBody     ewe;
+    PoolBody    pool;
+    UdmaBody    udma;
+    uint8_t     raw[48];
+};
+static_assert(sizeof(DescriptorBody) == 48, "body union must be 48 bytes");
+
+struct Descriptor {
+    DescriptorHeader hdr;
+    DescriptorBody   body;
+};
+static_assert(sizeof(Descriptor) == 64, "Descriptor must be 64 bytes");
+
+// SystemC's sc_fifo<T> requires operator<< for sc_trace. We don't actually
+// trace these aggregate types, so just provide stream stubs.
+inline std::ostream& operator<<(std::ostream& os, const DescriptorBody&) {
+    return os << "<DescriptorBody>";
+}
+inline std::ostream& operator<<(std::ostream& os, const Descriptor& d) {
+    return os << "<Descriptor op_class=" << int(d.hdr.op_class()) << ">";
+}
+
+// Address-space helpers — see spec §3A.10
+constexpr uint32_t L1MESH_BASE  = 0x0000'0000;
+constexpr uint32_t L1MESH_END   = 0x001F'FFFF;          // 2 MB (spec §3A.10)
+constexpr uint32_t L1MESH_BYTES = L1MESH_END + 1;
+constexpr uint32_t DRAM_BASE    = 0x1000'0000;
+constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;          // 4 GB high half
+
+inline bool addr_in_l1mesh(uint32_t a) { return a <= L1MESH_END; }
+inline bool addr_in_dram  (uint32_t a) { return a >= DRAM_BASE; }
+
+} // namespace mdla7

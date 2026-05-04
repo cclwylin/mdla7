@@ -1,0 +1,16 @@
+# MDLA7 SystemC simulator — Python dependencies for run_model.py / extract_conv.py
+#
+# Install with:
+#     pip install -r systemc/requirements.txt
+#
+# - Linux: prefer tflite-runtime (small ~5 MB).
+# - macOS: tflite-runtime has no wheel; use full tensorflow.
+
+numpy>=1.20
+matplotlib>=3.5
+
+# TFLite parser (needed for compile_model.py to read .tflite flatbuffers).
+tflite>=2.10
+
+tflite-runtime ; sys_platform == "linux"
+tensorflow     ; sys_platform == "darwin"
