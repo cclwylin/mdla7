@@ -35,6 +35,7 @@ enum UdmaMode : uint8_t {
     UM_INDEXED_GATHER = 2,
     UM_SCATTER_CONCAT = 3,
     UM_STRIDED_SLICE  = 4,
+    UM_DEPTH_TO_SPACE = 5,
 };
 
 enum PoolMode : uint8_t {
@@ -44,10 +45,15 @@ enum PoolMode : uint8_t {
 };
 
 // EWE engine subtypes (v6) — distinguishes softmax vs binary ADD vs other elwise ops.
-// Stored in EweBody._r[0] (see below); avoids needing a new dispatch tag.
+// Stored in EweBody.subtype; avoids needing a new dispatch tag.
+// v8.30: extended with MUL / SUB binary ops + HARD_SWISH / GELU unary activations.
 enum EweSubtype : uint8_t {
-    ES_SOFTMAX = 0,
-    ES_ADD     = 1,
+    ES_SOFTMAX    = 0,
+    ES_ADD        = 1,
+    ES_MUL        = 2,    // element-wise binary multiply
+    ES_SUB        = 3,    // element-wise binary subtract
+    ES_HARD_SWISH = 4,    // unary: x * relu6(x+3) / 6
+    ES_GELU       = 5,    // unary: x * Φ(x), tanh-approximation
 };
 
 // 16 bytes — common header.

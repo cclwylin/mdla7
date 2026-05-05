@@ -6,6 +6,7 @@
 
 #include <systemc>
 #include <array>
+#include <deque>
 #include <iostream>
 #include <queue>
 #include "mdla7/descriptor.h"
@@ -43,44 +44,139 @@ SC_MODULE(CommandEngine) {
     }
 
     void dispatch() {
+        std::deque<Descriptor> pending;
+        constexpr size_t LOOKAHEAD_LIMIT = 64;   // stay well below 8-bit tag wrap distance
         while (true) {
-            Descriptor d = desc_in.read();
-            // wait on tags (AND-of-all). Use a notify event so we don't
-            // burn cycles polling — keeps sc_time_stamp accurate.
-            for (int w = 0; w < d.hdr.wait_count; ++w) {
-                uint8_t tg = d.hdr.wait_tags[w];
-                while (!tag_done[tg]) wait(tag_changed);
+            while (desc_in.num_available() > 0 && pending.size() < LOOKAHEAD_LIMIT) {
+                Descriptor d = desc_in.read();
+                // Stream descriptors may issue out of order, so reserve their
+                // signal tag as soon as they enter the lookahead window.
+                // Normal descriptors issue strictly in order; reserving their
+                // tags here is unsafe across 8-bit tag wrap because an older
+                // completion of the same tag can arrive while the newer
+                // descriptor is merely sitting in pending. Reserve those at
+                // issue time instead.
+                if ((d.hdr.flags & 0x10) && d.hdr.signal_tag)
+                    tag_done[d.hdr.signal_tag] = false;
+                pending.push_back(d);
             }
 
-            std::cout << "[CmdEng] dispatch op_class=" << int(d.hdr.op_class())
-                      << " layer_id=" << d.hdr.layer_id
-                      << " signal_tag=" << int(d.hdr.signal_tag)
-                      << " wait_count=" << int(d.hdr.wait_count) << "\n";
-
-            // mark signal_tag pending until done report comes back
-            if (d.hdr.signal_tag) {
-                tag_done[d.hdr.signal_tag] = false;
+            auto best = pending.end();
+            int best_prio = 999;
+            bool tail_waiting = false;
+            for (auto it = pending.begin(); it != pending.end(); ++it) {
+                // Only descriptors explicitly marked as stream-pipeline work
+                // may be bypassed. Normal descriptors keep in-order issue
+                // because many schedules reuse fixed L1 regions.
+                if (!(it->hdr.flags & 0x10)) {
+                    if (it == pending.begin() && waits_ready(*it)) {
+                        best = it;
+                    }
+                    break;
+                }
+                if (!waits_ready(*it)) {
+                    if (stream_tail_priority(*it))
+                        tail_waiting = true;
+                    continue;
+                }
+                if (tail_waiting && !allowed_during_tail_wait(*it))
+                    continue;
+                const int prio = stream_issue_priority(*it);
+                if (prio < best_prio) {
+                    best = it;
+                    best_prio = prio;
+                    if (prio == 0) break;
+                }
             }
-            // queue this task's signal_tag for the engine (FIFO pairing).
-            pending_tags[d.hdr.op_class()].push(d.hdr.signal_tag);
 
-            switch (d.hdr.op_class()) {
-            case OC_CONV:
-                if (conv_dtype_latch) *conv_dtype_latch = d.hdr.dtype;
-                conv_cfg_out.write(d.body); break;
-            case OC_REQUANT:
-                if (req_dtype_latch) *req_dtype_latch = d.hdr.dtype;
-                requant_cfg_out.write(d.body); break;
-            case OC_EWE:
-                if (ewe_dtype_latch) *ewe_dtype_latch = d.hdr.dtype;
-                ewe_cfg_out.write(d.body); break;
-            case OC_POOL:
-                if (pool_dtype_latch) *pool_dtype_latch = d.hdr.dtype;
-                pool_cfg_out.write(d.body); break;
-            case OC_UDMA:   udma_cfg_out.write(d.body); break;
-            default:
-                std::cout << "[CmdEng] unknown op_class\n"; break;
+            bool issued = false;
+            if (best != pending.end()) {
+                issue(*best);
+                pending.erase(best);
+                issued = true;
             }
+            if (issued) continue;
+
+            if (pending.empty())
+                wait(desc_in.data_written_event());
+            else
+                wait(desc_in.data_written_event() | tag_changed);
+        }
+    }
+
+    bool waits_ready(const Descriptor& d) const {
+        for (int w = 0; w < d.hdr.wait_count; ++w) {
+            uint8_t tg = d.hdr.wait_tags[w];
+            if (!tag_done[tg]) return false;
+        }
+        return true;
+    }
+
+    int stream_issue_priority(const Descriptor& d) const {
+        if (stream_tail_priority(d)) return 0;
+        switch (d.hdr.op_class()) {
+        case OC_EWE:
+            // Launch EWE as soon as its tile is ready, then let later tile
+            // CONV/REQUANT run underneath it.
+            return 1;
+        case OC_UDMA:
+            // D2S and DRAM->L1 loads feed compute; final stores are lowest
+            // priority so they don't block the next tile's front-end work.
+            return (d.body.udma.direction == 0) ? 2 : 5;
+        case OC_CONV:    return 3;
+        case OC_REQUANT: return 4;
+        case OC_POOL:    return 4;
+        default:         return 5;
+        }
+    }
+
+    bool stream_tail_priority(const Descriptor& d) const {
+        return (d.hdr.flags & 0x20) != 0;
+    }
+
+    bool allowed_during_tail_wait(const Descriptor& d) const {
+        // Let later slots fetch their data while an older tile waits for its
+        // D2S/EWE tail. Also allow a shallow front of the next slot's
+        // CONV/REQUANT chain, leaving the deeper CONV work to overlap with
+        // EWE once the tail becomes ready.
+        if (d.hdr.op_class() == OC_UDMA && d.body.udma.direction == 0)
+            return true;
+        if ((d.hdr.op_class() == OC_CONV || d.hdr.op_class() == OC_REQUANT)
+            && d.hdr.layer_id <= 2)
+            return true;
+        return false;
+    }
+
+    void issue(const Descriptor& d) {
+        std::cout << "[CmdEng] dispatch op_class=" << int(d.hdr.op_class())
+                  << " layer_id=" << d.hdr.layer_id
+                  << " signal_tag=" << int(d.hdr.signal_tag)
+                  << " wait_count=" << int(d.hdr.wait_count) << "\n";
+
+        // Stream signal tags were marked pending when the descriptor entered
+        // the lookahead window. Normal in-order descriptors are reserved here
+        // to avoid corrupting tag state across 8-bit wrap.
+        if (!(d.hdr.flags & 0x10) && d.hdr.signal_tag)
+            tag_done[d.hdr.signal_tag] = false;
+        // queue this task's signal_tag for the engine (FIFO pairing).
+        pending_tags[d.hdr.op_class()].push(d.hdr.signal_tag);
+
+        switch (d.hdr.op_class()) {
+        case OC_CONV:
+            if (conv_dtype_latch) *conv_dtype_latch = d.hdr.dtype;
+            conv_cfg_out.write(d.body); break;
+        case OC_REQUANT:
+            if (req_dtype_latch) *req_dtype_latch = d.hdr.dtype;
+            requant_cfg_out.write(d.body); break;
+        case OC_EWE:
+            if (ewe_dtype_latch) *ewe_dtype_latch = d.hdr.dtype;
+            ewe_cfg_out.write(d.body); break;
+        case OC_POOL:
+            if (pool_dtype_latch) *pool_dtype_latch = d.hdr.dtype;
+            pool_cfg_out.write(d.body); break;
+        case OC_UDMA:   udma_cfg_out.write(d.body); break;
+        default:
+            std::cout << "[CmdEng] unknown op_class\n"; break;
         }
     }
 

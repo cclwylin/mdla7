@@ -8,12 +8,21 @@
 //       lane).  16 banks × 16 byte = 256 B / cycle peak per direction
 //       (matches spec §3.2 L1_Manager↔L1Mesh = 16 R + 16 W lanes).
 //
-// v2.3: DRAM models LPDDR6 row-hit / row-miss latency.
-//       Bandwidth: 32 byte / cycle (one LPDDR6 channel @ 1 GHz).
-//       Page miss penalty: 30 cycles (precharge + activate).
-// v3.1: + DRAM refresh — every 7800 ns inject 100 cycles of stall.
-//       Implemented by snapping the scheduling cursor forward when crossing
-//       a refresh boundary.
+// v2.3: DRAM models LPDDR-class row-hit / row-miss latency.
+// v3.1: + DRAM refresh — periodic stall when crossing a refresh boundary.
+// v8.25: spec frequency bump to 1.9 GHz + DRAM dual-channel LPDDR5X-10667.
+//        Bandwidth math at 1.9 GHz, dual x32:
+//          10.667 Gbps/pin × 32 pins × 2 ch / 8 = 85.3 GB/s
+//          85.3 GB/s ÷ 1.9 G cycle/s ≈ 44.9 → BYTES_PER_CYCLE = 48
+//        Row-miss tRP+tRCD ≈ 26 ns × 1.9 GHz ≈ 50 cycles (LPDDR5 tighter
+//        than LPDDR6's 30-cyc baseline at 1 GHz).
+//        Refresh: tREFI ≈ 3.9 µs × 1.9 GHz = 7410 cycles → keep 7800 (close
+//        enough; sim cycle scale is abstract — what matters is the ratio
+//        REFRESH_STALL/REFRESH_PERIOD ≈ 200/7800 = 2.6%, matching real
+//        LPDDR5 tRFC/tREFI overhead).
+// v8.32: L1Mesh SRAM runs at 1.3 GHz while the simulator cycle axis remains
+//        core-clock based at 1.9 GHz. One SRAM beat therefore costs
+//        1.9 / 1.3 core cycles.
 
 #include <systemc>
 #include <cstdint>
@@ -46,6 +55,8 @@ private:
     // all 16 banks → 256 B/cycle peak (matches spec §3.2).
     static constexpr unsigned BANK_STRIDE     = 16;
     static constexpr unsigned BYTES_PER_CYCLE = 16;    // per-bank AXI 128b lane
+    static constexpr double   CORE_CLOCK_GHZ  = 1.9;
+    static constexpr double   SRAM_CLOCK_GHZ  = 1.3;
 
     static bool in_process() {
         return sc_core::sc_get_current_process_handle().valid();
@@ -64,8 +75,9 @@ private:
             uint32_t bank = (a / BANK_STRIDE) % N_BANKS;
             uint32_t next_stripe = ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
             uint32_t chunk = std::min(end, next_stripe) - a;
+            const double beats = double((chunk + BYTES_PER_CYCLE - 1) / BYTES_PER_CYCLE);
             const sc_core::sc_time access(
-                double((chunk + BYTES_PER_CYCLE - 1) / BYTES_PER_CYCLE),
+                beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
                 sc_core::SC_NS);
             const sc_core::sc_time start =
                 (bank_finish[bank] > now) ? bank_finish[bank] : now;
@@ -103,15 +115,16 @@ public:
 private:
     static constexpr uint32_t ROW_BYTES        = 8 * 1024;   // 8 KB row
     static constexpr uint32_t N_BANKS          = 16;
-    // v8.11: spec bump from 1×LPDDR6 (32 B/cyc) to dual-channel LPDDR6
-    // (64 B/cyc).  Halves DRAM-bound layer time without changing the row /
-    // refresh model.  Single-channel was the v0 baseline and undersized for
-    // the 65,536 MAC peak compute; 64 B/cyc better matches what a
-    // mobile-class NPU actually ships with (e.g., Apple A-series, Tegra X2).
-    static constexpr unsigned BYTES_PER_CYCLE  = 64;
-    static constexpr unsigned ROW_MISS_PENALTY = 30;          // cycles
-    static constexpr unsigned REFRESH_PERIOD   = 7800;        // ns (~ tREFI / 8)
-    static constexpr unsigned REFRESH_STALL    = 100;         // cycles per refresh
+    // v8.25: dual-channel LPDDR5X-10667 @ 1.9 GHz core clock.
+    //   85.3 GB/s ÷ 1.9 G cyc/s = 44.9 B/cyc → BYTES_PER_CYCLE = 48.
+    //   tRP+tRCD ≈ 26 ns at 1.9 GHz = ~50 cycles.
+    //   Refresh tuned for LPDDR5 tRFC/tREFI ratio.
+    // (v8.11 LPDDR6 baseline at 1 GHz was 64 B/cyc + 30 cyc miss + 100 cyc
+    //  refresh-stall; replaced here to reflect the new spec.)
+    static constexpr unsigned BYTES_PER_CYCLE  = 48;
+    static constexpr unsigned ROW_MISS_PENALTY = 50;          // cycles
+    static constexpr unsigned REFRESH_PERIOD   = 7800;        // cycles (~ tREFI / 8)
+    static constexpr unsigned REFRESH_STALL    = 200;         // cycles per refresh
 
     static bool in_process() {
         return sc_core::sc_get_current_process_handle().valid();

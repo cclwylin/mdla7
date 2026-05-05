@@ -32,7 +32,9 @@ inline uint32_t decode_stride(uint8_t enc) {
 // Cycle count via bit-mult invariant (spec §5.3 v1):
 //   cycle = ceil(MAC_total * a_bits * b_bits / 1,048,576) + tile_fill
 inline uint64_t conv_cycles(const ConvBody& c, DType dtype, uint64_t out_count) {
-    uint64_t mac_total = uint64_t(c.k_h) * c.k_w * c.in_c * out_count;
+    const uint32_t group = c.group ? c.group : 1;
+    const uint32_t in_per_group = c.in_c / group;
+    uint64_t mac_total = uint64_t(c.k_h) * c.k_w * in_per_group * out_count;
     uint64_t a, b;
     switch (dtype) {
         case DT_INT8x4:   a = 8;  b = 4;  break;
@@ -94,9 +96,13 @@ SC_MODULE(ConvEngine) {
                       << "  dtype=" << int(dt) << "\n";
 
             if (dt == DT_INT8x8) {
-                compute_int<int8_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);
+                compute_int<int8_t, int8_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);
             } else if (dt == DT_INT16x16) {
-                compute_int<int16_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);
+                compute_int<int16_t, int16_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);
+            } else if (dt == DT_INT16x8) {
+                // v8.27: hybrid INT16x8 — int16 activations, int8 weights
+                // (TFLite "16x8 quantization", e.g. esrgan_int16/unet_int16).
+                compute_int<int16_t, int8_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);
             } else if (is_fp_dtype(dt)) {
                 // v8: FP16 / BFP16 / FP8 path.  Internally we accumulate in
                 // FP32; weights and activations are stored as FP32 in DRAM/L1
@@ -129,8 +135,9 @@ SC_MODULE(ConvEngine) {
     }
 
     // v1.3 + v4.1: stream int32 partial sums into chain[oc % 16] in NHWC order.
-    // Templated on element type so int8 and int16 share the same code path.
-    template <typename T>
+    // v8.27: split activation and weight types so INT16x8 hybrid (int16 act,
+    // int8 wgt) works alongside the existing INT8×8 / INT16×16 paths.
+    template <typename T_a, typename T_w>
     void compute_int(const ConvBody& c,
                      uint32_t s_h, uint32_t s_w,
                      uint32_t pad_t, uint32_t pad_l,
@@ -144,10 +151,10 @@ SC_MODULE(ConvEngine) {
         // the FULL kernel sum_w) becomes correct at boundaries.
         const int64_t pad_v = int64_t(c.in_pad_value);
 
-        std::vector<T> in_buf (uint64_t(c.in_h) * c.in_w * c.in_c);
-        std::vector<T> wgt_buf(weight_elems);
-        l1mgr.read(c.in_addr,  in_buf .data(), in_buf .size() * sizeof(T));
-        l1mgr.read(c.wgt_addr, wgt_buf.data(), wgt_buf.size() * sizeof(T));
+        std::vector<T_a> in_buf (uint64_t(c.in_h) * c.in_w * c.in_c);
+        std::vector<T_w> wgt_buf(weight_elems);
+        l1mgr.read(c.in_addr,  in_buf .data(), in_buf .size() * sizeof(T_a));
+        l1mgr.read(c.wgt_addr, wgt_buf.data(), wgt_buf.size() * sizeof(T_w));
 
         for (uint32_t oh = 0; oh < out_h; ++oh)
         for (uint32_t ow = 0; ow < out_w; ++ow)
@@ -176,8 +183,11 @@ SC_MODULE(ConvEngine) {
             if (chain_out[lane]) chain_out[lane]->write(psum);
         }
 
+        const char* tname =
+            (sizeof(T_a) == 2 && sizeof(T_w) == 2) ? "INT16x16" :
+            (sizeof(T_a) == 2 && sizeof(T_w) == 1) ? "INT16x8"  : "INT8x8";
         std::cout << "[CONV] pushed " << uint64_t(out_h) * out_w * c.out_c
-                  << " psums to chain (" << (sizeof(T) == 2 ? "INT16" : "INT8") << ")\n";
+                  << " psums to chain (" << tname << ")\n";
     }
 
     // v8 / v8.10: FP path. Storage is FP16 (2 byte/elem); compute runs in FP32

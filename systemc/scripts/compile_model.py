@@ -11,7 +11,7 @@ Blob layout (little-endian):
 
   Header (16 byte):
     uint32 magic = 'MDL7' (0x374C444D)
-    uint32 version = 2
+    uint32 version = 3
     uint32 num_layers
     uint32 data_offset           -- byte offset to start of data section
 
@@ -24,6 +24,12 @@ Blob layout (little-endian):
     uint32 in_size,  wgt_size,  ref_size   -- bytes
     uint32 in_off,   wgt_off,   ref_off    -- offsets in DATA section
     uint32 _reserved[2]
+
+  GraphMeta[num_layers] (32 byte each, v3):
+    int32 input0_tensor, input1_tensor, output_tensor
+    int32 producer0_layer, producer1_layer
+    int32 first_consumer_layer, last_consumer_layer
+    int32 consumer_count
 
   Data:
     inputs (concatenated)
@@ -42,24 +48,33 @@ from pathlib import Path
 import numpy as np
 
 
-MAGIC, VERSION = 0x374C444D, 2
+MAGIC, VERSION = 0x374C444D, 3
 HEADER_FMT     = "<IIII"                # 16 byte
 HEADER_SIZE    = struct.calcsize(HEADER_FMT)
 LAYER_FMT      = "<HHHHHHBBBBBBBBIIIIIIIIIHHHh"   # 64 byte (last short = zp_in_eff)
 LAYER_SIZE     = struct.calcsize(LAYER_FMT)
 assert LAYER_SIZE == 64, f"LayerMeta size mismatch: {LAYER_SIZE}"
+GRAPH_META_FMT  = "<iiiiiiii"           # 32 byte tensor-level producer/consumer sidecar
+GRAPH_META_SIZE = struct.calcsize(GRAPH_META_FMT)
+assert GRAPH_META_SIZE == 32, f"GraphMeta size mismatch: {GRAPH_META_SIZE}"
+UINT32_MAX     = (1 << 32) - 1
 
 # op_kind enum — must mirror C++ in test_model.cpp
-OP_CONV     = 0
-OP_DWCONV   = 1
-OP_AVG_POOL = 2
-OP_MAX_POOL = 3
-OP_SOFTMAX  = 4
-OP_RESHAPE  = 5
-OP_FC       = 6           # FC mapped to 1x1 conv but displayed separately
-OP_ADD      = 7           # element-wise binary add (residual / SE)
-OP_CONCAT   = 8           # channel concat (Inception/DenseNet branch merge)
-OP_GATHER   = 9           # indexed lookup (BERT embeddings, audio mel-bins)
+OP_CONV       = 0
+OP_DWCONV     = 1
+OP_AVG_POOL   = 2
+OP_MAX_POOL   = 3
+OP_SOFTMAX    = 4
+OP_RESHAPE    = 5
+OP_FC         = 6         # FC mapped to 1x1 conv but displayed separately
+OP_ADD        = 7         # element-wise binary add (residual / SE)
+OP_CONCAT     = 8         # channel concat (Inception/DenseNet branch merge)
+OP_GATHER     = 9         # indexed lookup (BERT embeddings, audio mel-bins)
+OP_MUL        = 10        # v8.30: element-wise binary mul (mobilenet_v3 SE gate)
+OP_SUB        = 11        # v8.30: element-wise binary sub (transformer attention)
+OP_HARD_SWISH = 12        # v8.30: x * relu6(x+3) / 6 (mobilenet_v3, 21 in fp16)
+OP_GELU       = 13        # v8.30: tanh-approx GELU (transformer activations)
+OP_D2SPACE    = 14        # v8.32: DEPTH_TO_SPACE / pixel shuffle, UDMA layout op
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -74,10 +89,15 @@ DT_BFP16    = 10
 OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_AVG_POOL:"avgpool", OP_MAX_POOL:"maxpool",
            OP_SOFTMAX:"softmax", OP_RESHAPE:"reshape",
-           OP_FC:     "     fc",
-           OP_ADD:    "    add",
-           OP_CONCAT: " concat",
-           OP_GATHER: " gather"}
+           OP_FC:        "     fc",
+           OP_ADD:       "    add",
+           OP_CONCAT:    " concat",
+           OP_GATHER:    " gather",
+           OP_MUL:       "    mul",
+           OP_SUB:       "    sub",
+           OP_HARD_SWISH:"h_swsh",
+           OP_GELU:      "   gelu",
+           OP_D2SPACE:   "d2spac"}
 
 
 def _load_interpreter(path: str):
@@ -146,7 +166,10 @@ SUPPORTED_OPS = ("CONV_2D", "DEPTHWISE_CONV_2D",
                  "FULLY_CONNECTED",
                  "AVERAGE_POOL_2D", "MAX_POOL_2D",
                  "SOFTMAX", "RESHAPE",
-                 "ADD", "CONCATENATION", "GATHER")
+                 "ADD", "CONCATENATION", "GATHER",
+                 # v8.30
+                 "MUL", "SUB", "HARD_SWISH", "GELU", "MEAN",
+                 "DEPTH_TO_SPACE")
 
 
 def list_supported_ops(interp):
@@ -190,12 +213,20 @@ def saturating_doubling_high_mul_np(a, b):
 
 
 def rounding_divide_by_pot_np(x, exponent):
+    # v8.30: upcast to int64 internally — for SUB on tensors with very
+    # asymmetric scale ratios (e.g. sam_quant's int8 SUB whose mq_b shift
+    # produces right_shift=33), the int32 mask overflows. int64 covers all
+    # plausible shifts (QuantizeMultiplier emits exponents bounded by float
+    # range). Clamp at 62 to stay safely below int64 width.
     if exponent <= 0:
         return x
-    mask = (1 << exponent) - 1
-    remainder = x & mask
-    threshold = (mask >> 1) + np.where(x < 0, 1, 0).astype(x.dtype)
-    return (x >> exponent) + np.where(remainder > threshold, 1, 0).astype(x.dtype)
+    e = min(int(exponent), 62)
+    x64 = x.astype(np.int64)
+    mask = (1 << e) - 1
+    remainder = x64 & mask
+    threshold = (mask >> 1) + np.where(x64 < 0, 1, 0).astype(np.int64)
+    out64 = (x64 >> e) + np.where(remainder > threshold, 1, 0).astype(np.int64)
+    return out64.astype(np.int32)
 
 
 def multiply_by_quantized_multiplier_np(x, mult, shift):
@@ -220,37 +251,35 @@ def conv_int8_ref(act_i8, wgt_i8, s_h, s_w, pad, group=1, pad_value=0):
 
     v7: pad_value (= zp_in_eff for asymmetric int8 input) replaces the
     previous "skip OOB" behaviour, so the bias_eff fold matches TFLite at
-    boundaries even when zp_in != 0."""
+    boundaries even when zp_in != 0.
+
+    v8.25: vectorised over (oh, ow) — old Python `for oh: for ow:` triple
+    loop dispatched OH*OW*Kh*Kw small einsums (~58M for xlsr_quant's
+    360×640 conv layers, ~10 min compile time). Now we loop only (kh, kw)
+    and emit one big einsum per kernel position over the full OH×OW grid.
+    np.pad with constant_values=pad_value handles boundaries (no manual
+    OOB skip / pad_w_per_kk dance). Order-independent (INT add is
+    associative) so this stays bit-identical to the old reference."""
     H, W, Cin = act_i8.shape
     OC, K_h, K_w, in_per_group = wgt_i8.shape
     out_per_group = OC // group
     pT, pB, pL, pR = pad
     OH = (H + pT + pB - K_h) // s_h + 1
     OW = (W + pL + pR - K_w) // s_w + 1
-    out = np.zeros((OH, OW, OC), dtype=np.int64)
-    a = act_i8.astype(np.int64)
-    w = wgt_i8.astype(np.int64).reshape(group, out_per_group, K_h, K_w, in_per_group)
     pad_const = int(pad_value)
-    pad_tile_per_kk = None
-    if pad_const != 0:
-        # Precompute the kernel-position contribution from a fully-padded slot:
-        #   pad_const * Σ_ic w[g, oc, kh, kw, ic]   (per (group, out_per_group, kh, kw))
-        pad_w_per_kk = pad_const * w.sum(axis=4)            # [g, out_per_group, K_h, K_w]
-    for oh in range(OH):
-        for ow in range(OW):
-            tile = np.zeros((group, out_per_group), dtype=np.int64)
-            for kh in range(K_h):
-                ih = oh * s_h + kh - pT
-                ih_ok = (0 <= ih < H)
-                for kw in range(K_w):
-                    iw = ow * s_w + kw - pL
-                    iw_ok = (0 <= iw < W)
-                    if ih_ok and iw_ok:
-                        a_in = a[ih, iw].reshape(group, in_per_group)
-                        tile += np.einsum("gi,goi->go", a_in, w[:, :, kh, kw, :])
-                    elif pad_const != 0:
-                        tile += pad_w_per_kk[:, :, kh, kw]
-            out[oh, ow] = tile.flatten()
+    a_pad = np.pad(act_i8.astype(np.int64),
+                   ((pT, pB), (pL, pR), (0, 0)),
+                   mode="constant", constant_values=pad_const)
+    w = wgt_i8.astype(np.int64).reshape(group, out_per_group, K_h, K_w, in_per_group)
+    out = np.zeros((OH, OW, group, out_per_group), dtype=np.int64)
+    for kh in range(K_h):
+        for kw in range(K_w):
+            # Strided view of (OH, OW, Cin) for kernel position (kh, kw).
+            in_slice = a_pad[kh:kh + OH * s_h:s_h, kw:kw + OW * s_w:s_w, :]
+            in_slice = in_slice.reshape(OH, OW, group, in_per_group)
+            # (OH, OW, G, Ig) × (G, Opg, Ig) → (OH, OW, G, Opg).
+            out += np.einsum("hwgi,gci->hwgc", in_slice, w[:, :, kh, kw, :])
+    out = out.reshape(OH, OW, OC)
     return np.clip(out, -(1 << 31), (1 << 31) - 1).astype(np.int32)
 
 
@@ -324,6 +353,14 @@ def _infer_shapes(fb, model, sg):
                     out_shape = (1, 1, wgt_sh[0])
             elif op_name == "RESHAPE":
                 out_shape = _to_hwc(_tensor_shape(sg.Tensors(op.Outputs(0))))
+            elif op_name == "DEPTH_TO_SPACE":
+                try:
+                    d2s = fb.DepthToSpaceOptions(); d2s.Init(opt_table.Bytes, opt_table.Pos)
+                    b = int(d2s.BlockSize())
+                except Exception:
+                    osh = _to_hwc(_tensor_shape(sg.Tensors(op.Outputs(0))))
+                    b = max(1, osh[0] // max(H, 1))
+                out_shape = (H * b, W * b, C // (b * b))
             elif op_name == "CONCATENATION":
                 # Concat along channel dim by default.
                 total_c = 0
@@ -487,15 +524,88 @@ SOFTMAX_LUT = np.array([
 
 
 def softmax_int8_ref(logits_i8):
-    """Deterministic INT8 softmax — must match softmax_int8() in C++."""
-    flat = logits_i8.reshape(-1).astype(np.int32)
-    max_v = int(flat.max())
-    diff = np.clip(max_v - flat, 0, 255)
+    """Deterministic INT8 softmax over the last axis.
+
+    Must match test_model.cpp's row-wise EWE dispatch: each H×W position is
+    sent to softmax_int8() as one contiguous C-vector.
+    """
+    x = logits_i8.astype(np.int32)
+    max_v = np.max(x, axis=-1, keepdims=True)
+    diff = np.clip(max_v - x, 0, 255)
     exp_q = SOFTMAX_LUT[diff]
-    sum_q = int(exp_q.sum())
-    if sum_q == 0: sum_q = 1
+    sum_q = np.sum(exp_q, axis=-1, keepdims=True).astype(np.int64)
+    sum_q = np.maximum(sum_q, 1)
     out = (exp_q.astype(np.int64) * 127) // sum_q
-    return np.clip(out, 0, 127).astype(np.int8).reshape(logits_i8.shape)
+    return np.clip(out, 0, 127).astype(np.int8)
+
+
+def _libm_expf():
+    """Cache a ctypes handle for libm's float expf(float) — used by
+    softmax_fp_ref to match C++ std::exp(float) bit-for-bit. numpy.exp on
+    float32 differs by 1 ULP for certain inputs (e.g. exp(3.14), exp(-2.7))
+    likely due to SIMD intrinsic vs libm scalar implementation differences."""
+    if getattr(_libm_expf, "_cached", None) is None:
+        import ctypes, ctypes.util
+        libm_path = ctypes.util.find_library("m")
+        libm = ctypes.CDLL(libm_path) if libm_path else None
+        if libm is not None and hasattr(libm, "expf"):
+            libm.expf.argtypes = [ctypes.c_float]
+            libm.expf.restype  = ctypes.c_float
+            _libm_expf._cached = libm.expf
+        else:
+            _libm_expf._cached = False
+    return _libm_expf._cached
+
+
+def _libm_tanhf():
+    """Cache libm tanhf(float) for byte-identical FP GELU reference."""
+    if getattr(_libm_tanhf, "_cached", None) is None:
+        import ctypes, ctypes.util
+        libm_path = ctypes.util.find_library("m")
+        libm = ctypes.CDLL(libm_path) if libm_path else None
+        if libm is not None and hasattr(libm, "tanhf"):
+            libm.tanhf.argtypes = [ctypes.c_float]
+            libm.tanhf.restype  = ctypes.c_float
+            _libm_tanhf._cached = libm.tanhf
+        else:
+            _libm_tanhf._cached = False
+    return _libm_tanhf._cached
+
+
+def softmax_fp_ref(logits_f16):
+    """v8.28 / v8.30: FP softmax reference. Must match EweEngine::run_softmax_fp
+    byte-for-byte. Runs over the last axis, one contiguous C-vector at a time.
+    Standard 3-pass numerically-stable form: subtract max, expf, sequential
+    running-add sum, divide, cast to FP16.
+
+    v8.30: route through libm's `expf` via ctypes instead of `np.exp` so
+    every element-wise exp() result is bit-identical to C++ `std::exp(float)`.
+    numpy.exp(float32) disagrees with libm expf by 1 ULP on certain inputs
+    (vector intrinsic vs scalar libm), which used to cause swin_float
+    softmax layers to FAIL by 1-3 bytes out of 14k-115k.
+    """
+    expf  = _libm_expf()
+    rows = logits_f16.reshape(-1, logits_f16.shape[-1]).astype(np.float32)
+    out = np.empty(rows.shape, dtype=np.float16)
+    for row_idx, row in enumerate(rows):
+        max_v = np.float32(row.max())
+        diff = (row - max_v).astype(np.float32)
+        if expf:
+            exp_v = np.empty(diff.size, dtype=np.float32)
+            for i in range(diff.size):
+                exp_v[i] = expf(float(diff[i]))
+        else:
+            # Fallback when libm isn't loadable (rare; bytes may diverge by 1
+            # ULP on a small fraction of large softmax tensors).
+            exp_v = np.exp(diff).astype(np.float32)
+        # Sequential sum (matches sim's running-add accumulator order).
+        s = np.float32(0.0)
+        for v in exp_v:
+            s = np.float32(s + v)
+        if s == 0.0:
+            s = np.float32(1.0)
+        out[row_idx] = (exp_v / s).astype(np.float16)
+    return out.reshape(logits_f16.shape)
 
 
 def pool_int8_ref(in_i8, k_h, k_w, s_h, s_w, pad, mode, count_include_pad):
@@ -606,6 +716,19 @@ def main():
     # placeholder [1,1,1,C] static shapes get real (H, W, C) at every op.
     shape_dict = _infer_shapes(fb, model, sg)
 
+    producer_op_by_tensor = {}
+    consumers_by_tensor = {}
+    for i in range(sg.OperatorsLength()):
+        op = sg.Operators(i)
+        for k in range(op.OutputsLength()):
+            tidx = int(op.Outputs(k))
+            if tidx >= 0:
+                producer_op_by_tensor[tidx] = i
+        for k in range(op.InputsLength()):
+            tidx = int(op.Inputs(k))
+            if tidx >= 0:
+                consumers_by_tensor.setdefault(tidx, []).append(i)
+
     # Collect every supported op in execution order.
     ops = []
     for i in range(sg.OperatorsLength()):
@@ -613,7 +736,7 @@ def main():
         name = _opcode_name(fb, model, op)
         if name not in SUPPORTED_OPS:
             continue
-        ops.append((name, op))
+        ops.append((i, name, op))
     if args.max_layers:
         ops = ops[: args.max_layers]
     if not ops:
@@ -621,19 +744,56 @@ def main():
 
     print(f"compile_model: {args.model}")
     op_counts = {}
-    for name, _ in ops: op_counts[name] = op_counts.get(name, 0) + 1
+    for _, name, _ in ops: op_counts[name] = op_counts.get(name, 0) + 1
     print(f"  {len(ops)} ops: " + ", ".join(f"{k}={v}" for k, v in op_counts.items()))
 
     # DRAM bump allocator: weights → inputs → outputs in disjoint regions.
+    # v8.23: region bases are placeholders here; the real DRAM_IN / DRAM_OUT
+    # offsets are recomputed AFTER the layer loop so each region is sized to
+    # the actual cumulative payload (not a hardcoded +64MB stride). Hardcoded
+    # offsets used to silently overlap on big-tensor models — e.g. deeplab's
+    # input tensors total >64MB, so layer 8's `dram_in` ran into the start of
+    # the DRAM_OUT region and was overwritten by layer 0's `udma_w`. The
+    # placeholder values below let the per-layer dict carry an
+    # in-region offset (cur_w / cur_i / cur_o); patch_dram_addrs below
+    # rewrites them to non-overlapping absolutes once totals are known.
     DRAM_BASE = 0x10000000
-    DRAM_WGT  = DRAM_BASE + 0x00000000     # weights region
-    DRAM_IN   = DRAM_BASE + 0x04000000     # +64 MB
-    DRAM_OUT  = DRAM_BASE + 0x08000000     # +128 MB
+    DRAM_WGT  = DRAM_BASE + 0x00000000
+    DRAM_IN   = DRAM_BASE + 0x04000000     # placeholder (resized post-loop)
+    DRAM_OUT  = DRAM_BASE + 0x08000000     # placeholder (resized post-loop)
     cur_w = cur_i = cur_o = 0
     in_off = wgt_off = ref_off = 0
 
     layers = []
+    op_to_compiled = {}
     in_blobs, wgt_blobs, ref_blobs = [], [], []
+
+    # LayerMeta stores both DRAM addresses and file offsets as uint32_t. Large
+    # FP image-to-image nets can exceed that if every supported op keeps its own
+    # synthetic input and reference blob. Treat this like the other descriptor
+    # limits: skip layers that would make the program impossible to encode.
+    REGION_ALIGN = 64 * 1024
+    def _round_up(x, a):
+        return (x + a - 1) & ~(a - 1)
+
+    def _program_budget_error(next_in_b, next_wgt_b, next_ref_b):
+        cand_i = cur_i + next_in_b
+        cand_w = cur_w + next_wgt_b
+        cand_o = cur_o + next_ref_b
+        cand_layers = len(layers) + 1
+        data_offset = HEADER_SIZE + (LAYER_SIZE + GRAPH_META_SIZE) * cand_layers
+
+        file_bytes = data_offset + cand_i + cand_w + cand_o
+        if file_bytes > UINT32_MAX:
+            return (f"program file {file_bytes / (1024 ** 3):.2f} GiB exceeds "
+                    f"uint32 file-offset limit")
+
+        dram_end = DRAM_BASE + _round_up(cand_w, REGION_ALIGN) \
+                 + _round_up(cand_i, REGION_ALIGN) + cand_o
+        if dram_end - 1 > UINT32_MAX:
+            return (f"DRAM end 0x{dram_end - 1:08x} exceeds uint32 address "
+                    f"limit")
+        return None
 
     # v8.12: chain mode — when layer N+1's expected input shape & dtype match
     # layer N's reference output, reuse N's output as N+1's input (instead of a
@@ -674,7 +834,7 @@ def main():
         if sh: arr = arr.reshape(sh)
         return arr
 
-    for li, (opname, op) in enumerate(ops):
+    for li, (orig_op_index, opname, op) in enumerate(ops):
         in_t   = sg.Tensors(op.Inputs(0))
         out_t  = sg.Tensors(op.Outputs(0))
 
@@ -682,7 +842,12 @@ def main():
         ish = list(_tensor_shape(in_t))
         osh = list(_tensor_shape(out_t))
         # Canonicalise to NHWC: pad with 1s on the left if rank<4, else take last 3 spatial dims.
+        # v8.30: rank-0 (scalar) and rank-1 tensors common in transformer
+        # graphs (mobilebert MUL by scalar, embeddings) — synthesise the
+        # missing axes with 1s rather than indexing past the end.
         def to_hwc(shape):
+            if not shape:
+                return (1, 1, 1)
             shape = shape if shape[0] == 1 else [1] + shape  # ensure batch dim
             shape = shape[1:]                                # drop batch
             while len(shape) < 3: shape = [1] + shape
@@ -715,34 +880,34 @@ def main():
         # v4.1: pick element width from the input tensor's TFLite dtype.
         layer_dtype = TYPE_TO_DTYPE.get(in_t.Type(), DT_INT8x8)
         is_int16    = (layer_dtype == DT_INT16x16)
-        elem_size   = 2 if is_int16 else 1
-        np_in_dt    = np.int16 if is_int16 else np.int8
+        is_fp_input = layer_dtype in (DT_FP16, DT_BFP16, DT_FP8)
+        elem_size   = 2 if (is_int16 or is_fp_input) else 1
+        np_in_dt    = np.float16 if is_fp_input else (np.int16 if is_int16 else np.int8)
 
         # v4.1 limitation: only CONV / DEPTHWISE_CONV in int16 path so far.
         if is_int16 and opname not in ("CONV_2D", "DEPTHWISE_CONV_2D"):
             print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
                   f"skipped (int16 {opname} not yet supported in v4.1)")
             continue
-        # v8.17: FP path now also handles ADD (FP32 sum + clamp) and AVG/MAX
-        # POOL (FP32 reduction in (kh,kw) order). RESHAPE/CONCAT/GATHER are
-        # byte-passthrough. SOFTMAX and FULLY_CONNECTED are still int-only.
-        if in_t.Type() in FP_TFLITE_TYPES and opname in ("SOFTMAX",
-                                                          "FULLY_CONNECTED"):
-            print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
-                  f"skipped (FP {opname} not yet supported)")
-            continue
+        # v8.17: FP path handles ADD (FP32 sum + clamp) and AVG/MAX POOL
+        # (FP32 reduction in (kh,kw) order). v8.24: FP FULLY_CONNECTED routes
+        # through the FP CONV path. v8.28: FP SOFTMAX added (numerically
+        # stable 3-pass exp/sum/divide in FP32, FP16 storage). Remaining
+        # FP-only-skip set is empty; RESHAPE/CONCAT/GATHER stay byte-passthrough.
 
         # v8.12: prefer the previous layer's reference output when its shape +
         # dtype match the current layer's expected input — enables L1-resident
         # fusion in test_model.cpp.  Falls back to fresh rng on first layer or
         # whenever the chain breaks (skipped op, shape mismatch).
-        expected_dtype = (np.int16 if is_int16 else np.int8)   # FP path overrides this later
+        expected_dtype = np_in_dt   # FP conv/FC paths may override this later
         if (last_output_arr is not None
             and last_output_arr.shape == (H, W, Cin)
             and last_output_arr.dtype == expected_dtype):
             in_arr = last_output_arr
         elif is_int16:
             in_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
+        elif is_fp_input:
+            in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
         else:
             in_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
         in_i8 = in_arr        # legacy name kept for downstream readability
@@ -767,6 +932,18 @@ def main():
             # FP32 from L1, so we cast FP16/FP32 weights to FP32 at compile time.
             is_fp_layer = (in_t.Type() in FP_TFLITE_TYPES) or (wgt_t.Type() in FP_TFLITE_TYPES) \
                           or wgt.dtype in (np.float16, np.float32)
+            # v8.27: INT16x8 hybrid quant (INT16 activations + INT8 weights).
+            # TFLite emits this for "16x8 quantization" — esrgan_int16 / unet_int16
+            # / similar high-precision models. Switch the layer dtype so sim
+            # reads weights as 1 byte/elem (vs the default 2 byte for INT16x16);
+            # the int16 input + int32 bias path is otherwise identical.
+            if (not is_fp_layer
+                and in_t.Type() == fb.TensorType.INT16
+                and wgt_t.Type() == fb.TensorType.INT8):
+                layer_dtype = DT_INT16x8
+                # is_int16 stays True (input synth still uses int16 range,
+                # bias still int32 → int16 output etc.); only weight storage
+                # differs. elem_size here is the input/output elem size.
             # v7: uint8 weights map to int8 via centered SHIFT (uint8 - 128),
             # not byte reinterpretation. The two are only equivalent when
             # zp_w_uint8 == 128 (symmetric); for asymmetric weights (e.g.,
@@ -792,6 +969,17 @@ def main():
                 op_kind = OP_CONV
                 pad_enum = co.Padding()
             s_h = int(co.StrideH()); s_w = int(co.StrideW())
+            # v8.27: sim's stride encoding is 2-bit log2 (1, 2, 4, 8). Strides
+            # like 3, 5, 6, 7 silently alias to a wrong value and produce
+            # garbage output. microisp_float / pynet_v2_float use stride=3
+            # for downsampling. Skip cleanly with a clear reason; downstream
+            # layers fall back to fresh rng for their input chain.
+            if s_h not in (1, 2, 4, 8) or s_w not in (1, 2, 4, 8):
+                print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
+                      f"skipped (stride={s_h}x{s_w} not in {{1,2,4,8}}; "
+                      f"sim's 2-bit stride encoding can't represent it)")
+                last_output_arr = None
+                continue
             # v8: some models (mobilenet_v3_fp16 first CONV) store a placeholder
             # output shape [1,1,1,C].  Re-derive OH/OW from H/W/stride/padding so
             # we don't trust suspicious values.
@@ -1043,151 +1231,251 @@ def main():
             #   output [N, out_features]
             wgt_t  = sg.Tensors(op.Inputs(1))
             wgt    = _tensor_array(wgt_t)
+            # v8.24: walk DEQUANTIZE for FP-quantized FC weights, mirroring CONV.
             if wgt is None:
-                raise SystemExit(f"layer {li}: FC weights tensor has no buffer")
-            # v7: same uint8 -> centered int8 mapping as conv path.
-            if wgt.dtype == np.uint8:
-                wgt = (wgt.astype(np.int16) - 128).astype(np.int8)
-            FC_out, FC_in = wgt.shape
-            # Reshape inputs / weights to a 1×1 conv.
-            H = W = 1
-            Cin = FC_in
-            OH = OW = 1
-            OC = FC_out
-            Kh = Kw = 1
-            s_h = s_w = 1
-            pT = pB = pL = pR = 0
-            group = 1
-            wgt = wgt.reshape(OC, 1, 1, Cin)            # OHWI for our compute
-            # v8.13: respect the chain — the top-of-loop in_arr is already
-            # shape (1, 1, FC_in). Only fall back to rng if the chain isn't
-            # a (1,1,Cin) match (e.g. shape changed via RESHAPE just before).
-            expected_dtype_fc = np.int16 if is_int16 else np.int8
-            if (last_output_arr is not None
-                and last_output_arr.shape == (1, 1, Cin)
-                and last_output_arr.dtype == expected_dtype_fc):
-                in_arr = last_output_arr
-            else:
-                in_arr = (rng.integers(-128, 128, size=(1, 1, Cin), dtype=np.int16)
-                          if is_int16
-                          else rng.integers(-8, 8, size=(1, 1, Cin), dtype=np.int8))
-            in_i8 = in_arr
-            op_kind = OP_FC     # dispatched through CONV engine, labelled "fc"
-            fc_label = True
+                prod, prod_name = _find_op_producer(fb, model, sg, op.Inputs(1))
+                if prod is not None and prod_name == "DEQUANTIZE":
+                    wgt = _tensor_array(sg.Tensors(prod.Inputs(0)))
+            if wgt is None:
+                # Transformer-style "FC" where the weight is a runtime tensor
+                # (e.g. ALBERT/BERT attention's Q×Kᵀ via FC with weight = output
+                # of a RESHAPE/CAST chain on activations). The sim pre-loads
+                # weights into DRAM at startup, so runtime-matmul FC isn't
+                # supported. Skip cleanly so the rest of the model still runs;
+                # downstream layers fall back to fresh rng for their input.
+                print(f"  layer {li:>2d}  fully_connected  in={H}x{W}x{Cin} "
+                      f"skipped (runtime-matmul FC: weight is not a constant "
+                      f"buffer)")
+                last_output_arr = None
+                continue
+            is_fp_fc = (in_t.Type() in FP_TFLITE_TYPES) \
+                       or (wgt_t.Type() in FP_TFLITE_TYPES) \
+                       or wgt.dtype in (np.float16, np.float32)
 
-            fc_opts = fb.FullyConnectedOptions()
-            fc_opts.Init(opt_table.Bytes, opt_table.Pos)
+            if is_fp_fc:
+                # ---- v8.24: FP FULLY_CONNECTED. Treat as 1x1 conv where the
+                # input's spatial dims (H, W) are the FC batch axis — handles
+                # both single-vector FC (input shape [1, in_features]) and
+                # batched FC (e.g. audio_yamnet's [96, 257] → [96, 64]) without
+                # forcing H=W=1 the way the int path does. Compute mirrors FP
+                # CONV: FP32 mul-add into running sum, FP16 storage.
+                FC_out, FC_in = wgt.shape
+                if Cin != FC_in:
+                    raise SystemExit(
+                        f"layer {li}: FC in_features ({FC_in}) "
+                        f"!= input Cin ({Cin})")
+                OH, OW, OC = H, W, FC_out
+                Kh = Kw = 1
+                s_h = s_w = 1
+                pT = pB = pL = pR = 0
+                group = 1
+                wgt_h16 = wgt.astype(np.float16).reshape(OC, 1, 1, Cin)
+                # Chain mode: prefer the previous layer's FP16 ref output if
+                # its shape matches (H, W, Cin); otherwise synth a fresh draw.
+                if (last_output_arr is not None
+                    and last_output_arr.shape == (H, W, Cin)
+                    and last_output_arr.dtype == np.float16):
+                    in_arr = last_output_arr
+                else:
+                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_i8 = in_arr
+                op_kind = OP_FC
+                fc_label = True
 
-            # Quant params (mirrors CONV path; FC uses per-tensor weight scale).
-            in_q = in_t.Quantization()
-            wq   = wgt_t.Quantization()
-            oq   = out_t.Quantization()
-            scale_in  = float(in_q.Scale(0))   if in_q and in_q.ScaleLength() else 1.0
-            scale_out = float(oq.Scale(0))     if oq and oq.ScaleLength()     else 1.0
-            zp_out    = int  (oq.ZeroPoint(0)) if oq and oq.ZeroPointLength() else 0
-            zp_in     = int  (in_q.ZeroPoint(0)) if in_q and in_q.ZeroPointLength() else 0
-            zp_in_eff = zp_in if in_t.Type() == fb.TensorType.INT8 else 0
-            if wq and wq.ScaleLength() == OC:
-                scales_w = np.array([wq.Scale(i) for i in range(OC)], dtype=np.float64)
-            elif wq and wq.ScaleLength() == 1:
-                scales_w = np.full(OC, float(wq.Scale(0)), dtype=np.float64)
-            else:
-                scales_w = np.ones(OC, dtype=np.float64)
-            # v7: zp_w extraction (mirrors conv path).
-            zp_w_uint8_shift = 128 if wgt_t.Type() == fb.TensorType.UINT8 else 0
-            if wq and wq.ZeroPointLength() == OC:
-                zp_w_arr = np.array([int(wq.ZeroPoint(i)) for i in range(OC)],
-                                    dtype=np.int32) - zp_w_uint8_shift
-            elif wq and wq.ZeroPointLength() == 1:
-                zp_w_arr = np.full(OC, int(wq.ZeroPoint(0)) - zp_w_uint8_shift,
-                                   dtype=np.int32)
-            else:
-                zp_w_arr = np.zeros(OC, dtype=np.int32)
-            zp_w_uniform = bool(np.all(zp_w_arr == zp_w_arr[0]))
-            zp_w_scalar  = int(zp_w_arr[0]) if zp_w_uniform else 0
-            eff = scales_w * scale_in / scale_out
-            mult_arr  = np.zeros(OC, dtype=np.int32)
-            shift_arr = np.zeros(OC, dtype=np.int8)
-            for c in range(OC):
-                mq, sh = quantize_multiplier(float(eff[c]))
-                mult_arr[c]  = mq;  shift_arr[c] = sh
+                bias_arr = np.zeros(OC, dtype=np.float32)
+                if op.InputsLength() >= 3 and op.Inputs(2) >= 0:
+                    bt = sg.Tensors(op.Inputs(2))
+                    barr = _tensor_array(bt)
+                    if barr is None:
+                        prod, prod_name = _find_op_producer(fb, model, sg, op.Inputs(2))
+                        if prod is not None and prod_name == "DEQUANTIZE":
+                            barr = _tensor_array(sg.Tensors(prod.Inputs(0)))
+                    if barr is not None:
+                        barr_f32 = barr.astype(np.float32).flatten()
+                        bias_arr[:barr_f32.size] = barr_f32
 
-            fused = int(fc_opts.FusedActivationFunction())
-            is_uint8_out = (out_t.Type() == fb.TensorType.UINT8)
-            if is_uint8_out:
-                OUT_MIN, OUT_MAX = 0, 255
-            elif is_int16:
-                OUT_MIN, OUT_MAX = -32768, 32767
-            else:
-                OUT_MIN, OUT_MAX = -128, 127
-            act_min, act_max = OUT_MIN, OUT_MAX
-            if fused == 1:
-                act_min = max(OUT_MIN, zp_out)
-            elif fused == 3:
-                act_min = max(OUT_MIN, zp_out)
-                act_max = min(OUT_MAX, zp_out + int(round(6.0 / scale_out)))
-            elif fused == 2:
-                act_min = max(OUT_MIN, zp_out + int(round(-1.0 / scale_out)))
-                act_max = min(OUT_MAX, zp_out + int(round( 1.0 / scale_out)))
-            shift_out = 128 if is_uint8_out else 0
-            zp_out  -= shift_out
-            act_min -= shift_out
-            act_max -= shift_out
-            DT_MIN = -32768 if is_int16 else -128
-            DT_MAX =  32767 if is_int16 else  127
-            act_min = max(DT_MIN, act_min)
-            act_max = min(DT_MAX, act_max)
+                fc_opts = fb.FullyConnectedOptions()
+                fc_opts.Init(opt_table.Bytes, opt_table.Pos)
+                fused = int(fc_opts.FusedActivationFunction())
+                INF = float("inf")
+                if   fused == 1: act_min, act_max =  0.0, INF
+                elif fused == 3: act_min, act_max =  0.0, 6.0
+                elif fused == 2: act_min, act_max = -1.0, 1.0
+                else:            act_min, act_max = -INF, INF
 
-            # FC bias + zp_in/zp_w folding (mirrors CONV path; v7 adds zp_w).
-            bias = np.zeros(OC, dtype=np.int64)
-            if op.InputsLength() >= 3 and op.Inputs(2) >= 0:
-                bt = sg.Tensors(op.Inputs(2))
-                barr = _tensor_array(bt)
-                if barr is not None:
-                    bias[:barr.size] = barr.astype(np.int64).flatten()
-            sum_w        = wgt.astype(np.int64).sum(axis=(1, 2, 3))   # [OC]
-            window_size  = int(Kh) * int(Kw) * int(wgt.shape[3])      # 1*1*Cin for FC
-            bias_eff = (bias
-                        - zp_in_eff * sum_w
-                        + zp_in_eff * zp_w_arr.astype(np.int64) * window_size
-                       ).astype(np.int64)
-            bias_eff_i32 = np.clip(bias_eff, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                in_f32  = in_arr.astype(np.float32)
+                wgt_f32 = wgt_h16.astype(np.float32)
+                ref_f32 = conv_fp_ref(in_f32, wgt_f32, s_h, s_w,
+                                      (pT, pB, pL, pR), group,
+                                      bias_arr, act_min, act_max)
+                ref = ref_f32.astype(np.float16)
+                ref_b = ref.tobytes(order="C")
 
-            psum = conv_int8_ref(in_arr, wgt, s_h, s_w,
-                                 (pT, pB, pL, pR), group=group,
-                                 pad_value=zp_in_eff)
+                amin = -3.4e38 if not np.isfinite(act_min) else float(act_min)
+                amax =  3.4e38 if not np.isfinite(act_max) else float(act_max)
+                params_b = (struct.pack("<ff", amin, amax)
+                            + bias_arr.astype("<f4").tobytes())
+                conv_wgt_payload = wgt_h16.astype("<f2").tobytes(order="C") + params_b
+                layer_dtype = DT_FP16
+                is_int16    = False
+                is_fp_layer = True
+                elem_size   = 2
+                zp_in_eff   = 0
+                # v8.30: transformer-style batched FC (e.g. swin_float layer 19:
+                # `1×3136×384 → 1×3136×96` FP16) has H=1 and a huge W. The sim's
+                # OH-tiling can't help (out_h=1) and per_oh_in = W*Cin*elem ≈
+                # 2.4 MB busts L1. Swap the descriptor's (H, W) so the big axis
+                # becomes OH and OH-tiling kicks in. Bytes are unchanged because
+                # row-major (H, W, C) layout with one of {H, W}=1 has the same
+                # serialisation as (W, H, C); ref/last_output_arr keep the
+                # original (H, W) shape so downstream chain-mode stays valid.
+                if H == 1 and W > 1:
+                    H, W   = W, H
+                    OH, OW = OW, OH
+            if not is_fp_fc:
+                # v7: same uint8 -> centered int8 mapping as conv path.
+                if wgt.dtype == np.uint8:
+                    wgt = (wgt.astype(np.int16) - 128).astype(np.int8)
+                FC_out, FC_in = wgt.shape
+                # Reshape inputs / weights to a 1×1 conv.
+                H = W = 1
+                Cin = FC_in
+                OH = OW = 1
+                OC = FC_out
+                Kh = Kw = 1
+                s_h = s_w = 1
+                pT = pB = pL = pR = 0
+                group = 1
+                wgt = wgt.reshape(OC, 1, 1, Cin)            # OHWI for our compute
+                # v8.13: respect the chain — the top-of-loop in_arr is already
+                # shape (1, 1, FC_in). Only fall back to rng if the chain isn't
+                # a (1,1,Cin) match (e.g. shape changed via RESHAPE just before).
+                expected_dtype_fc = np.int16 if is_int16 else np.int8
+                if (last_output_arr is not None
+                    and last_output_arr.shape == (1, 1, Cin)
+                    and last_output_arr.dtype == expected_dtype_fc):
+                    in_arr = last_output_arr
+                else:
+                    in_arr = (rng.integers(-128, 128, size=(1, 1, Cin), dtype=np.int16)
+                              if is_int16
+                              else rng.integers(-8, 8, size=(1, 1, Cin), dtype=np.int8))
+                in_i8 = in_arr
+                op_kind = OP_FC     # dispatched through CONV engine, labelled "fc"
+                fc_label = True
 
-            # v7: per-pixel correction (FC has 1×1 spatial → scalar per "pixel").
-            corr_arr = None
-            if zp_w_uniform and zp_w_scalar != 0:
-                corr_arr = _conv_window_sum(in_arr, Kh, Kw, s_h, s_w,
-                                            (pT, pB, pL, pR), OH, OW,
-                                            in_per_group=Cin // group,
-                                            pad_value=zp_in_eff)
-                corr_arr = (-zp_w_scalar * corr_arr).astype(np.int32)
-            elif (not zp_w_uniform):
-                raise SystemExit(f"layer {li}: per-channel non-zero zp_w not yet supported (FC)")
+                fc_opts = fb.FullyConnectedOptions()
+                fc_opts.Init(opt_table.Bytes, opt_table.Pos)
 
-            psum_with_bias = (psum.astype(np.int64)
-                              + bias_eff_i32.reshape(1, 1, OC).astype(np.int64))
-            if corr_arr is not None:
-                psum_with_bias = psum_with_bias + corr_arr.astype(np.int64)[..., None]
-            psum_with_bias = np.clip(psum_with_bias,
-                                     -(1 << 31), (1 << 31) - 1).astype(np.int32)
-            scaled = multiply_by_quantized_multiplier_np(
-                psum_with_bias,
-                mult_arr.reshape(1, 1, OC), shift_arr.reshape(1, 1, OC))
-            ref = (np.clip(scaled + zp_out, act_min, act_max).astype(np.int16)
-                   if is_int16 else
-                   np.clip(scaled + zp_out, act_min, act_max).astype(np.int8))
-            ref_b = ref.tobytes(order="C")
-            params_b = (struct.pack("<iii", zp_out, act_min, act_max)
-                        + mult_arr.astype("<i4").tobytes()
-                        + shift_arr.astype(np.int8).tobytes()
-                        + bias_eff_i32.tobytes())
-            if corr_arr is not None:
-                params_b += corr_arr.astype("<i4").tobytes(order="C")
-            conv_wgt_payload = wgt.tobytes(order="C") + params_b
+                # Quant params (mirrors CONV path; FC uses per-tensor weight scale).
+                in_q = in_t.Quantization()
+                wq   = wgt_t.Quantization()
+                oq   = out_t.Quantization()
+                scale_in  = float(in_q.Scale(0))   if in_q and in_q.ScaleLength() else 1.0
+                scale_out = float(oq.Scale(0))     if oq and oq.ScaleLength()     else 1.0
+                zp_out    = int  (oq.ZeroPoint(0)) if oq and oq.ZeroPointLength() else 0
+                zp_in     = int  (in_q.ZeroPoint(0)) if in_q and in_q.ZeroPointLength() else 0
+                zp_in_eff = zp_in if in_t.Type() == fb.TensorType.INT8 else 0
+                if wq and wq.ScaleLength() == OC:
+                    scales_w = np.array([wq.Scale(i) for i in range(OC)], dtype=np.float64)
+                elif wq and wq.ScaleLength() == 1:
+                    scales_w = np.full(OC, float(wq.Scale(0)), dtype=np.float64)
+                else:
+                    scales_w = np.ones(OC, dtype=np.float64)
+                # v7: zp_w extraction (mirrors conv path).
+                zp_w_uint8_shift = 128 if wgt_t.Type() == fb.TensorType.UINT8 else 0
+                if wq and wq.ZeroPointLength() == OC:
+                    zp_w_arr = np.array([int(wq.ZeroPoint(i)) for i in range(OC)],
+                                        dtype=np.int32) - zp_w_uint8_shift
+                elif wq and wq.ZeroPointLength() == 1:
+                    zp_w_arr = np.full(OC, int(wq.ZeroPoint(0)) - zp_w_uint8_shift,
+                                       dtype=np.int32)
+                else:
+                    zp_w_arr = np.zeros(OC, dtype=np.int32)
+                zp_w_uniform = bool(np.all(zp_w_arr == zp_w_arr[0]))
+                zp_w_scalar  = int(zp_w_arr[0]) if zp_w_uniform else 0
+                eff = scales_w * scale_in / scale_out
+                mult_arr  = np.zeros(OC, dtype=np.int32)
+                shift_arr = np.zeros(OC, dtype=np.int8)
+                for c in range(OC):
+                    mq, sh = quantize_multiplier(float(eff[c]))
+                    mult_arr[c]  = mq;  shift_arr[c] = sh
+
+                fused = int(fc_opts.FusedActivationFunction())
+                is_uint8_out = (out_t.Type() == fb.TensorType.UINT8)
+                if is_uint8_out:
+                    OUT_MIN, OUT_MAX = 0, 255
+                elif is_int16:
+                    OUT_MIN, OUT_MAX = -32768, 32767
+                else:
+                    OUT_MIN, OUT_MAX = -128, 127
+                act_min, act_max = OUT_MIN, OUT_MAX
+                if fused == 1:
+                    act_min = max(OUT_MIN, zp_out)
+                elif fused == 3:
+                    act_min = max(OUT_MIN, zp_out)
+                    act_max = min(OUT_MAX, zp_out + int(round(6.0 / scale_out)))
+                elif fused == 2:
+                    act_min = max(OUT_MIN, zp_out + int(round(-1.0 / scale_out)))
+                    act_max = min(OUT_MAX, zp_out + int(round( 1.0 / scale_out)))
+                shift_out = 128 if is_uint8_out else 0
+                zp_out  -= shift_out
+                act_min -= shift_out
+                act_max -= shift_out
+                DT_MIN = -32768 if is_int16 else -128
+                DT_MAX =  32767 if is_int16 else  127
+                act_min = max(DT_MIN, act_min)
+                act_max = min(DT_MAX, act_max)
+
+                # FC bias + zp_in/zp_w folding (mirrors CONV path; v7 adds zp_w).
+                bias = np.zeros(OC, dtype=np.int64)
+                if op.InputsLength() >= 3 and op.Inputs(2) >= 0:
+                    bt = sg.Tensors(op.Inputs(2))
+                    barr = _tensor_array(bt)
+                    if barr is not None:
+                        bias[:barr.size] = barr.astype(np.int64).flatten()
+                sum_w        = wgt.astype(np.int64).sum(axis=(1, 2, 3))   # [OC]
+                window_size  = int(Kh) * int(Kw) * int(wgt.shape[3])      # 1*1*Cin for FC
+                bias_eff = (bias
+                            - zp_in_eff * sum_w
+                            + zp_in_eff * zp_w_arr.astype(np.int64) * window_size
+                           ).astype(np.int64)
+                bias_eff_i32 = np.clip(bias_eff, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+
+                psum = conv_int8_ref(in_arr, wgt, s_h, s_w,
+                                     (pT, pB, pL, pR), group=group,
+                                     pad_value=zp_in_eff)
+
+                # v7: per-pixel correction (FC has 1×1 spatial → scalar per "pixel").
+                corr_arr = None
+                if zp_w_uniform and zp_w_scalar != 0:
+                    corr_arr = _conv_window_sum(in_arr, Kh, Kw, s_h, s_w,
+                                                (pT, pB, pL, pR), OH, OW,
+                                                in_per_group=Cin // group,
+                                                pad_value=zp_in_eff)
+                    corr_arr = (-zp_w_scalar * corr_arr).astype(np.int32)
+                elif (not zp_w_uniform):
+                    raise SystemExit(f"layer {li}: per-channel non-zero zp_w not yet supported (FC)")
+
+                psum_with_bias = (psum.astype(np.int64)
+                                  + bias_eff_i32.reshape(1, 1, OC).astype(np.int64))
+                if corr_arr is not None:
+                    psum_with_bias = psum_with_bias + corr_arr.astype(np.int64)[..., None]
+                psum_with_bias = np.clip(psum_with_bias,
+                                         -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                scaled = multiply_by_quantized_multiplier_np(
+                    psum_with_bias,
+                    mult_arr.reshape(1, 1, OC), shift_arr.reshape(1, 1, OC))
+                ref = (np.clip(scaled + zp_out, act_min, act_max).astype(np.int16)
+                       if is_int16 else
+                       np.clip(scaled + zp_out, act_min, act_max).astype(np.int8))
+                ref_b = ref.tobytes(order="C")
+                params_b = (struct.pack("<iii", zp_out, act_min, act_max)
+                            + mult_arr.astype("<i4").tobytes()
+                            + shift_arr.astype(np.int8).tobytes()
+                            + bias_eff_i32.tobytes())
+                if corr_arr is not None:
+                    params_b += corr_arr.astype("<i4").tobytes(order="C")
+                conv_wgt_payload = wgt.tobytes(order="C") + params_b
 
         elif opname == "ADD" and in_t.Type() in FP_TFLITE_TYPES:
             # ---- v8.17: FP element-wise ADD (mobilenet_v3 residuals) ----
@@ -1196,6 +1484,10 @@ def main():
             # the simulator's L1 holds bit-identical values when fusion runs);
             # input-B is freshly synthesized — sim and ref both see the same
             # rng tensor at this layer's dram_in slot.
+            # v8.31: test_model.cpp can tile binary EWE ops over flat
+            # contiguous chunks when a single row is wider than the H-tiler's
+            # L1 budget, so large transformer-style FP ADDs no longer need a
+            # compiler-side skip.
             if (last_output_arr is not None
                 and last_output_arr.shape == (H, W, Cin)
                 and last_output_arr.dtype == np.float16):
@@ -1325,6 +1617,284 @@ def main():
                                         left_shift, act_min, act_max)
             add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
 
+        elif opname in ("MUL", "SUB") and in_t.Type() in FP_TFLITE_TYPES:
+            # ---- v8.30: FP element-wise MUL / SUB ----
+            # Mirrors the ADD FP path. Sim runs run_binary_fp(op=1 for MUL,
+            # 2 for SUB) which reads two FP16 operands, computes a*b or a-b in
+            # FP32, clamps with the ±sentinel pair, writes FP16 to L1.
+            # v8.31: large rows are handled by the sim's flat binary-EWE tiler.
+            if (last_output_arr is not None
+                and last_output_arr.shape == (H, W, Cin)
+                and last_output_arr.dtype == np.float16):
+                in_arr = last_output_arr
+            else:
+                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+            in_b_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+            try:
+                # Both MulOptions and SubOptions expose FusedActivationFunction.
+                if opname == "MUL":
+                    bo = fb.MulOptions(); bo.Init(opt_table.Bytes, opt_table.Pos)
+                else:
+                    bo = fb.SubOptions(); bo.Init(opt_table.Bytes, opt_table.Pos)
+                fused = int(bo.FusedActivationFunction())
+            except Exception:
+                fused = 0
+            INF = float("inf")
+            if   fused == 1: act_min, act_max =  0.0, INF
+            elif fused == 3: act_min, act_max =  0.0, 6.0
+            elif fused == 2: act_min, act_max = -1.0, 1.0
+            else:            act_min, act_max = -INF, INF
+            amin_sent = np.float32(-3.4e38 if not np.isfinite(act_min) else float(act_min))
+            amax_sent = np.float32( 3.4e38 if not np.isfinite(act_max) else float(act_max))
+            a_f32 = in_arr.astype(np.float32)
+            b_f32 = in_b_arr.astype(np.float32)
+            out_f32 = (a_f32 * b_f32) if opname == "MUL" else (a_f32 - b_f32)
+            out_f32 = np.maximum(out_f32, amin_sent)
+            out_f32 = np.minimum(out_f32, amax_sent)
+            ref = out_f32.astype(np.float16)
+            op_kind = OP_MUL if opname == "MUL" else OP_SUB
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            add_params_b = (struct.pack("<ff", float(amin_sent), float(amax_sent))
+                            + b"\x00" * 40)
+            add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
+            layer_dtype  = DT_FP16
+            is_int16     = False
+            is_fp_layer  = True
+            elem_size    = 2
+
+        elif opname == "MUL":
+            # ---- v8.30: TFLite int8 MUL ----
+            #   raw   = (a - zp_a) * (b - zp_b)
+            #   out_q = MBQM(raw, mq, sh) + zp_o
+            #   out   = clip(out_q, [act_min, act_max])
+            in_a_t = in_t
+            in_b_t = sg.Tensors(op.Inputs(1))
+            qa = in_a_t.Quantization(); qb = in_b_t.Quantization(); qo = out_t.Quantization()
+            scale_a = float(qa.Scale(0))     if qa and qa.ScaleLength()     else 1.0
+            scale_b = float(qb.Scale(0))     if qb and qb.ScaleLength()     else 1.0
+            scale_o = float(qo.Scale(0))     if qo and qo.ScaleLength()     else 1.0
+            zp_a    = int  (qa.ZeroPoint(0)) if qa and qa.ZeroPointLength() else 0
+            zp_b    = int  (qb.ZeroPoint(0)) if qb and qb.ZeroPointLength() else 0
+            zp_o    = int  (qo.ZeroPoint(0)) if qo and qo.ZeroPointLength() else 0
+            shift_uint8_a = 128 if in_a_t.Type() == fb.TensorType.UINT8 else 0
+            shift_uint8_b = 128 if in_b_t.Type() == fb.TensorType.UINT8 else 0
+            shift_uint8_o = 128 if out_t.Type()  == fb.TensorType.UINT8 else 0
+            zp_a_eff = zp_a - shift_uint8_a
+            zp_b_eff = zp_b - shift_uint8_b
+            zp_o_eff = zp_o - shift_uint8_o
+            try:
+                bo = fb.MulOptions(); bo.Init(opt_table.Bytes, opt_table.Pos)
+                fused = int(bo.FusedActivationFunction())
+            except Exception:
+                fused = 0
+            DT_MIN = -32768 if is_int16 else -128
+            DT_MAX =  32767 if is_int16 else  127
+            if shift_uint8_o:
+                OUT_MIN, OUT_MAX = 0, 255
+            else:
+                OUT_MIN, OUT_MAX = DT_MIN, DT_MAX
+            act_min, act_max = OUT_MIN, OUT_MAX
+            if fused == 1:
+                act_min = max(OUT_MIN, zp_o)
+            elif fused == 3:
+                act_min = max(OUT_MIN, zp_o)
+                act_max = min(OUT_MAX, zp_o + int(round(6.0 / scale_o)))
+            elif fused == 2:
+                act_min = max(OUT_MIN, zp_o + int(round(-1.0 / scale_o)))
+                act_max = min(OUT_MAX, zp_o + int(round( 1.0 / scale_o)))
+            act_min -= shift_uint8_o
+            act_max -= shift_uint8_o
+            act_min = max(DT_MIN, act_min)
+            act_max = min(DT_MAX, act_max)
+            r_mult_o = scale_a * scale_b / scale_o
+            mq_o, sh_o = quantize_multiplier(r_mult_o)
+            in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            a_v = in_arr.astype(np.int32) - zp_a_eff
+            b_v = in_b_arr.astype(np.int32) - zp_b_eff
+            raw = a_v * b_v
+            out = multiply_by_quantized_multiplier_np(raw, mq_o, sh_o) + zp_o_eff
+            ref = np.clip(out, act_min, act_max).astype(np.int8)
+            op_kind = OP_MUL
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            # Same 12-int32 layout as ADD; mq_a/mq_b/left_shift unused here so
+            # set to 0/1 (multiplier 0 would be a divide-by-zero in MBQM but
+            # run_mul reads only p[7]/p[8]/p[10]/p[11] anyway).
+            add_params_b = struct.pack("<iiiiiiiiiiii",
+                                        zp_a_eff, zp_b_eff, zp_o_eff,
+                                        0, 0, 0, 0,
+                                        mq_o, sh_o,
+                                        0, act_min, act_max)
+            add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
+
+        elif opname == "SUB":
+            # ---- v8.30: TFLite int8 SUB ----
+            # Same gemmlowp 3-multiplier shape as ADD but with `sa - sb` in raw.
+            in_a_t = in_t
+            in_b_t = sg.Tensors(op.Inputs(1))
+            qa = in_a_t.Quantization(); qb = in_b_t.Quantization(); qo = out_t.Quantization()
+            scale_a = float(qa.Scale(0))     if qa and qa.ScaleLength()     else 1.0
+            scale_b = float(qb.Scale(0))     if qb and qb.ScaleLength()     else 1.0
+            scale_o = float(qo.Scale(0))     if qo and qo.ScaleLength()     else 1.0
+            zp_a    = int  (qa.ZeroPoint(0)) if qa and qa.ZeroPointLength() else 0
+            zp_b    = int  (qb.ZeroPoint(0)) if qb and qb.ZeroPointLength() else 0
+            zp_o    = int  (qo.ZeroPoint(0)) if qo and qo.ZeroPointLength() else 0
+            shift_uint8_a = 128 if in_a_t.Type() == fb.TensorType.UINT8 else 0
+            shift_uint8_b = 128 if in_b_t.Type() == fb.TensorType.UINT8 else 0
+            shift_uint8_o = 128 if out_t.Type()  == fb.TensorType.UINT8 else 0
+            zp_a_eff = zp_a - shift_uint8_a
+            zp_b_eff = zp_b - shift_uint8_b
+            zp_o_eff = zp_o - shift_uint8_o
+            try:
+                bo = fb.SubOptions(); bo.Init(opt_table.Bytes, opt_table.Pos)
+                fused = int(bo.FusedActivationFunction())
+            except Exception:
+                fused = 0
+            DT_MIN = -32768 if is_int16 else -128
+            DT_MAX =  32767 if is_int16 else  127
+            if shift_uint8_o:
+                OUT_MIN, OUT_MAX = 0, 255
+            else:
+                OUT_MIN, OUT_MAX = DT_MIN, DT_MAX
+            act_min, act_max = OUT_MIN, OUT_MAX
+            if fused == 1:
+                act_min = max(OUT_MIN, zp_o)
+            elif fused == 3:
+                act_min = max(OUT_MIN, zp_o)
+                act_max = min(OUT_MAX, zp_o + int(round(6.0 / scale_o)))
+            elif fused == 2:
+                act_min = max(OUT_MIN, zp_o + int(round(-1.0 / scale_o)))
+                act_max = min(OUT_MAX, zp_o + int(round( 1.0 / scale_o)))
+            act_min -= shift_uint8_o
+            act_max -= shift_uint8_o
+            act_min = max(DT_MIN, act_min)
+            act_max = min(DT_MAX, act_max)
+            left_shift = 20
+            twice_max = 2.0 * max(scale_a, scale_b)
+            r_mult_a = scale_a / twice_max
+            r_mult_b = scale_b / twice_max
+            r_mult_o = twice_max / ((1 << left_shift) * scale_o)
+            mq_a, sh_a = quantize_multiplier(r_mult_a)
+            mq_b, sh_b = quantize_multiplier(r_mult_b)
+            mq_o, sh_o = quantize_multiplier(r_mult_o)
+            in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            a_v = (in_arr.astype(np.int32) - zp_a_eff) << left_shift
+            b_v = (in_b_arr.astype(np.int32) - zp_b_eff) << left_shift
+            sa = multiply_by_quantized_multiplier_np(a_v, mq_a, sh_a)
+            sb = multiply_by_quantized_multiplier_np(b_v, mq_b, sh_b)
+            raw = sa.astype(np.int64) - sb.astype(np.int64)
+            raw = np.clip(raw, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+            out = multiply_by_quantized_multiplier_np(raw, mq_o, sh_o) + zp_o_eff
+            ref = np.clip(out, act_min, act_max).astype(np.int8)
+            op_kind = OP_SUB
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            add_params_b = struct.pack("<iiiiiiiiiiii",
+                                        zp_a_eff, zp_b_eff, zp_o_eff,
+                                        mq_a, sh_a, mq_b, sh_b,
+                                        mq_o, sh_o,
+                                        left_shift, act_min, act_max)
+            add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
+
+        elif opname in ("HARD_SWISH", "GELU") and in_t.Type() not in FP_TFLITE_TYPES:
+            # v8.30: int8 LUT path not yet wired (no bundled int8 model
+            # currently exercises these as standalone ops — they're typically
+            # folded into the conv's fused activation on the quantized side).
+            # Don't reset last_output_arr: these are unary shape-preserving
+            # ops, so a downstream layer that fuses with prev's L1-resident
+            # output will see the same bytes ref does (the previous layer's
+            # output flowing through unchanged). Resetting would cause sim ≡
+            # ref to diverge — sam_quant has post-GELU FCs that fuse and
+            # consume the L1-resident pre-GELU output.
+            print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
+                  f"skipped (int {opname} needs LUT path — not yet supported)")
+            continue
+
+        elif opname in ("HARD_SWISH", "GELU") and in_t.Type() in FP_TFLITE_TYPES:
+            # ---- v8.30: FP unary activation ----
+            # HARD_SWISH: x * relu6(x + 3) / 6
+            # GELU: tanh-approximation, 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
+            # Sim runs run_unary_fp(subtype=ES_HARD_SWISH/ES_GELU) which mirrors
+            # the same FP32 expression order, so output is FP16 byte-identical.
+            if (last_output_arr is not None
+                and last_output_arr.shape == (H, W, Cin)
+                and last_output_arr.dtype == np.float16):
+                in_arr = last_output_arr
+            else:
+                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+            x = in_arr.astype(np.float32)
+            if opname == "GELU":
+                k = np.float32(0.7978845608028654)        # sqrt(2/pi)
+                c = np.float32(0.044715)
+                tanhf = _libm_tanhf()
+                y = np.empty_like(x, dtype=np.float32)
+                x_flat = x.reshape(-1)
+                y_flat = y.reshape(-1)
+                for j, xv in enumerate(x_flat):
+                    xv = np.float32(xv)
+                    u = np.float32(k * np.float32(xv + np.float32(c * xv * xv * xv)))
+                    tv = np.float32(tanhf(float(u))) if tanhf else np.float32(math.tanh(float(u)))
+                    y_flat[j] = np.float32(np.float32(0.5) * xv * np.float32(np.float32(1.0) + tv))
+                op_kind = OP_GELU
+            else:
+                r = np.minimum(np.maximum(x + 3.0, 0.0), 6.0)
+                y = x * r / np.float32(6.0)
+                op_kind = OP_HARD_SWISH
+            amin_sent = np.float32(-3.4e38)
+            amax_sent = np.float32( 3.4e38)
+            y = np.maximum(y, amin_sent)
+            y = np.minimum(y, amax_sent)
+            ref = y.astype(np.float16)
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            # 8-byte clamp params blob (loaded into L1 PARAMS slot at addr 0).
+            add_wgt_payload = struct.pack("<ff", float(amin_sent), float(amax_sent))
+            layer_dtype = DT_FP16
+            is_int16    = False
+            is_fp_layer = True
+            elem_size   = 2
+
+        elif opname == "MEAN":
+            # ---- v8.30: MEAN reducing over (H, W) — emit as global avg pool ----
+            # Read axes from input(1) (constant int32 tensor). Skip non-spatial.
+            # mobilenet_v3 has 8 such MEANs in its SE blocks.
+            try:
+                axes_t  = sg.Tensors(op.Inputs(1))
+                axes_np = _tensor_array(axes_t)
+                axes    = sorted(int(a) % 4 for a in (axes_np.flatten() if axes_np is not None else []))
+            except Exception:
+                axes = []
+            if axes != [1, 2]:
+                print(f"  layer {li:>2d}     mean  in={H}x{W}x{Cin} "
+                      f"skipped (axes={axes} not (1,2) — non-spatial mean)")
+                last_output_arr = None
+                continue
+            Kh, Kw = H, W
+            s_h, s_w = 1, 1
+            pT = pB = pL = pR = 0
+            OH, OW, OC = 1, 1, Cin
+            op_kind = OP_AVG_POOL                    # routed through avg_pool path
+            count_include_pad = False
+            if in_t.Type() in FP_TFLITE_TYPES:
+                if (last_output_arr is not None
+                    and last_output_arr.shape == (H, W, Cin)
+                    and last_output_arr.dtype == np.float16):
+                    in_arr = last_output_arr
+                else:
+                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                ref = pool_fp_ref(in_arr, Kh, Kw, s_h, s_w,
+                                  (pT, pB, pL, pR), op_kind, count_include_pad)
+                ref_b = ref.tobytes(order="C")
+                layer_dtype  = DT_FP16
+                is_int16     = False
+                is_fp_layer  = True
+                elem_size    = 2
+            else:
+                ref = pool_int8_ref(in_i8, Kh, Kw, s_h, s_w,
+                                    (pT, pB, pL, pR), op_kind, count_include_pad)
+                ref_b = ref.astype(np.int8).tobytes(order="C")
+
         elif opname in ("AVERAGE_POOL_2D", "MAX_POOL_2D"):
             po = fb.Pool2DOptions(); po.Init(opt_table.Bytes, opt_table.Pos)
             Kh = int(po.FilterHeight()); Kw = int(po.FilterWidth())
@@ -1358,8 +1928,27 @@ def main():
         elif opname == "SOFTMAX":
             op_kind = OP_SOFTMAX
             OH, OW, OC = H, W, Cin                    # softmax preserves shape
-            ref = softmax_int8_ref(in_i8)              # v1: real LUT-based
-            ref_b = ref.astype(np.int8).tobytes(order="C")
+            if in_t.Type() in FP_TFLITE_TYPES:
+                # v8.28: FP softmax. Pull a chained FP16 input or synth fresh
+                # (mirrors the FP CONV/POOL path). compute_fp in EWE engine
+                # uses the same loop order as softmax_fp_ref so output is
+                # FP16 byte-identical.
+                if (last_output_arr is not None
+                    and last_output_arr.shape == (H, W, Cin)
+                    and last_output_arr.dtype == np.float16):
+                    in_arr = last_output_arr
+                else:
+                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_i8 = in_arr
+                ref = softmax_fp_ref(in_arr)
+                ref_b = ref.tobytes(order="C")
+                layer_dtype = DT_FP16
+                is_int16    = False
+                is_fp_layer = True
+                elem_size   = 2
+            else:
+                ref = softmax_int8_ref(in_i8)          # v1: real LUT-based
+                ref_b = ref.astype(np.int8).tobytes(order="C")
 
         elif opname == "CONCATENATION":
             # ---- v6: channel-axis concat (most common Inception case) ----
@@ -1479,11 +2068,44 @@ def main():
             Cin = OC
 
         elif opname == "RESHAPE":
-            op_kind = OP_RESHAPE
             OH, OW, OC = to_hwc(osh)
-            assert H * W * Cin == OH * OW * OC, \
-                f"reshape size mismatch: {H*W*Cin} -> {OH*OW*OC}"
-            ref = in_i8.reshape(OH * OW * OC).astype(np.int8)
+            # v8.29: transformer-class models (llama2 / mobilenet_v3_b4 /
+            # mobilevit_v2 / sam / swin / sd_decoder/encoder) hit
+            # `H*W*Cin != OH*OW*OC` here because compile_model's shape
+            # propagation doesn't follow attention's reshape patterns
+            # (sequence-length collapse, multi-head split, batch broadcast).
+            # The pre-v8.29 assertion killed the whole compile; downgrade to
+            # a graceful skip so the rest of the graph still compiles +
+            # downstream layers fall back to fresh-rng synth (no chain).
+            if H * W * Cin != OH * OW * OC:
+                print(f"  layer {li:>2d}  reshape  in={H}x{W}x{Cin} "
+                      f"skipped (shape mismatch: in={H*W*Cin} elems "
+                      f"!= out={OH*OW*OC} elems; compile_model's shape "
+                      f"propagation probably incorrect for this op)")
+                last_output_arr = None
+                continue
+            op_kind = OP_RESHAPE
+            # RESHAPE is byte-preserving, not int8-only. Keep FP16/INT16
+            # storage width intact so L.ref_size matches the UDMA passthrough
+            # length that test_model emits from L.in_size.
+            ref = in_arr.reshape(OH * OW * OC).astype(in_arr.dtype, copy=False)
+            ref_b = ref.tobytes(order="C")
+        elif opname == "DEPTH_TO_SPACE":
+            try:
+                d2s = fb.DepthToSpaceOptions(); d2s.Init(opt_table.Bytes, opt_table.Pos)
+                block = int(d2s.BlockSize())
+            except Exception:
+                block = max(1, OH // max(H, 1))
+            if block < 1 or Cin % (block * block) != 0:
+                print(f"  layer {li:>2d}  d2spac  in={H}x{W}x{Cin} "
+                      f"skipped (invalid block={block})")
+                last_output_arr = None
+                continue
+            OH, OW, OC = H * block, W * block, Cin // (block * block)
+            reshaped = in_arr.reshape(H, W, block, block, OC)
+            ref = reshaped.transpose(0, 2, 1, 3, 4).reshape(OH, OW, OC).astype(in_arr.dtype)
+            op_kind = OP_D2SPACE
+            Kh = Kw = block
             ref_b = ref.tobytes(order="C")
         elif opname in ("CONV_2D", "DEPTHWISE_CONV_2D") and is_fp_layer:
             pass    # v8: already handled by the FP block earlier in this loop
@@ -1494,8 +2116,10 @@ def main():
         in_b  = in_arr.tobytes(order="C")
         if op_kind in (OP_CONV, OP_DWCONV, OP_FC):
             wgt_b = conv_wgt_payload                      # weights + params blob
-        elif op_kind == OP_ADD:
-            wgt_b = add_wgt_payload                       # input-B + ADD params blob
+        elif op_kind in (OP_ADD, OP_MUL, OP_SUB,
+                         OP_HARD_SWISH, OP_GELU):
+            wgt_b = add_wgt_payload                       # input-B + params (binary)
+                                                          # or 8-byte clamp params (unary)
         elif wgt.size:
             wgt_b = wgt.tobytes(order="C")
         else:
@@ -1505,9 +2129,53 @@ def main():
         zp_in_eff_local = 0
         if op_kind in (OP_CONV, OP_DWCONV, OP_FC):
             zp_in_eff_local = int(zp_in_eff)
+        # v8.29: descriptor LAYER_FMT stores each spatial / channel dim as
+        # ushort (max 65535). sd_encoder_quant attention has a 65536-row
+        # sequence (256×256 spatial→sequence flatten) which busts this on
+        # downstream ADD/RESHAPE/CONV layers. Pre-skip any layer whose dims
+        # would overflow the descriptor schema rather than die during
+        # struct.pack at file-write time.
+        DIM_MAX = 65535
+        if (max(H, W, Cin) > DIM_MAX or max(OH, OW, OC) > DIM_MAX):
+            print(f"  layer {li:>2d}  {OP_NAME[op_kind]}  in={H}x{W}x{Cin} "
+                  f"skipped (shape exceeds descriptor's ushort dim limit "
+                  f"{DIM_MAX}; out={OH}x{OW}x{OC})")
+            last_output_arr = None
+            continue
+        # LayerMeta stores k_h/k_w as uint8_t. For global spatial reductions
+        # (MEAN routed as AVG_POOL, and TFLite global-ish pools), use 255 as a
+        # pool-only sentinel meaning "full input dimension"; test_model.cpp
+        # expands it before planning tiles and PoolEngine expands it at run time.
+        k_h_meta, k_w_meta = Kh, Kw
+        if op_kind in (OP_AVG_POOL, OP_MAX_POOL):
+            if Kh > 255:
+                if Kh != H:
+                    print(f"  layer {li:>2d}  {OP_NAME[op_kind]}  in={H}x{W}x{Cin} "
+                          f"skipped (pool k_h={Kh} exceeds descriptor byte and is not global)")
+                    last_output_arr = None
+                    continue
+                k_h_meta = 255
+            if Kw > 255:
+                if Kw != W:
+                    print(f"  layer {li:>2d}  {OP_NAME[op_kind]}  in={H}x{W}x{Cin} "
+                          f"skipped (pool k_w={Kw} exceeds descriptor byte and is not global)")
+                    last_output_arr = None
+                    continue
+                k_w_meta = 255
+        budget_error = _program_budget_error(len(in_b), len(wgt_b), len(ref_b))
+        if budget_error:
+            print(f"  layer {li:>2d}  {OP_NAME[op_kind]}  in={H}x{W}x{Cin} "
+                  f"skipped ({budget_error}; stopping compile here to preserve "
+                  f"downstream chain consistency)")
+            last_output_arr = None
+            break
+        input0_tensor = int(op.Inputs(0)) if op.InputsLength() > 0 else -1
+        input1_tensor = int(op.Inputs(1)) if op.InputsLength() > 1 else -1
+        output_tensor = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
+        compiled_layer_idx = len(layers)
         layers.append(dict(
             in_h=H, in_w=W, in_c=Cin, out_h=OH, out_w=OW, out_c=OC,
-            k_h=Kh, k_w=Kw, s_h=s_h, s_w=s_w,
+            k_h=k_h_meta, k_w=k_w_meta, s_h=s_h, s_w=s_w,
             p_t=pT, p_b=pB, p_l=pL, p_r=pR,
             dram_in=DRAM_IN  + cur_i, dram_wgt=DRAM_WGT + cur_w,
             dram_out=DRAM_OUT + cur_o,
@@ -1517,7 +2185,12 @@ def main():
             op_kind=op_kind,
             dtype=layer_dtype,
             zp_in_eff=zp_in_eff_local,
+            orig_op_index=orig_op_index,
+            input0_tensor=input0_tensor,
+            input1_tensor=input1_tensor,
+            output_tensor=output_tensor,
         ))
+        op_to_compiled[orig_op_index] = compiled_layer_idx
         cur_w  += len(wgt_b); cur_i  += len(in_b); cur_o  += len(ref_b)
         wgt_off += len(wgt_b); in_off += len(in_b); ref_off += len(ref_b)
         in_blobs.append(in_b); wgt_blobs.append(wgt_b); ref_blobs.append(ref_b)
@@ -1537,7 +2210,7 @@ def main():
 
         # Canonical line — byte-identical with test_model.cpp.
         nelem = OH * OW * OC
-        if is_fp_layer:
+        if layer_dtype in (DT_FP16, DT_BFP16, DT_FP8):
             unit = "FP16"
         elif is_int16:
             unit = "INT16"
@@ -1547,6 +2220,70 @@ def main():
               f"s={s_h}x{s_w}  g={group}  out={OH}x{OW}x{OC}  "
               f"({nelem} {unit})  ready")
 
+    # v8.23: now that we know cur_w / cur_i / cur_o totals, place each region
+    # at a base that leaves no overlap with the next. 64 KB alignment between
+    # regions keeps DRAM-row accounting tidy. Each layer's dram_* address gets
+    # rewritten from its placeholder absolute (built around the old +64MB
+    # constants) to placeholder_base + (placeholder_addr - placeholder_base)
+    # under the new base.
+    new_DRAM_WGT = DRAM_BASE
+    new_DRAM_IN  = new_DRAM_WGT + _round_up(cur_w, REGION_ALIGN)
+    new_DRAM_OUT = new_DRAM_IN  + _round_up(cur_i, REGION_ALIGN)
+    for L in layers:
+        L["dram_wgt"] = new_DRAM_WGT + (L["dram_wgt"] - DRAM_WGT)
+        L["dram_in"]  = new_DRAM_IN  + (L["dram_in"]  - DRAM_IN)
+        L["dram_out"] = new_DRAM_OUT + (L["dram_out"] - DRAM_OUT)
+
+    # v3 graph sidecar: tensor-level provenance.  Unsupported/compiled-away
+    # unary ops such as YOLO LOGISTIC keep graph identity by resolving their
+    # output producer back through input(0).  Consumers are likewise chased
+    # through uncompiled ops so last-use reflects the original TFLite graph,
+    # not just the reduced MDLA layer list.
+    def _resolve_producer_layer(tensor_idx, seen_ops=None):
+        if tensor_idx is None or tensor_idx < 0:
+            return -1
+        if seen_ops is None:
+            seen_ops = set()
+        prod_op_idx = producer_op_by_tensor.get(int(tensor_idx))
+        if prod_op_idx is None:
+            return -1
+        if prod_op_idx in op_to_compiled:
+            return int(op_to_compiled[prod_op_idx])
+        if prod_op_idx in seen_ops:
+            return -1
+        seen_ops.add(prod_op_idx)
+        prod_op = sg.Operators(prod_op_idx)
+        if prod_op.InputsLength() <= 0:
+            return -1
+        return _resolve_producer_layer(int(prod_op.Inputs(0)), seen_ops)
+
+    def _compiled_consumers(tensor_idx, seen_ops=None):
+        if tensor_idx is None or tensor_idx < 0:
+            return []
+        if seen_ops is None:
+            seen_ops = set()
+        out = []
+        for consumer_op_idx in consumers_by_tensor.get(int(tensor_idx), []):
+            if consumer_op_idx in op_to_compiled:
+                out.append(int(op_to_compiled[consumer_op_idx]))
+                continue
+            if consumer_op_idx in seen_ops:
+                continue
+            seen_ops.add(consumer_op_idx)
+            consumer_op = sg.Operators(consumer_op_idx)
+            for k in range(consumer_op.OutputsLength()):
+                out.extend(_compiled_consumers(int(consumer_op.Outputs(k)), seen_ops))
+        return out
+
+    for L in layers:
+        consumers = sorted(set(c for c in _compiled_consumers(L["output_tensor"])
+                               if c >= 0 and c != op_to_compiled.get(L["orig_op_index"], -1)))
+        L["producer0_layer"] = _resolve_producer_layer(L["input0_tensor"])
+        L["producer1_layer"] = _resolve_producer_layer(L["input1_tensor"])
+        L["consumer_count"] = len(consumers)
+        L["first_consumer_layer"] = consumers[0] if consumers else -1
+        L["last_consumer_layer"] = consumers[-1] if consumers else -1
+
     # Concatenated data section: inputs first, then weights, then refs.
     inputs_section = b"".join(in_blobs)
     weights_section = b"".join(wgt_blobs)
@@ -1555,7 +2292,8 @@ def main():
     base_w = len(inputs_section)
     base_r = base_w + len(weights_section)
 
-    data_offset = HEADER_SIZE + LAYER_SIZE * len(layers)
+    graph_meta_offset = HEADER_SIZE + LAYER_SIZE * len(layers)
+    data_offset = graph_meta_offset + GRAPH_META_SIZE * len(layers)
 
     with open(args.output, "wb") as f:
         # header
@@ -1574,6 +2312,14 @@ def main():
                 data_offset + base_r + L["ref_off"],
                 L["group"], L["op_kind"], L["dtype"],
                 L["zp_in_eff"],
+            ))
+        for L in layers:
+            f.write(struct.pack(
+                GRAPH_META_FMT,
+                L["input0_tensor"], L["input1_tensor"], L["output_tensor"],
+                L["producer0_layer"], L["producer1_layer"],
+                L["first_consumer_layer"], L["last_consumer_layer"],
+                L["consumer_count"],
             ))
         # data
         f.write(inputs_section)

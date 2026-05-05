@@ -50,7 +50,9 @@ def _reexec_in_venv():
 
 _reexec_in_venv()
 
-SIM_TIME_RE = re.compile(r"sim time:\s*([\d,]+)\s*ns")
+# v8.25: test_model.cpp prints "sim time: <cycles> cycles @ 1.9 GHz (= <ms> ms)";
+# pre-v8.25 it was "sim time: <ns> ns  (= <cycles> cycles @ 1 GHz)". Match both.
+SIM_TIME_RE = re.compile(r"sim time:\s*([\d,]+)\s*(?:cycles|ns)")
 
 # v8.21: SystemC writes a multi-line license banner to stderr at startup
 # (Accellera / Copyright / "ALL RIGHTS RESERVED"); the previous "last line of
@@ -115,7 +117,7 @@ def run_one(model: Path) -> tuple[str, float | None, str]:
     if not m:
         return pattern, None, "sim-time-missing"
     cycles = int(m.group(1).replace(",", ""))
-    ms = cycles / 1e6     # 1 cycle = 1 ns @ 1 GHz
+    ms = cycles / 1.9e6   # v8.25: spec frequency = 1.9 GHz
 
     # Pass/fail count from the summary line so we can flag silent regressions.
     sm = re.search(r"summary:\s+(\d+)/(\d+)\s+layers PASS,\s+(\d+)\s+FAIL", sr.stdout or "")

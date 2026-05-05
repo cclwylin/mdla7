@@ -152,7 +152,9 @@ SC_MODULE(RequantEngine) {
             const int32_t act_max = hdr[2];
 
             // v4.1: int16 path widens the saturation range and writes 2 bytes/elem.
-            const bool int16_out = (last_dtype == DT_INT16x16);
+            // v8.27: INT16x8 hybrid also produces int16 output.
+            const bool int16_out = (last_dtype == DT_INT16x16
+                                    || last_dtype == DT_INT16x8);
             const int32_t lo = int16_out ? -32768 : -128;
             const int32_t hi = int16_out ?  32767 :  127;
             int32_t a_min = std::max(act_min, lo);

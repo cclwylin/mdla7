@@ -24,7 +24,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 - **Host 控制流**：RISC-V 把 NN graph 編成 descriptor stream（含 dependency tag），送進 Command Engine。
 - **NPU 內控制流**：Command Engine 含 **dependency tracker**，依 tag 狀態 dispatch task 給各 Engine（透過 `W` 1T 介面）。Engine 完成後上報 done tag。
-- **資料流**：DRAM (LPDDR6) ⇄ UDMA ⇄ L1_Manager ⇄ {L1Mesh SRAM, 5 Engines}。
+- **資料流**：DRAM (LPDDR5X-10667) ⇄ UDMA ⇄ L1_Manager ⇄ {L1Mesh SRAM, 5 Engines}。
 - 5 條 compute pipeline 共用一顆 L1_Manager 作為 on-chip 記憶體仲裁中心。
 
 ---
@@ -37,13 +37,13 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 | Ctrl | **Command Engine** | top controller | 解 host 下來的 descriptor，把 layer 拆成 micro-op 派給各 Engine |
 | Compute | **CONV Engine** | **65,536 4×4 base cell**（16 cluster，4 個帶 FP）| Convolution / MAC 主運算；bit-decomposable，hybrid INT+FP；見 §3A.4 |
 | Compute | **Requant Engine** | — | INT8/INT32 重新量化（scale + shift + zero-point）`[TBD]` |
-| Compute | **EWE Engine** | — | Element-Wise（add / mul / activation, ReLU 系）`[TBD]` |
+| Compute | **EWE Engine** | — | Element-Wise（add / mul / activation, ReLU 系），**64 elem/cyc** |
 | Compute | **POOL Engine** | — | Max / Avg pooling `[TBD]` |
 | Compute | **TNPS Engine** | — | Tensor 軸重排 / transpose（permute、dim swap、NHWC↔NCHW、attention Q/K/V 重排）；data-movement only，不做 MAC `[TBD]` |
 | Mem ctrl | **L1_Manager** | 中央仲裁 | 5 Engine + UDMA + L1Mesh SRAM 之間的 traffic arbiter |
-| On-chip mem | **L1Mesh SRAM** | **2 MB** | 工作 buffer（activation / weight tile） |
+| On-chip mem | **L1Mesh SRAM** | **2 MB @ 1.3 GHz** | 工作 buffer（activation / weight tile） |
 | DMA | **UDMA** | 5 op modes | DRAM ↔ on-chip 搬運；含 LINEAR / STRIDED_2D / INDEXED_GATHER / SCATTER_CONCAT / STRIDED_SLICE（見 §3A.9） |
-| Off-chip | **DRAM (LPDDR6)** | **4 GB** | host shared / model weight / activation tensor；JEDEC LPDDR6（2025），pin speed ~10.67 Gbps |
+| Off-chip | **DRAM (LPDDR5X-10667)** | **4 GB** | host shared / model weight / activation tensor；JEDEC LPDDR5X，10.667 Gbps/pin，dual-channel x32 → 85.3 GB/s peak |
 
 ---
 
@@ -61,7 +61,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 ### 3.1 各 Engine ↔ L1_Manager（藍線 = AXI 128b × N）
 
-| Engine | AXI_R (ACT) | AXI_R (WGT) | AXI_R | AXI_W | 該 Engine 對 L1_Manager 的 peak BW @ 1 GHz |
+| Engine | AXI_R (ACT) | AXI_R (WGT) | AXI_R | AXI_W | 該 Engine 對 L1_Manager 的 peak BW @ 1.9 GHz |
 |---|---|---|---|---|---|
 | CONV | **32** | **32** | — | — | R: 64 × 16B = **1024 B/cyc** = 1.024 TB/s；**無 AXI_W** |
 | Requant | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
@@ -78,7 +78,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 | 對端 | 介面 | 條數 × 128b |
 |---|---|---|
-| L1Mesh SRAM | `AXI_R` 雙向各一組 | 16 + 16（推測一組為 read、一組為 write back，或真的是 dual-port read，待 §6 確認） |
+| L1Mesh SRAM | `AXI_R` 雙向各一組 | 16 + 16 @ **1.3 GHz SRAM clock**（peak 等效 core-cycle BW 乘 1.3/1.9） |
 | UDMA | `AXI_R` + `AXI_W` | 16 + 16 |
 
 ### 3.3 UDMA ↔ DRAM（白線 = 1T 模型假設）
@@ -113,7 +113,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 | 參數 | 值 |
 |---|---|
-| 系統時脈 | **1 GHz** |
+| 系統時脈 | **1.9 GHz** |
 | CONV base cell | **4 × 4 INT multiplier**（BitFusion-style 可融合） |
 | CONV base cell 總數 | **65,536 個**（= 1,048,576 bit-mult ÷ 16 bit-mult/cell） |
 | Cluster 組織 | **16 cluster**，每 cluster 4,096 base cell |
@@ -124,41 +124,41 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 | 支援精度 | **Hybrid INT** + **Hybrid FP**（見 §3A.2 表） |
 | Requant 路徑 | **16 條 per-cluster Requant lane**，CONV 直接 chain 到 Requant（不經 L1_Manager） |
 
-### 3A.2 Hybrid-precision MAC 表（per cycle, @ 1 GHz）
+### 3A.2 Hybrid-precision MAC 表（per cycle, @ 1.9 GHz）
 
 CONV array 是 **bit-decomposable**：固定矽面積、可依 operand 精度重組 MAC 顆數。表記法 `INTa × b` = `a-bit × b-bit` 混精乘法。
 
 #### INT 系（`INTa × b`，相對 INT8×8 baseline）
 
-| Data type | MAC / cycle | Ratio | Peak ops @ 1 GHz | bit-mult / cycle |
+| Data type | MAC / cycle | Ratio | Peak ops @ 1.9 GHz | bit-mult / cycle |
 |---|---|---|---|---|
-| INT8 × 4 | 32,768 | 2.00 | **65.536 TOPS** | 1,048,576 |
-| **INT8 × 8 (baseline)** | **16,384** | **1.00** | **32.768 TOPS** | **1,048,576** |
-| INT16 × 4 | 16,384 | 1.00 | 32.768 TOPS | 1,048,576 |
-| INT16 × 8 | 8,192 | 0.50 | 16.384 TOPS | 1,048,576 |
-| INT16 × 16 | 4,096 | 0.25 | 8.192 TOPS | 1,048,576 |
+| INT8 × 4 | 32,768 | 2.00 | **124.5 TOPS** | 1,048,576 |
+| **INT8 × 8 (baseline)** | **16,384** | **1.00** | **62.3 TOPS** | **1,048,576** |
+| INT16 × 4 | 16,384 | 1.00 | 62.3 TOPS | 1,048,576 |
+| INT16 × 8 | 8,192 | 0.50 | 31.1 TOPS | 1,048,576 |
+| INT16 × 16 | 4,096 | 0.25 | 15.6 TOPS | 1,048,576 |
 
 → **invariant**：`MAC × a × b = 1,048,576 bit-mult/cycle`。
 → 可推論：4 條 64×64 ring 每條有 64×64 = 4096 個 baseline INT8 MAC slot；每個 slot 內含 64 bit-mult cell（8×8），可拆 / 拼成更小或更大的 operand。
 
 #### FP 系（4 種 16-bit 級格式 + FP8）
 
-| Data type | Exp / Mant | MAC / cycle | Ratio | Peak ops @ 1 GHz |
+| Data type | Exp / Mant | MAC / cycle | Ratio | Peak ops @ 1.9 GHz |
 |---|---|---|---|---|
-| FP8 (E4M3) | 4 / 3 | 4,096 | 0.25 | **8.192 TFLOPS** |
-| FP16 (E5M10) | 5 / 10（IEEE 754） | 4,096 | 0.25 | 8.192 TFLOPS |
-| BFP16 (E8M7) | 8 / 7（Brain Float） | 4,096 | 0.25 | 8.192 TFLOPS |
+| FP8 (E4M3) | 4 / 3 | 4,096 | 0.25 | **15.6 TFLOPS** |
+| FP16 (E5M10) | 5 / 10（IEEE 754） | 4,096 | 0.25 | 15.6 TFLOPS |
+| BFP16 (E8M7) | 8 / 7（Brain Float） | 4,096 | 0.25 | 15.6 TFLOPS |
 
 → FP 全走 4096 MAC 的子集；可能是 array 中有 1/4 slot 內含 FP-capable cell，或共用 INT mantissa 路徑 + 額外 exponent 邏輯 `[TBD]`。
 
 #### Spec 中的「peak throughput」
 
-- 報帳口徑（marketing 等）：**INT8×4 = 65.536 TOPS**（最高 INT 數字）
-- 工程口徑（程式設計師預期）：**INT8 = 32.768 TOPS**（baseline）
-- FP：**8.192 TFLOPS**（任一 FP 格式）
+- 報帳口徑（marketing 等）：**INT8×4 = 124.5 TOPS**（最高 INT 數字）
+- 工程口徑（程式設計師預期）：**INT8 = 62.3 TOPS**（baseline）
+- FP：**15.6 TFLOPS**（任一 FP 格式）
 
 > 對照：Edge TPU ≈ 4 TOPS、Apple ANE ≈ 17 TOPS、Tesla FSD ≈ 36 TOPS、TPU v4 MXU ≈ 275 TOPS / 137 TFLOPS BF16。
-> MDLA7 INT8×4 65 TOPS 落在「上端 mobile / 下端 datacenter」之間，FP 8 TFLOPS 屬於 mobile 量級。
+> MDLA7 @ 1.9 GHz **INT8×4 124 TOPS / FP 15.6 TFLOPS**，進入 mid-range datacenter 量級。
 
 #### FP32 deployment policy
 
@@ -174,11 +174,11 @@ CONV array 是 **bit-decomposable**：固定矽面積、可依 operand 精度重
 
 CONV 對 L1_Manager 的 R 介面（**只有讀，沒有寫**）：
 
-| 來源 | 條數 | bytes/cycle @ 128b | bytes/sec @ 1 GHz |
+| 來源 | 條數 | bytes/cycle @ 128b | bytes/sec @ 1.9 GHz |
 |---|---|---|---|
-| AXI_R (ACT) | 32 | 512 | **512 GB/s** |
-| AXI_R (WGT) | 32 | 512 | **512 GB/s** |
-| 合計 R | 64 | 1024 | **1.024 TB/s** |
+| AXI_R (ACT) | 32 | 512 | **973 GB/s** |
+| AXI_R (WGT) | 32 | 512 | **973 GB/s** |
+| 合計 R | 64 | 1024 | **1.946 TB/s** |
 
 **單位 cycle 的 operand 需求（理論上限，未計 reuse）：**
 
@@ -813,7 +813,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
   - 等價寫法：`cycle = ⌈ MAC_total / MAC_per_cycle(dtype) ⌉ + tile fill`，其中 `MAC_per_cycle` 查 §3A.2 表
   - INT8×8 → 16384、INT8×4 → 32768、INT16×16 → 4096、FP* → 4096
   - tile fill = 64 cycle（systolic 從注入到第一筆輸出）`[TBD]`
-  - 1 GHz 換算：cycle 數 × 1 ns = wall time
+  - 1.9 GHz 換算：wall time = cycle 數 / 1.9 GHz ≈ cycle 數 × 0.526 ns
   - **SystemC 介面**：CONV Engine config descriptor 必須帶 `dtype` + `output_channel_group_id` (per cluster) 欄位，模型查表決定 cycle 數
 - **v2**：L1_Manager arbitration + bandwidth contention
   - 80 條 R + 8 條 W 對 L1Mesh 的 16 條 R 收斂時的 stall 模型
@@ -828,8 +828,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 ### 6.1 系統參數
 - [x] ~~介面寬度 `32 / 16 / 8` 是 byte width / channel / 其他？~~ → **是 AXI 128b bus 的條數（暫定值，後續會評估）**
-- [x] ~~系統時脈頻率？~~ → **1 GHz**
-- [x] ~~CONV throughput target？~~ → **32.768 TOPS @ INT8**（由 16384 MAC × 2 × 1 GHz 推得）
+- [x] ~~系統時脈頻率？~~ → **1.9 GHz**（v8.25 起；原 1 GHz baseline 已升至 1.9 GHz 對齊 LPDDR5X-10667 BW）
+- [x] ~~CONV throughput target？~~ → **62.3 TOPS @ INT8**（由 16384 MAC × 2 × 1.9 GHz 推得）
 - [ ] 介面條數的最終值何時凍結？哪些是會調整的熱點？
 
 ### 6.2 CONV Engine
@@ -858,8 +858,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 ### 6.4 Memory
 - [ ] L1Mesh 2M SRAM 的 bank 切法、port 數
-- [x] ~~DRAM 規格~~ → **LPDDR6**（JEDEC 2025，pin speed ~10.67 Gbps）
-- [ ] LPDDR6 channel 數 / bus width（單 x32、雙 x16、四通道？決定 peak BW）
+- [x] ~~DRAM 規格~~ → **LPDDR5X-10667**（JEDEC LPDDR5X，10.667 Gbps/pin）
+- [x] ~~channel 數 / bus width~~ → **dual-channel x32**，peak BW **85.3 GB/s**（@ 1.9 GHz core ≈ 44.9 B/cyc → 模型用 48 B/cyc）
 - [ ] L1_Manager 的 arbitration policy
 
 ### 6.5 Command / Programming model

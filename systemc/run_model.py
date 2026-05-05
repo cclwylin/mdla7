@@ -36,6 +36,7 @@ OUTPUT_DIR  = HERE / "output"                           # v6: per-model artefact
 EXTRACT_PY  = HERE / "scripts" / "extract_conv.py"      # legacy single-layer
 COMPILE_PY  = HERE / "scripts" / "compile_model.py"     # full-model compiler
 PLOT_PY     = HERE / "scripts" / "plot_profile.py"      # gantt renderer
+MODEL_PROFILE_PY = HERE / "scripts" / "gen_model_profile.py"
 TEST_BIN    = BUILD_DIR / "test_tflite_conv"            # legacy single-layer
 MODEL_BIN   = BUILD_DIR / "test_model"                  # full-model runner
 BLOB_PATH   = BUILD_DIR / "conv_layer.bin"
@@ -57,6 +58,13 @@ def _artefact_paths(model: Path) -> dict[str, Path]:
         "gantt": OUTPUT_DIR / f"{stem}.profile.png",
         "html":  OUTPUT_DIR / f"{stem}.html",
     }
+
+def _refresh_model_profile_index() -> None:
+    try:
+        subprocess.run([sys.executable, str(MODEL_PROFILE_PY)],
+                       cwd=str(HERE), capture_output=True, text=True)
+    except Exception:
+        pass
 
 DEFAULT_MODEL = REPO_ROOT / "model/INT8/efficientnet_lite0_int8.tflite"
 
@@ -89,10 +97,14 @@ def _reexec_in_venv():
 _reexec_in_venv()
 
 
-# Priority order for resolving substring matches: prefer dtypes the
-# v0 simulator actually supports (INT8 path is the working one).
-_DTYPE_PRIORITY = {"INT8": 0, "UINT8": 1, "INT16": 2,
-                   "INT4": 3, "FP16": 4, "BF16": 5, "FP32": 6}
+# Priority order for resolving substring matches. ETHZ_v6 is the active
+# regression-sweep bundle (deeplab/efficientnet_b4/etc.) so it wins over older
+# ETHZ_v5 and the per-dtype dirs. Within the per-dtype tier, INT8 still wins
+# (the most thoroughly-tested path).
+_DTYPE_PRIORITY = {"ETHZ_v6": 0, "ETHZ_V6": 0,
+                   "ETHZ_v5": 1, "ETHZ_V5": 1,
+                   "INT8": 2, "UINT8": 3, "INT16": 4,
+                   "INT4": 5, "FP16": 6, "BF16": 7, "FP32": 8}
 
 
 def all_models() -> list[Path]:
@@ -374,6 +386,7 @@ def compile_and_run(model: Path) -> bool:
         try:
             html_path = _write_html_report(model, paths, log_lines)
             emit(f"  html:    {html_path}")
+            _refresh_model_profile_index()
         except Exception as e:
             emit(f"  (html report failed: {e})")
 
@@ -456,14 +469,165 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     layers  = profile.get("layers", []) or []
     total_cyc = int(summary.get("total_cycles", 0) or 0)
 
+    compile_rows_data = _parse_compile_log(log_lines)
+    ready_compile_rows = [
+        c for c in compile_rows_data
+        if c.get("status", "").startswith("ready")
+    ]
+
+    def _kb(b: int) -> str:
+        return f"{b/1024:.1f}"
+
+    def _dtype_elem_bytes(dtype: str, *, weight: bool = False) -> int:
+        d = (dtype or "").upper()
+        if weight and "INT16X8" in d:
+            return 1
+        if "INT16" in d or "FP" in d or "BF" in d:
+            return 2
+        return 1
+
+    def _conv_pure_weight_bytes(L: dict, compile_row: dict | None) -> int:
+        ih, iw, ic = (L.get("in") or [0, 0, 0])
+        oh, ow, oc = (L.get("out") or [0, 0, 0])
+        kh, kw = (L.get("k") or [0, 0])
+        group = int(L.get("group", 1) or 1)
+        dtype = str((compile_row or {}).get("dtype", "") or "")
+        if compile_row and compile_row.get("k"):
+            kh, kw = compile_row["k"]
+        return int(oc) * int(kh) * int(kw) * (int(ic) // max(group, 1)) * _dtype_elem_bytes(dtype, weight=True)
+
+    def _conv_params_bytes(L: dict, compile_row: dict | None) -> int:
+        _, _, oc = (L.get("out") or [0, 0, 0])
+        dtype = str((compile_row or {}).get("dtype", "") or "")
+        d = dtype.upper()
+        # Mirrors test_model.cpp's normal params blob. INT correlation blobs are
+        # model-specific and not present in compile-log rows, so leave those in
+        # the generic DRAM-r total instead of inventing precision we do not have.
+        if "FP" in d or "BF" in d:
+            return 8 + 4 * int(oc)
+        return 12 + 9 * int(oc)
+
+    def _annotate_udma_read_tasks(tasks: list) -> list:
+        """Return HTML-only UDMA-R tasks with layer/kind/byte tooltip metadata."""
+        annotated = [list(t[:2]) for t in tasks]
+        if not annotated or not layers:
+            return annotated
+
+        prev_end = 0
+        claimed: set[int] = set()
+        for idx, L in enumerate(layers):
+            end = int(L.get("cycles_cum", 0) or 0)
+            op = str(L.get("op", "")).strip().lower()
+            layer_tasks = [
+                ti for ti, t in enumerate(annotated)
+                if ti not in claimed and len(t) >= 2 and prev_end <= int(t[0]) < end
+            ]
+            if not layer_tasks:
+                prev_end = end
+                continue
+
+            layer_id = int(L.get("id", idx) or idx)
+            c = ready_compile_rows[idx] if idx < len(ready_compile_rows) else None
+            labels: list[tuple[str, int]] = []
+            if op in ("conv", "dwconv", "fc"):
+                params_b = _conv_params_bytes(L, c)
+                wgt_b = _conv_pure_weight_bytes(L, c)
+                labels.append(("params", params_b))
+                # If there are exactly two reads in the layer window, this is
+                # the fused CONV-class case: input is already resident in L1 and
+                # the second read is the weight slice. If there are more, the
+                # simulator emitted input/weight/tile reads; label the first
+                # weight-sized slot we can identify and leave the rest generic.
+                if len(layer_tasks) == 2:
+                    labels.append(("weight", wgt_b))
+                elif len(layer_tasks) >= 3:
+                    labels.append(("input/tile", 0))
+                    labels.append(("weight/tile", 0))
+            elif op in ("add", "mul", "sub", "h_swsh", "gelu", "softmax"):
+                labels.append(("input/params", int(L.get("dram_r", 0) or 0)))
+            elif op in ("avgpool", "maxpool"):
+                labels.append(("input", int(L.get("dram_r", 0) or 0)))
+
+            # Single-tile EWE->EWE prefetch intentionally starts the consumer's
+            # input-B read before the producer layer boundary. The raw task only
+            # has timing, so start-window labeling would otherwise call it a
+            # generic producer read even though it visually overlaps producer EWE.
+            if (len(layer_tasks) == 2 and op in ("add", "mul", "sub") and
+                    idx + 1 < len(layers)):
+                next_L = layers[idx + 1]
+                next_op = str(next_L.get("op", "")).strip().lower()
+                if next_op in ("add", "mul", "sub"):
+                    ti = layer_tasks.pop()
+                    next_id = int(next_L.get("id", idx + 1) or (idx + 1))
+                    nbytes = int(next_L.get("dram_r", 0) or 0)
+                    t = annotated[ti]
+                    label = f"L{next_id} {next_op} input/params"
+                    if nbytes:
+                        label += f" ({_kb(nbytes)} KB)"
+                    t.append(label)
+                    if nbytes:
+                        t.append(nbytes)
+                    claimed.add(ti)
+
+            for pos, ti in enumerate(layer_tasks):
+                kind, nbytes = labels[pos] if pos < len(labels) else ("read", 0)
+                t = annotated[ti]
+                label = f"L{layer_id} {op} {kind}"
+                if nbytes:
+                    label += f" ({_kb(nbytes)} KB)"
+                t.append(label)
+                if nbytes:
+                    t.append(nbytes)
+            prev_end = end
+        return annotated
+
+    def _conv_wait_tasks_from_udma(udma_tasks: list) -> list:
+        """Synthetic Gantt lane: CONV-class layer front-end waits on UDMA reads."""
+        waits = []
+        if not udma_tasks or not layers:
+            return waits
+        prev_end = 0
+        for idx, L in enumerate(layers):
+            end = int(L.get("cycles_cum", 0) or 0)
+            op = str(L.get("op", "")).strip().lower()
+            if L.get("streamed"):
+                prev_end = end
+                continue
+            if op not in ("conv", "dwconv", "fc"):
+                prev_end = end
+                continue
+            reads = [
+                t for t in udma_tasks
+                if len(t) >= 2 and prev_end <= int(t[0]) < end
+            ]
+            if not reads:
+                prev_end = end
+                continue
+            wait_end = max(int(t[1]) for t in reads)
+            if wait_end > prev_end:
+                layer_id = int(L.get("id", idx) or idx)
+                nbytes = sum(int(t[3]) for t in reads if len(t) > 3 and str(t[3]).isdigit())
+                label = f"L{layer_id} {op} waits for udma_r"
+                if nbytes:
+                    label += f" ({_kb(nbytes)} KB)"
+                waits.append([prev_end, wait_end, label, nbytes])
+            prev_end = end
+        return waits
+
     # v8.2: build an interactive SVG Gantt instead of embedding the matplotlib PNG.
     # Engines render as horizontal lanes; tasks as colored rects; horizontal
     # mouse wheel zooms; click+drag pans; hover shows tooltip.
-    eng_payload = {
-        name: {"busy": int(e.get("busy_cycles", 0) or 0),
-               "tasks": list(e.get("tasks") or [])}
-        for name, e in engines.items()
-    }
+    eng_payload = {}
+    conv_wait_tasks = []
+    for name, e in engines.items():
+        tasks = list(e.get("tasks") or [])
+        if name == "udma_r":
+            tasks = _annotate_udma_read_tasks(tasks)
+            conv_wait_tasks = _conv_wait_tasks_from_udma(tasks)
+        eng_payload[name] = {
+            "busy": int(e.get("busy_cycles", 0) or 0),
+            "tasks": tasks,
+        }
     layer_marks = [
         {"id": int(L.get("id", i)),
          "op": str(L.get("op", "")).strip(),
@@ -473,33 +637,95 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     gantt_data_json = json.dumps({
         "engines": eng_payload,
         "layers":  layer_marks,
+        "conv_wait": conv_wait_tasks,
         "total":   total_cyc,
     })
 
-    def _kb(b: int) -> str:
-        return f"{b/1024:.1f}"
+    def _dtype_mac_per_cycle(dtype: str) -> int:
+        d = (dtype or "").upper()
+        # Spec §5.3 / §3A.2: INT8×8 baseline = 16,384 MAC/cyc;
+        # INT16×16 and FP* = 4,096 MAC/cyc. INT16x8 hybrid keeps INT8
+        # weights but INT16 activations; use the conservative INT16 rate.
+        if "INT16" in d or "FP" in d or "BF" in d:
+            return 4096
+        if "INT4" in d or "INT8X4" in d:
+            return 32768
+        return 16384
+
+    def _ceil_div(a: int, b: int) -> int:
+        return (a + b - 1) // b if b > 0 else 0
+
+    def _ideal_layer_cycles(L: dict, compile_row: dict | None) -> int:
+        op = str(L.get("op", "")).strip().lower()
+        ih, iw, ic = (L.get("in")  or [0, 0, 0])
+        oh, ow, oc = (L.get("out") or [0, 0, 0])
+        kh, kw = (L.get("k") or [0, 0])
+        group = int(L.get("group", 1) or 1)
+        dtype = ""
+        if compile_row:
+            dtype = str(compile_row.get("dtype", "") or "")
+            if compile_row.get("k"):
+                kh, kw = compile_row["k"]
+        out_elems = int(oh) * int(ow) * int(oc)
+        if op in ("conv", "dwconv", "fc"):
+            if op == "dwconv":
+                macs = out_elems * int(kh) * int(kw)
+            else:
+                macs = out_elems * int(kh) * int(kw) * _ceil_div(int(ic), max(group, 1))
+            return _ceil_div(macs, _dtype_mac_per_cycle(dtype))
+        if op in ("avgpool", "maxpool"):
+            return _ceil_div(out_elems * int(kh) * int(kw), 16)
+        if op in ("add", "mul", "sub", "h_swsh", "gelu"):
+            return _ceil_div(out_elems, 16)
+        if op == "softmax":
+            return 3 * _ceil_div(out_elems, 16)
+        return 0
+
+    ideal_rows: list[tuple[int, int]] = []
+    ideal_cum = 0
+    for idx, L in enumerate(layers):
+        c = ready_compile_rows[idx] if idx < len(ready_compile_rows) else None
+        ideal = _ideal_layer_cycles(L, c)
+        ideal_cum += ideal
+        ideal_rows.append((ideal, ideal_cum))
 
     def _layer_row(L: dict) -> str:
+        layer_idx = int(L.get("id", 0) or 0)
         ih, iw, ic = (L.get("in")  or [0, 0, 0])
         oh, ow, oc = (L.get("out") or [0, 0, 0])
         kh, kw     = (L.get("k")   or [0, 0])
         sh, sw     = (L.get("s")   or [0, 0])
         th, toc    = (L.get("tiles") or [1, 1])
-        # v8.5: util column shows CONV-only utilization within the layer window.
+        ideal_layer, ideal_cum_val = (
+            ideal_rows[layer_idx] if 0 <= layer_idx < len(ideal_rows) else (0, 0)
+        )
+        cycles_layer = int(L.get('cycles_layer', 0) or 0)
+        op_norm = str(L.get("op", "")).strip().lower()
+        ideal_util = (
+            100.0 * ideal_layer / cycles_layer
+            if cycles_layer > 0 and ideal_layer > 0 and op_norm in ("conv", "dwconv", "fc")
+            else 0.0
+        )
+        # v8.5: old "conv util" is actually CONV-engine occupancy within the
+        # layer window. It includes dependency stalls hidden inside the CONV
+        # task, so keep it explicit and show ideal/actual util separately.
         util       = float(L.get("conv_util_pct", L.get("util_pct", 0.0)) or 0.0)
         passed = L.get("pass", False)
         pass_cell = ('<td style="color:#0a7d23">PASS</td>' if passed
                      else '<td style="color:#b00020">FAIL</td>')
         return ("<tr>" +
-            f"<td>{L.get('id','')}</td>" +
+            f"<td>{layer_idx}</td>" +
             f"<td>{html.escape(str(L.get('op','')).strip())}</td>" +
             f"<td>{ih}</td><td>{iw}</td><td>{ic}</td>" +
             f"<td>{oh}</td><td>{ow}</td><td>{oc}</td>" +
             f"<td>{kh}</td><td>{kw}</td><td>{sh}</td><td>{sw}</td>" +
             f"<td>{L.get('group','')}</td>" +
             f"<td>{th}×{toc}</td>" +
-            f"<td style='text-align:right'>{int(L.get('cycles_layer',0)):,}</td>" +
+            f"<td style='text-align:right'>{cycles_layer:,}</td>" +
             f"<td style='text-align:right'>{int(L.get('cycles_cum',0)):,}</td>" +
+            f"<td style='text-align:right'>{ideal_layer:,}</td>" +
+            f"<td style='text-align:right'>{ideal_cum_val:,}</td>" +
+            f"<td style='text-align:right'>{ideal_util:.2f}%</td>" +
             f"<td style='text-align:right'>{util:.1f}%</td>" +
             f"<td style='text-align:right'>{_kb(L.get('dram_r',0))}</td>" +
             (f"<td style='text-align:right;color:#b00020;font-weight:600'>{_kb(L.get('dram_w',0))}</td>"
@@ -522,7 +748,6 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     # structured table. Includes layers the simulator never sees because
     # compile skipped them (e.g. FP ADD), which otherwise only appear in the
     # raw console pre block at the bottom of the report.
-    compile_rows_data = _parse_compile_log(log_lines)
     def _compile_row(c: dict) -> str:
         ih, iw, ic = c["in"]
         if c["out"] is None:
@@ -597,7 +822,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 <div>
   <span class="kv"><b>Model:</b> {html.escape(str(model.relative_to(REPO_ROOT)))}</span>
   <span class="kv"><b>Layers:</b> {n_total} (PASS {n_pass} / FAIL {n_fail})</span>
-  <span class="kv"><b>Sim time:</b> {total_cyc/1e6:.3f} ms @ 1 GHz ({total_cyc:,} cycles)</span>
+  <span class="kv"><b>Sim time:</b> {total_cyc/1.9e6:.3f} ms @ 1.9 GHz ({total_cyc:,} cycles)</span>
   <span class="kv"><b>Util:</b> avg {float(summary.get('util_avg_pct',0.0) or 0.0):.1f}% / peak {float(summary.get('util_peak_pct',0.0) or 0.0):.1f}% ({html.escape(str(summary.get('util_peak_engine','')))})</span>
   <span class="kv"><b>DRAM r/w:</b> {summary.get('dram_read_bytes',0)/1e6:.2f} / {summary.get('dram_write_bytes',0)/1e6:.2f} MB</span>
   <span class="kv"><b>SRAM r/w:</b> {summary.get('sram_read_bytes',0)/1e6:.2f} / {summary.get('sram_write_bytes',0)/1e6:.2f} MB</span>
@@ -691,6 +916,11 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 
   function fmt(n) {{ return n.toLocaleString(); }}
   function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
+  function esc(s) {{
+    return String(s).replace(/[&<>"']/g, ch => ({{
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }}[ch]));
+  }}
   function pxToCyc(px, W) {{
     const span = view1 - view0;
     const sx = (W - LEFT - RIGHT) / span;
@@ -772,15 +1002,36 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       const color = ENG_COLORS[name] || '#888';
       const yy = Y_ENG + i * LANE_H + LANE_PAD;
       const hh = LANE_H - 2 * LANE_PAD;
-      for (const [s, e] of lane.tasks) {{
+      for (const task of lane.tasks) {{
+        const s = +task[0], e = +task[1];
         if (e <= view0 || s >= view1) continue;
         const x0 = Math.max(x(s), LEFT);
         const x1 = Math.min(x(e), W - RIGHT);
         const w  = Math.max(1, x1 - x0);
+        const label = task.length > 2 ? String(task[2]) : '';
+        const bytes = task.length > 3 ? String(task[3]) : '';
         bars += `<rect class="gantt-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
-              + `fill="${{color}}" data-eng="${{name}}" data-s="${{s}}" data-e="${{e}}"/>`;
+              + `fill="${{color}}" data-eng="${{name}}" data-s="${{s}}" data-e="${{e}}" `
+              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}"/>`;
       }}
     }});
+    const convLaneIdx = eng_names.indexOf('conv');
+    if (convLaneIdx >= 0 && data.conv_wait) {{
+      const yy = Y_ENG + convLaneIdx * LANE_H + LANE_PAD;
+      const hh = LANE_H - 2 * LANE_PAD;
+      for (const task of data.conv_wait) {{
+        const s = +task[0], e = +task[1];
+        if (e <= view0 || s >= view1) continue;
+        const x0 = Math.max(x(s), LEFT);
+        const x1 = Math.min(x(e), W - RIGHT);
+        const w  = Math.max(1, x1 - x0);
+        const label = task.length > 2 ? String(task[2]) : '';
+        const bytes = task.length > 3 ? String(task[3]) : '';
+        bars += `<rect class="gantt-task gantt-wait" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
+              + `fill="#8a8a8a" opacity="0.85" data-eng="conv wait" data-s="${{s}}" data-e="${{e}}" `
+              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}"/>`;
+      }}
+    }}
     gBars.innerHTML = bars;
 
     // X-axis ticks.
@@ -922,7 +1173,13 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     if (t && t.classList && t.classList.contains('gantt-task')) {{
       const s = +t.getAttribute('data-s');
       const e = +t.getAttribute('data-e');
-      tip.textContent = `${{t.getAttribute('data-eng')}}\\n${{fmt(s)}} → ${{fmt(e)}} cyc\\nΔ ${{fmt(e - s)}} cyc`;
+      const label = t.getAttribute('data-label') || '';
+      const bytes = +(t.getAttribute('data-bytes') || 0);
+      let text = `${{t.getAttribute('data-eng')}}`;
+      if (label) text += `\\n${{label}}`;
+      text += `\\n${{fmt(s)}} → ${{fmt(e)}} cyc\\nΔ ${{fmt(e - s)}} cyc`;
+      if (bytes) text += `\\n${{(bytes / 1024).toFixed(1)}} KB`;
+      tip.textContent = text;
       tip.style.left = (ev.pageX + 12) + 'px';
       tip.style.top  = (ev.pageY + 12) + 'px';
       tip.style.opacity = '1';
@@ -1128,7 +1385,9 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 <th>id</th><th>op</th><th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
 <th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
 <th>tiles<br>(H×OC)</th>
-<th>cyc/layer</th><th>cyc/cum</th><th>conv<br>util</th>
+<th>cyc/layer</th><th>cyc/cum</th>
+<th>ideal<br>cyc/layer</th><th>ideal<br>cyc/cum</th>
+<th>ideal<br>util</th><th>conv<br>occupancy</th>
 <th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th><th>verify</th>
 </tr></thead>
 <tbody>{layer_rows}</tbody></table>
@@ -1150,7 +1409,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   // Click a header to sort the table by that column. Numeric columns sort
   // numerically (commas / "%" / KB suffixes stripped); otherwise lexicographic.
   // Three-state: asc -> desc -> reset to original document order.
-  const numClean = s => s.replace(/[,%]/g, '').replace(/[^\d.\-eE+]/g, '');
+  const numClean = s => s.replace(/[,%]/g, '').replace(/[^\\d.\\-eE+]/g, '');
   function sortTable(tbl, idx, dir) {{
     const tbody = tbl.tBodies[0];
     const orig = tbl._origRows ||= Array.from(tbody.rows);

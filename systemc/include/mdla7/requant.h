@@ -19,12 +19,18 @@ inline int32_t saturating_doubling_high_mul(int32_t a, int32_t b) {
 }
 
 // Signed right-shift with TFLite's "round half away from zero".
+// v8.30: upcast to int64 internally — for SUB on tensors with very asymmetric
+// scale ratios (e.g. sam_quant's int8 SUB), the right-shift exponent can
+// exceed 31, which makes `int32_t(1) << exponent` undefined behaviour. int64
+// covers all plausible shifts; clamp to 62 to stay below int64 width.
 inline int32_t rounding_divide_by_pot(int32_t x, int exponent) {
     if (exponent <= 0) return x;
-    const int32_t mask      = (int32_t(1) << exponent) - 1;
-    const int32_t remainder = x & mask;
-    const int32_t threshold = (mask >> 1) + (x < 0 ? 1 : 0);
-    return (x >> exponent) + (remainder > threshold ? 1 : 0);
+    const int e = exponent < 62 ? exponent : 62;
+    const int64_t x64       = x;
+    const int64_t mask      = (int64_t(1) << e) - 1;
+    const int64_t remainder = x64 & mask;
+    const int64_t threshold = (mask >> 1) + (x < 0 ? 1 : 0);
+    return int32_t((x64 >> e) + (remainder > threshold ? 1 : 0));
 }
 
 // Apply a (Q0.31 multiplier, shift) pair produced by QuantizeMultiplier().

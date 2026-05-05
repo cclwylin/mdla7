@@ -13,8 +13,13 @@
 //                    starting at column-byte slice_begin[1] within each row.
 //                    Each output row is `length` bytes; src rows step src_stride,
 //                    dst rows step dst_stride.
+//   DEPTH_TO_SPACE : NHWC depth-to-space transform. Encoded as:
+//                    src_stride=input row bytes, dst_stride=output row bytes,
+//                    num_chunks=input rows, slice_begin={W,Cin,block,Cout},
+//                    length=element bytes.
 
 #include <systemc>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include "mdla7/descriptor.h"
@@ -56,6 +61,7 @@ SC_MODULE(Udma) {
             case UM_INDEXED_GATHER: do_gather(u);   break;
             case UM_SCATTER_CONCAT: do_concat(u);   break;
             case UM_STRIDED_SLICE:  do_slice(u);    break;
+            case UM_DEPTH_TO_SPACE: do_depth_to_space(u); break;
             default:
                 std::cout << "[UDMA] unknown mode=" << int(u.mode) << "\n";
                 wait(10, sc_core::SC_NS);
@@ -159,6 +165,46 @@ SC_MODULE(Udma) {
             l1mgr.write(d, buf.data(), u.length);
         }
         wait_bytes(uint64_t(u.length) * (r1 - r0));
+    }
+
+    void do_depth_to_space(const UdmaBody& u) {
+        const uint32_t H = u.num_chunks;
+        const uint32_t W = u.slice_begin[0];
+        const uint32_t Cin = u.slice_begin[1];
+        const uint32_t block = u.slice_begin[2];
+        const uint32_t Cout = u.slice_begin[3];
+        const uint32_t elem = u.length ? u.length : 1;
+        std::cout << "[UDMA] DEPTH_TO_SPACE  src=0x" << std::hex << u.src_addr
+                  << "  dst=0x" << u.dst_addr << std::dec
+                  << "  in=" << H << "x" << W << "x" << Cin
+                  << "  block=" << block << "  cout=" << Cout << "\n";
+        if (!H || !W || !Cin || !block || !Cout || Cin != Cout * block * block) {
+            wait(10, sc_core::SC_NS);
+            return;
+        }
+        const uint64_t src_bytes = uint64_t(H) * u.src_stride;
+        const uint64_t dst_bytes = uint64_t(H) * block * u.dst_stride;
+        std::vector<uint8_t> src(src_bytes);
+        std::vector<uint8_t> dst(dst_bytes);
+        l1mgr.read(u.src_addr, src.data(), src.size());
+        for (uint32_t ih = 0; ih < H; ++ih) {
+            for (uint32_t iw = 0; iw < W; ++iw) {
+                for (uint32_t ic = 0; ic < Cin; ++ic) {
+                    const uint32_t q = ic / Cout;
+                    const uint32_t oc = ic % Cout;
+                    const uint32_t bh = q / block;
+                    const uint32_t bw = q % block;
+                    const uint32_t oh = ih * block + bh;
+                    const uint32_t ow = iw * block + bw;
+                    const uint32_t src_off = (ih * W * Cin + iw * Cin + ic) * elem;
+                    const uint32_t dst_off = oh * u.dst_stride
+                                           + (ow * Cout + oc) * elem;
+                    std::memcpy(dst.data() + dst_off, src.data() + src_off, elem);
+                }
+            }
+        }
+        l1mgr.write(u.dst_addr, dst.data(), dst.size());
+        wait_bytes(src_bytes);
     }
 };
 
