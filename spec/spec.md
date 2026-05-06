@@ -177,10 +177,11 @@ Simulator timing modes:
 |---|---|---|
 | Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
 | Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read and write/write to the same bank serialize through bank finish arrays, so cycles can increase when traffic collides. |
+| Mesh conflict | `--l1-timing=mesh` | Adds a 4x4 mesh approximation: every 16B beat enters from an edge port, uses deterministic XY routing through one-flit/cycle router/link resources, then arbitrates for the SRAM macro port. |
 
-The fast mode is intended for regular model sweeps. The conflict mode is for
-architecture studies where L1 bank/port contention matters more than simulation
-wall time.
+The fast mode is intended for regular model sweeps. The conflict and mesh modes
+are for architecture studies where L1 bank/port contention and NoC routing hot
+spots matter more than simulation wall time.
 
 ### 3.3 UDMA ↔ DRAM（白線 = 1T 模型假設）
 

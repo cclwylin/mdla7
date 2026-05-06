@@ -174,7 +174,7 @@ pdf/
 |---|---|
 | `handoff.md` | 看目前功能狀態、版本演進、known gaps |
 | `spec/spec.md` | 看 HW architecture 與 spec |
-| `systemc/run_model.py` | 看使用者入口 |
+| `batch/run_model.py` | 看使用者入口 |
 | `systemc/src/test_model.cpp` | 看 simulator main flow |
 
 本章圖：
@@ -200,17 +200,16 @@ pdf/
 |---|---|
 | `systemc/Makefile` | SystemC build |
 | `systemc/setup.sh` | venv 與 Python dependency |
-| `systemc/run_model.py` | 單模型入口 |
-| `systemc/run_mdla6_pattern.py` | pattern regression |
-| `systemc/run_ethz_v6.py` | ETHZ sweep |
+| `batch/run_model.py` | 單模型入口 |
+| `batch/run_mdla6_pattern.py` | pattern regression |
+| `batch/run_ethz_v6.py` | ETHZ sweep |
 
 要放的 command：
 
 ```bash
-cd systemc
-python3 run_model.py --list
-python3 run_model.py inception_v3_quant
-python3 run_mdla6_pattern.py --filter unet_int16 --rerun-all
+./batch/run_model.py --list
+./batch/run_model.py inception_v3_quant
+./batch/run_mdla6_pattern.py --filter unet_int16 --rerun-all
 make -s
 ```
 
@@ -684,10 +683,10 @@ sim time: 3,443,920 cycles @ 1.9 GHz (= 1.813 ms)
 
 | 檔案 | 重點 |
 |---|---|
-| `systemc/run_model.py` | one model flow、HTML report |
-| `systemc/run_mdla6_pattern.py` | MDLA6 pattern regression |
-| `systemc/run_ethz_v6.py` | ETHZ sweep |
-| `systemc/scripts/gen_model_profile.py` | index HTML |
+| `batch/run_model.py` | one model flow、HTML report |
+| `batch/run_mdla6_pattern.py` | MDLA6 pattern regression |
+| `batch/run_ethz_v6.py` | ETHZ sweep |
+| `batch/gen_model_profile.py` | index HTML |
 | `profile_html.md` | profile format |
 
 章節內容：
@@ -698,15 +697,15 @@ sim time: 3,443,920 cycles @ 1.9 GHz (= 1.813 ms)
 - cached ok rows
 - `--rerun-all`
 - profile JSON / CSV / PNG / HTML
-- model_profile.html index
+- profile_mdla6_pattern.html index
 - 如何判讀 `compile-fail`、`sim-fail`、`N-FAIL`
 
 本章命令：
 
 ```bash
-python3 run_mdla6_pattern.py --filter inception_v3_quant --rerun-all
-python3 run_mdla6_pattern.py --rerun-all
-python3 run_ethz_v6.py
+./batch/run_mdla6_pattern.py --filter inception_v3_quant --rerun-all
+./batch/run_mdla6_pattern.py --rerun-all
+./batch/run_ethz_v6.py --filter vit --limit 3
 ```
 
 ### 第 19 章 — Debug Playbook：從 N-FAIL 到 Root Cause
@@ -742,7 +741,7 @@ python3 run_ethz_v6.py
 | Level | 題目 | 目標 |
 |---|---|---|
 | 1 | 跑 `mobilenet_v1` 並截圖 profile HTML | 熟悉工具 |
-| 1 | 在 profile 多印一個 layer byte count | 熟悉 `run_model.py` |
+| 1 | 在 profile 多印一個 layer byte count | 熟悉 `batch/run_model.py` |
 | 2 | 追一個 CONV descriptor 的 wait / signal tag | 熟悉 descriptor |
 | 2 | 手算一層 conv 的 weight bytes | 熟悉 tensor layout |
 | 3 | 新增一個 compile log 欄位 | 熟悉 compiler |
@@ -788,7 +787,7 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 
 | 順序 | 檔案 | 讀到什麼程度 |
 |---:|---|---|
-| 1 | `systemc/run_model.py` | 知道一個 model 怎麼 compile / simulate / report |
+| 1 | `batch/run_model.py` | 知道一個 model 怎麼 compile / simulate / report |
 | 2 | `systemc/scripts/compile_model.py` | 先看 main operator loop，不急著看每個 op |
 | 3 | `systemc/include/mdla7/descriptor.h` | 看 descriptor 的共同語言 |
 | 4 | `systemc/include/mdla7/system.h` | 看 module 怎麼接起來 |
@@ -799,7 +798,7 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 | 9 | `systemc/include/mdla7/udma.h` | 看 data movement |
 | 10 | `systemc/include/mdla7/memory.h` | 看 DRAM / L1 cycle |
 | 11 | `systemc/include/mdla7/ewe_pool.h` | 看 non-conv ops |
-| 12 | `systemc/run_mdla6_pattern.py` | 看 regression automation |
+| 12 | `batch/run_mdla6_pattern.py` | 看 regression automation |
 
 ---
 
@@ -956,14 +955,13 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 rg -n "CommandEngine|Descriptor|make_udma|make_desc" systemc
 
 # 跑單模型
-cd systemc
-python3 run_model.py inception_v3_quant
+./batch/run_model.py inception_v3_quant
 
 # 跑 pattern
-python3 run_mdla6_pattern.py --filter unet_int16 --rerun-all
+./batch/run_mdla6_pattern.py --filter unet_int16 --rerun-all
 
 # 看 profile
-open output/inception_v3_quant.html
+open batch/output/inception_v3_quant.html
 
 # 產 PDF
 cd ..
@@ -991,7 +989,7 @@ bash scripts/build_pdf.sh
 
 1. 先寫 `md/00_intro.md`，約 6 頁。
 2. 同時畫 `drawio/mdla7_end_to_end.drawio`。
-3. 跑一次 `python3 run_model.py inception_v3_quant`，把 console summary 和 profile HTML 截成教材範例。
+3. 跑一次 `./batch/run_model.py inception_v3_quant`，把 console summary 和 profile HTML 截成教材範例。
 4. 再寫 `md/01_build_and_run.md`，讓新人第一天就能跑起來。
 
 第一批章節完成後，再依 `scripts/build_pdf.sh` 產出 PDF，確認頁首、目錄、code block、圖尺寸都正常。

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MDLA7 Model Profiles</title>
+<title>MDLA7 MLPerf_Tiny Profiles</title>
 <style>
 :root {
   color-scheme: light;
@@ -36,7 +36,7 @@ tr:hover td { background:#f4f7fb; }
 </head>
 <body>
 <main>
-<h1>MDLA7 Model Profiles</h1>
+<h1>MDLA7 MLPerf_Tiny Profiles</h1>
 <div class="bar">
   <button id="refresh">Refresh Output</button>
   <input id="filter" placeholder="filter pattern">
@@ -48,20 +48,26 @@ tr:hover td { background:#f4f7fb; }
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
+
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
+
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","type":"","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":1.929,"conflict_ms":1.955,"ratio":3.1622950819672133,"conflict_ratio":1.013478486262312},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"0.33","our_ms":0.91,"conflict_ms":1.005,"ratio":2.7575757575757573,"conflict_ratio":1.1043956043956042},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","type":"","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.515,"conflict_ms":1.543,"ratio":2.525,"conflict_ratio":1.0184818481848186},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.528,"conflict_ms":0.532,"ratio":2.112,"conflict_ratio":1.0075757575757576},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","type":"","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.071,"conflict_ms":1.085,"ratio":1.6227272727272726,"conflict_ratio":1.0130718954248366},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":0.878,"conflict_ms":0.888,"ratio":1.4633333333333334,"conflict_ratio":1.0113895216400912},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","type":"","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":0.782,"conflict_ms":0.784,"ratio":1.261290322580645,"conflict_ratio":1.0025575447570332},{"pattern":"llama2_quant.cut","stem":"llama2_quant","type":"Transformer","link":"output/llama2_quant.html","cx":"0.71","our_ms":0.788,"conflict_ms":0.796,"ratio":1.1098591549295775,"conflict_ratio":1.0101522842639594},{"pattern":"resnet_float","stem":"resnet_float","type":"","link":"output/resnet_float.html","cx":"0.02","our_ms":0.01,"conflict_ms":0.01,"ratio":0.5,"conflict_ratio":1.0},{"pattern":"resnet_quant","stem":"resnet_quant","type":"","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.005,"conflict_ms":0.005,"ratio":0.25,"conflict_ratio":1.0}];
+const EMBEDDED_ROWS = [{"pattern":"vww_96_int8","stem":"vww_96_int8","type":"","link":"output/vww_96_int8.html","cx":"","our_ms":0.006,"conflict_ms":0.006,"mesh_ms":0.012,"ratio":null,"conflict_ratio":1.0,"mesh_ratio":2.0}];
+const LIVE_CSV = "output/mlperf_regression.csv";
+const ONLY_METRIC_ROWS = true;
+const SHOW_CX = false;
+const DEFAULT_SORT_KEY = "mesh_ratio";
 let rows = EMBEDDED_ROWS.slice();
-let sortState = { key: "ratio", dir: "desc", default: true };
+let sortState = { key: DEFAULT_SORT_KEY, dir: "desc", default: true };
 
 function fmtMs(v) {
   if (v === null || v === undefined || v === "") return "";
@@ -92,6 +98,18 @@ function fmtConflictRatio(r) {
   const n = conflictRatioOf(r);
   return n === null ? "" : n.toFixed(2);
 }
+function meshRatioOf(r) {
+  if (r.mesh_ratio !== null && r.mesh_ratio !== undefined && r.mesh_ratio !== "") {
+    const n = Number(r.mesh_ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const mesh = Number(r.mesh_ms), fast = Number(r.our_ms);
+  return Number.isFinite(mesh) && Number.isFinite(fast) && fast > 0 ? mesh / fast : null;
+}
+function fmtMeshRatio(r) {
+  const n = meshRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
 function sortRows(xs) {
   if (!sortState.default) {
     const key = sortState.key;
@@ -100,7 +118,8 @@ function sortRows(xs) {
       const av = sortValue(a, key), bv = sortValue(b, key);
       let cmp = 0;
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
-          key === "ratio" || key === "conflict_ratio") {
+          key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
+          key === "mesh_ratio") {
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -114,7 +133,7 @@ function sortRows(xs) {
     return xs;
   }
   xs.sort((a,b) => {
-    const ar = ratioOf(a), br = ratioOf(b);
+    const ar = defaultMetric(a), br = defaultMetric(b);
     if (ar !== null && br !== null && ar !== br) return br - ar;
     if (ar !== null && br === null) return -1;
     if (ar === null && br !== null) return 1;
@@ -122,11 +141,16 @@ function sortRows(xs) {
   });
   return xs;
 }
+function defaultMetric(r) {
+  return DEFAULT_SORT_KEY === "ratio" ? ratioOf(r) : sortValue(r, DEFAULT_SORT_KEY);
+}
 function sortValue(r, key) {
   if (key === "ratio") return ratioOf(r);
   if (key === "conflict_ratio") return conflictRatioOf(r);
+  if (key === "mesh_ratio") return meshRatioOf(r);
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
+  if (key === "mesh_ms") return r.mesh_ms;
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
   if (key === "type") return r.type || "";
@@ -143,7 +167,7 @@ function updateSortButtons() {
     if (!mark) return;
     if (!sortState.default && btn.dataset.sortKey === sortState.key)
       mark.textContent = sortState.dir === "asc" ? "^" : "v";
-    else if (sortState.default && btn.dataset.sortKey === "ratio")
+    else if (sortState.default && btn.dataset.sortKey === DEFAULT_SORT_KEY)
       mark.textContent = "v";
     else
       mark.textContent = "";
@@ -154,17 +178,23 @@ function render() {
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {
-    const allText = `${r.pattern} ${r.stem || ""} ${r.type || ""} ${r.cx || ""} ${fmtMs(r.our_ms)} ${fmtMs(r.conflict_ms)} ${fmtRatio(r)} ${fmtConflictRatio(r)}`.toLowerCase();
+    const parts = [r.pattern, r.stem || "", r.type || "",
+                   fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   fmtConflictRatio(r), fmtMeshRatio(r)];
+    if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
+    const allText = parts.join(" ").toLowerCase();
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(r.pattern)}</td>` +
       `<td><a href="${escAttr(r.link)}">${esc(r.stem || r.pattern)}</a></td>` +
       `<td>${esc(r.type || "")}</td>` +
-      `<td class="num">${esc(r.cx || "")}</td>` +
+      (SHOW_CX ? `<td class="num">${esc(r.cx || "")}</td>` : "") +
       `<td class="num">${esc(fmtMs(r.our_ms))}</td>` +
       `<td class="num">${esc(fmtMs(r.conflict_ms))}</td>` +
-      `<td class="num">${esc(fmtRatio(r))}</td>` +
-      `<td class="num">${esc(fmtConflictRatio(r))}</td>`;
+      `<td class="num">${esc(fmtMs(r.mesh_ms))}</td>` +
+      (SHOW_CX ? `<td class="num">${esc(fmtRatio(r))}</td>` : "") +
+      `<td class="num">${esc(fmtConflictRatio(r))}</td>` +
+      `<td class="num">${esc(fmtMeshRatio(r))}</td>`;
     body.appendChild(tr);
   }
   document.getElementById("status").textContent =
@@ -189,7 +219,8 @@ function csvParse(text) {
       pattern: pat,
       cx: row.mdla6_cx || row.CX || "",
       ms: row.mdla7_ms || "",
-      conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || ""
+      conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
+      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || ""
     };
   }
   return out;
@@ -200,19 +231,24 @@ async function refreshFromOutput() {
     status.textContent = "checking output/ ...";
     const [dirText, csvText] = await Promise.all([
       fetch("output/").then(r => r.text()),
-      fetch("output/mdla6_pattern_regression.csv").then(r => r.ok ? r.text() : "").catch(() => "")
+      fetch(LIVE_CSV).then(r => r.ok ? r.text() : "").catch(() => "")
     ]);
     const cx = csvParse(csvText);
     const doc = new DOMParser().parseFromString(dirText, "text/html");
     const names = [...doc.querySelectorAll("a")]
       .map(a => a.getAttribute("href") || "")
       .map(h => decodeURIComponent(h.split("/").pop()))
-      .filter(n => n && n.endsWith(".html") && n !== "model_profile.html" && !n.startsWith("._"));
+      .filter(n => n && n.endsWith(".html") && n !== "model_profile.html" &&
+                   !n.startsWith("profile_") &&
+                   !n.startsWith("._") && !n.endsWith(".fast.html") &&
+                   !n.endsWith(".conflict.html") && !n.endsWith(".mesh.html"));
     const next = [];
     for (const name of names) {
       const stem = name.replace(/\.html$/, "");
+      if (ONLY_METRIC_ROWS && !cx[stem]) continue;
       let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
       const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
+      const meshMs = cx[stem] && cx[stem].mesh_ms ? Number(cx[stem].mesh_ms) : null;
       try {
         const p = await fetch(`output/${stem}.profile.json`);
         if (p.ok) {
@@ -228,8 +264,10 @@ async function refreshFromOutput() {
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
         conflict_ms: conflictMs,
+        mesh_ms: meshMs,
         ratio: null,
-        conflict_ratio: null
+        conflict_ratio: null,
+        mesh_ratio: null
       });
     }
     if (next.length) rows = next;
@@ -240,6 +278,7 @@ async function refreshFromOutput() {
   }
 }
 function transformerType(stem) {
+  if (stem.includes("_L")) return "Hotspot";
   const transformer = new Set([
     "gpt2_quant", "llama2_quant", "mobilebert_quant", "vit_b16_quant",
     "swin_float", "swin_quant", "mobilevit_v2_float", "mobilevit_v2_quant",

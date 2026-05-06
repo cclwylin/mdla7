@@ -32,6 +32,7 @@
 // v8.33: selectable L1 timing:
 //        FastEstimate = aggregate 16-bank bandwidth estimate (default);
 //        PortConflict = per-bank finish-array SRAM port conflict model.
+//        MeshConflict = 4x4 mesh edge/router/link + SRAM macro conflict model.
 
 #include <systemc>
 #include <cstdint>
@@ -45,6 +46,7 @@ namespace mdla7 {
 enum class L1TimingMode {
     FastEstimate,
     PortConflict,
+    MeshConflict,
 };
 
 class L1Mesh : public sc_core::sc_module {
@@ -82,7 +84,10 @@ private:
 
     void impose_latency(sc_core::sc_time bank_finish[N_BANKS],
                         uint32_t offset, uint32_t bytes) {
-        if (timing_mode_ == L1TimingMode::PortConflict)
+        if (timing_mode_ == L1TimingMode::MeshConflict)
+            impose_mesh_latency(bank_finish, offset, bytes,
+                                bank_finish == read_bank_finish_);
+        else if (timing_mode_ == L1TimingMode::PortConflict)
             impose_bank_latency(bank_finish, offset, bytes);
         else
             impose_fast_latency(bytes);
@@ -126,10 +131,105 @@ private:
         if (max_finish > now) sc_core::wait(max_finish - now);
     }
 
+    static sc_core::sc_time service_one_cycle(sc_core::sc_time& finish,
+                                              sc_core::sc_time now) {
+        const sc_core::sc_time access(1.0, sc_core::SC_NS);
+        const sc_core::sc_time start = (finish > now) ? finish : now;
+        finish = start + access;
+        return finish;
+    }
+
+    static sc_core::sc_time service_sram_beat(sc_core::sc_time& finish,
+                                              sc_core::sc_time now,
+                                              uint32_t bytes) {
+        const double beats = double((bytes + BYTES_PER_CYCLE - 1) /
+                                    BYTES_PER_CYCLE);
+        const sc_core::sc_time access(
+            beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
+            sc_core::SC_NS);
+        const sc_core::sc_time start = (finish > now) ? finish : now;
+        finish = start + access;
+        return finish;
+    }
+
+    // Mesh mode: 16 SRAM banks sit on a 4x4 mesh. Each 16B bank stripe is one
+    // flit. The request enters from a deterministic edge port, takes XY routing
+    // through one-flit/cycle directed links, then arbitrates for the target
+    // bank's 16B/cycle SRAM macro port.
+    //
+    // This is intentionally still an architectural timing model, not a
+    // cycle-accurate packet network: current read/write calls do not carry the
+    // requester class (CONV ACT, CONV WGT, UDMA, EWE, ...), so priority is
+    // approximated by separate read/write edge ingress while all internal mesh
+    // links are shared.
+    void impose_mesh_latency(sc_core::sc_time bank_finish[N_BANKS],
+                             uint32_t offset, uint32_t bytes,
+                             bool is_read) {
+        const sc_core::sc_time now = sc_core::sc_time_stamp();
+        sc_core::sc_time max_finish = now;
+        const uint32_t end = offset + bytes;
+        for (uint32_t a = offset; a < end; ) {
+            const uint32_t bank = (a / BANK_STRIDE) % N_BANKS;
+            const uint32_t dst_x = bank % MESH_W;
+            const uint32_t dst_y = bank / MESH_W;
+            const uint32_t src_x = is_read ? 0 : (MESH_W - 1);
+            const uint32_t src_y = dst_y;
+            const uint32_t next_stripe = ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
+            const uint32_t chunk = std::min(end, next_stripe) - a;
+
+            sc_core::sc_time t = now;
+            t = service_one_cycle(mesh_edge_finish_[is_read ? 0 : 1][src_y], t);
+
+            uint32_t x = src_x;
+            uint32_t y = src_y;
+            while (x != dst_x) {
+                const bool east = x < dst_x;
+                const uint32_t out_dir = east ? DIR_E : DIR_W;
+                t = service_one_cycle(mesh_router_out_finish_[node_id(x, y)][out_dir], t);
+                if (east) {
+                    t = service_one_cycle(mesh_hlink_finish_[y][x][0], t);
+                    ++x;
+                } else {
+                    t = service_one_cycle(mesh_hlink_finish_[y][x - 1][1], t);
+                    --x;
+                }
+            }
+            while (y != dst_y) {
+                const bool south = y < dst_y;
+                const uint32_t out_dir = south ? DIR_S : DIR_N;
+                t = service_one_cycle(mesh_router_out_finish_[node_id(x, y)][out_dir], t);
+                if (south) {
+                    t = service_one_cycle(mesh_vlink_finish_[y][x][0], t);
+                    ++y;
+                } else {
+                    t = service_one_cycle(mesh_vlink_finish_[y - 1][x][1], t);
+                    --y;
+                }
+            }
+            t = service_one_cycle(mesh_router_out_finish_[node_id(x, y)][DIR_LOCAL], t);
+            t = service_sram_beat(bank_finish[bank], t, chunk);
+            if (t > max_finish) max_finish = t;
+            a += chunk;
+        }
+        if (max_finish > now) sc_core::wait(max_finish - now);
+    }
+
+    static constexpr unsigned MESH_W = 4;
+    static constexpr unsigned MESH_H = 4;
+    enum MeshDir : unsigned { DIR_N = 0, DIR_E = 1, DIR_S = 2,
+                              DIR_W = 3, DIR_LOCAL = 4 };
+    static constexpr unsigned node_id(unsigned x, unsigned y) {
+        return y * MESH_W + x;
+    }
+
     L1TimingMode timing_mode_;
     std::vector<uint8_t> mem;
     sc_core::sc_time read_bank_finish_ [N_BANKS];
     sc_core::sc_time write_bank_finish_[N_BANKS];
+    sc_core::sc_time mesh_edge_finish_[2][MESH_H];
+    sc_core::sc_time mesh_router_out_finish_[N_BANKS][5];
+    sc_core::sc_time mesh_hlink_finish_[MESH_H][MESH_W - 1][2];
+    sc_core::sc_time mesh_vlink_finish_[MESH_H - 1][MESH_W][2];
 };
 
 class Dram : public sc_core::sc_module {

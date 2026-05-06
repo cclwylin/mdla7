@@ -283,7 +283,7 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|conflict]\n";
+                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh]\n";
         return 2;
     }
     bool quiet = false;
@@ -296,10 +296,12 @@ int sc_main(int argc, char* argv[]) {
             l1_timing_mode = L1TimingMode::FastEstimate;
         } else if (arg == "--l1-timing=conflict" || arg == "--l1-conflict") {
             l1_timing_mode = L1TimingMode::PortConflict;
+        } else if (arg == "--l1-timing=mesh" || arg == "--l1-mesh") {
+            l1_timing_mode = L1TimingMode::MeshConflict;
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|conflict]\n";
+                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh]\n";
             return 2;
         }
     }
@@ -326,9 +328,10 @@ int sc_main(int argc, char* argv[]) {
               << N << " layers, v" << hdr->version << ", "
               << file.size() / 1024 << " KB)\n";
     if (!quiet) {
-        std::cout << "  L1 timing: "
-                  << (l1_timing_mode == L1TimingMode::PortConflict ? "conflict" : "fast")
-                  << "\n";
+        const char* timing_name =
+            (l1_timing_mode == L1TimingMode::MeshConflict) ? "mesh" :
+            (l1_timing_mode == L1TimingMode::PortConflict) ? "conflict" : "fast";
+        std::cout << "  L1 timing: " << timing_name << "\n";
     }
 
     // v8.22: size the DRAM model to fit this program's highest-used address.

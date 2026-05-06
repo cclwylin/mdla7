@@ -1,0 +1,306 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDLA7 MDLA6 Pattern Profiles</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg:#f7f8fa; --panel:#ffffff; --line:#d8dde6; --text:#17202a;
+  --muted:#657080; --head:#eef2f7; --link:#0b5cad;
+}
+body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       color:var(--text); background:var(--bg); }
+main { max-width:1180px; margin:0 auto; padding:24px; }
+h1 { margin:0 0 12px; font-size:24px; }
+.bar { display:flex; align-items:center; gap:10px; margin:0 0 14px; flex-wrap:wrap; }
+button { border:1px solid var(--line); background:#fff; padding:6px 10px; border-radius:6px;
+         cursor:pointer; }
+input { border:1px solid var(--line); border-radius:6px; padding:7px 9px; min-width:240px; }
+.meta { color:var(--muted); }
+table { width:100%; border-collapse:collapse; background:var(--panel);
+        border:1px solid var(--line); }
+th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }
+th { background:var(--head); position:sticky; top:0; z-index:1; }
+th.pattern { width:32%; min-width:260px; }
+th .sort-btn { display:inline-flex; align-items:center; gap:4px; border:0; background:transparent;
+                padding:0; color:inherit; font:inherit; font-weight:600; cursor:pointer; }
+th .sort-btn:hover { color:var(--link); text-decoration:underline; }
+th .sort-mark { display:inline-block; min-width:1.1em; color:var(--muted); font-size:12px; }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+a { color:var(--link); text-decoration:none; }
+a:hover { text-decoration:underline; }
+tr:hover td { background:#f4f7fb; }
+</style>
+</head>
+<body>
+<main>
+<h1>MDLA7 MDLA6 Pattern Profiles</h1>
+<div class="bar">
+  <button id="refresh">Refresh Output</button>
+  <input id="filter" placeholder="filter pattern">
+  <span class="meta" id="status"></span>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
+
+      <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
+
+      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+</main>
+<script>
+const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","type":"","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":1.929,"conflict_ms":1.955,"mesh_ms":3.463,"ratio":3.1622950819672133,"conflict_ratio":1.013478486262312,"mesh_ratio":1.7952306894764127},{"pattern":"mobilevit_v2_float","stem":"mobilevit_v2_float","type":"Transformer","link":"output/mobilevit_v2_float.html","cx":"2.16","our_ms":5.968,"conflict_ms":6.165,"mesh_ms":10.642,"ratio":2.7629629629629626,"conflict_ratio":1.033009383378016,"mesh_ratio":1.7831769436997318},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"0.33","our_ms":0.91,"conflict_ms":1.005,"mesh_ms":1.945,"ratio":2.7575757575757573,"conflict_ratio":1.1043956043956042,"mesh_ratio":2.1373626373626373},{"pattern":"srgan_quant","stem":"srgan_quant","type":"","link":"output/srgan_quant.html","cx":"3.4","our_ms":8.725,"conflict_ms":8.84,"mesh_ms":12.544,"ratio":2.566176470588235,"conflict_ratio":1.0131805157593123,"mesh_ratio":1.4377077363896849},{"pattern":"efficientnet_b4_float","stem":"efficientnet_b4_float","type":"","link":"output/efficientnet_b4_float.html","cx":"2.16","our_ms":5.496,"conflict_ms":5.672,"mesh_ms":9.971,"ratio":2.5444444444444443,"conflict_ratio":1.0320232896652108,"mesh_ratio":1.8142285298398835},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","type":"","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.515,"conflict_ms":1.543,"mesh_ms":2.751,"ratio":2.525,"conflict_ratio":1.0184818481848186,"mesh_ratio":1.815841584158416},{"pattern":"efficientnet_b4_quant","stem":"efficientnet_b4_quant","type":"","link":"output/efficientnet_b4_quant.html","cx":"0.96","our_ms":2.42,"conflict_ms":2.488,"mesh_ms":4.463,"ratio":2.5208333333333335,"conflict_ratio":1.028099173553719,"mesh_ratio":1.844214876033058},{"pattern":"sd_diffusion_quant","stem":"sd_diffusion_quant","type":"","link":"output/sd_diffusion_quant.html","cx":"1.61","our_ms":3.774,"conflict_ms":3.867,"mesh_ms":6.667,"ratio":2.3440993788819875,"conflict_ratio":1.0246422893481717,"mesh_ratio":1.7665606783253842},{"pattern":"srgan_float","stem":"srgan_float","type":"","link":"output/srgan_float.html","cx":"9.31","our_ms":20.503,"conflict_ms":20.876,"mesh_ms":24.773,"ratio":2.202255639097744,"conflict_ratio":1.0181924596400527,"mesh_ratio":1.2082622055308978},{"pattern":"mobilebert_quant.cut","stem":"mobilebert_quant","type":"Transformer","link":"output/mobilebert_quant.html","cx":"1.2","our_ms":2.626,"conflict_ms":2.643,"mesh_ms":4.784,"ratio":2.1883333333333335,"conflict_ratio":1.0064737242955064,"mesh_ratio":1.8217821782178218},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.528,"conflict_ms":0.532,"mesh_ms":1.037,"ratio":2.112,"conflict_ratio":1.0075757575757576,"mesh_ratio":1.9640151515151514},{"pattern":"sam_float.cut","stem":"sam_float","type":"Transformer","link":"output/sam_float.html","cx":"3.49","our_ms":7.242,"conflict_ms":7.269,"mesh_ms":12.309,"ratio":2.075071633237822,"conflict_ratio":1.003728251864126,"mesh_ratio":1.6996685998342997},{"pattern":"esrgan_float","stem":"esrgan_float","type":"","link":"output/esrgan_float.html","cx":"2.22","our_ms":4.46,"conflict_ms":4.494,"mesh_ms":6.327,"ratio":2.009009009009009,"conflict_ratio":1.0076233183856502,"mesh_ratio":1.418609865470852},{"pattern":"dped_int16","stem":"dped_int16","type":"","link":"output/dped_int16.html","cx":"5.42","our_ms":10.274,"conflict_ms":10.277,"mesh_ms":14.433,"ratio":1.8955719557195572,"conflict_ratio":1.0002919992213355,"mesh_ratio":1.4048082538446565},{"pattern":"yolo_v8_float","stem":"yolo_v8_float","type":"","link":"output/yolo_v8_float.html","cx":"2.16","our_ms":3.923,"conflict_ms":3.998,"mesh_ms":6.391,"ratio":1.8162037037037035,"conflict_ratio":1.0191180219219984,"mesh_ratio":1.6291103747132296},{"pattern":"esrgan_quant","stem":"esrgan_quant","type":"","link":"output/esrgan_quant.html","cx":"0.97","our_ms":1.71,"conflict_ms":1.722,"mesh_ms":3.278,"ratio":1.7628865979381443,"conflict_ratio":1.0070175438596491,"mesh_ratio":1.9169590643274854},{"pattern":"unet_int16","stem":"unet_int16","type":"","link":"output/unet_int16.html","cx":"3.39","our_ms":5.715,"conflict_ms":5.863,"mesh_ms":10.375,"ratio":1.6858407079646016,"conflict_ratio":1.025896762904637,"mesh_ratio":1.815398075240595},{"pattern":"vsr_quant","stem":"vsr_quant","type":"","link":"output/vsr_quant.html","cx":"0.77","our_ms":1.291,"conflict_ms":1.449,"mesh_ms":2.997,"ratio":1.6766233766233765,"conflict_ratio":1.1223857474825718,"mesh_ratio":2.321456235476375},{"pattern":"swin_float","stem":"swin_float","type":"Transformer","link":"output/swin_float.html","cx":"1.68","our_ms":2.795,"conflict_ms":2.796,"mesh_ms":4.835,"ratio":1.6636904761904763,"conflict_ratio":1.0003577817531306,"mesh_ratio":1.7298747763864044},{"pattern":"xlsr_float","stem":"xlsr_float","type":"","link":"output/xlsr_float.html","cx":"1.14","our_ms":1.881,"conflict_ms":2.016,"mesh_ms":4.083,"ratio":1.6500000000000001,"conflict_ratio":1.0717703349282297,"mesh_ratio":2.1706539074960127},{"pattern":"unet_float","stem":"unet_float","type":"","link":"output/unet_float.html","cx":"4.81","our_ms":7.876,"conflict_ms":7.965,"mesh_ms":11.333,"ratio":1.6374220374220376,"conflict_ratio":1.0113001523616048,"mesh_ratio":1.4389283900457084},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","type":"","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.071,"conflict_ms":1.085,"mesh_ms":1.98,"ratio":1.6227272727272726,"conflict_ratio":1.0130718954248366,"mesh_ratio":1.8487394957983194},{"pattern":"vsr_float","stem":"vsr_float","type":"","link":"output/vsr_float.html","cx":"2.37","our_ms":3.814,"conflict_ms":3.858,"mesh_ms":7.124,"ratio":1.6092827004219408,"conflict_ratio":1.011536444677504,"mesh_ratio":1.867855270057682},{"pattern":"inception_v3_float","stem":"inception_v3_float","type":"","link":"output/inception_v3_float.html","cx":"1.56","our_ms":2.457,"conflict_ms":2.458,"mesh_ms":3.946,"ratio":1.575,"conflict_ratio":1.0004070004070005,"mesh_ratio":1.6060236060236062},{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","type":"","link":"output/deeplab_v3_plus_quant.html","cx":"1.86","our_ms":2.888,"conflict_ms":3.124,"mesh_ms":6.692,"ratio":1.5526881720430106,"conflict_ratio":1.0817174515235457,"mesh_ratio":2.317174515235457},{"pattern":"midas_v3_float","stem":"midas_v3_float","type":"","link":"output/midas_v3_float.html","cx":"1.54","our_ms":2.349,"conflict_ms":2.386,"mesh_ms":4.219,"ratio":1.5253246753246754,"conflict_ratio":1.0157513835674754,"mesh_ratio":1.7960834397616006},{"pattern":"unet_quant","stem":"unet_quant","type":"","link":"output/unet_quant.html","cx":"1.84","our_ms":2.753,"conflict_ms":2.866,"mesh_ms":4.895,"ratio":1.496195652173913,"conflict_ratio":1.041046131492917,"mesh_ratio":1.7780602978568831},{"pattern":"deeplab_v3_plus_float","stem":"deeplab_v3_plus_float","type":"","link":"output/deeplab_v3_plus_float.html","cx":"4.87","our_ms":7.237,"conflict_ms":7.47,"mesh_ms":14.364,"ratio":1.4860369609856263,"conflict_ratio":1.032195661185574,"mesh_ratio":1.9848003316291283},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":0.878,"conflict_ms":0.888,"mesh_ms":1.68,"ratio":1.4633333333333334,"conflict_ratio":1.0113895216400912,"mesh_ratio":1.9134396355353074},{"pattern":"mv3_depth_float","stem":"mv3_depth_float","type":"","link":"output/mv3_depth_float.html","cx":"1.59","our_ms":2.302,"conflict_ms":2.329,"mesh_ms":4.195,"ratio":1.4477987421383647,"conflict_ratio":1.0117289313640314,"mesh_ratio":1.822328410078193},{"pattern":"sd_encoder_quant","stem":"sd_encoder_quant","type":"","link":"output/sd_encoder_quant.html","cx":"3.22","our_ms":4.467,"conflict_ms":4.606,"mesh_ms":7.385,"ratio":1.3872670807453413,"conflict_ratio":1.0311170808148646,"mesh_ratio":1.6532348332214015},{"pattern":"imdn_float","stem":"imdn_float","type":"","link":"output/imdn_float.html","cx":"5.58","our_ms":7.281,"conflict_ms":7.514,"mesh_ms":11.123,"ratio":1.3048387096774192,"conflict_ratio":1.0320010987501718,"mesh_ratio":1.5276747699491828},{"pattern":"gpt2_quant.cut","stem":"gpt2_quant","type":"Transformer","link":"output/gpt2_quant.html","cx":"1.44","our_ms":1.86,"conflict_ms":1.865,"mesh_ms":3.479,"ratio":1.2916666666666667,"conflict_ratio":1.0026881720430108,"mesh_ratio":1.8704301075268817},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","type":"","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":0.782,"conflict_ms":0.784,"mesh_ms":1.302,"ratio":1.261290322580645,"conflict_ratio":1.0025575447570332,"mesh_ratio":1.6649616368286444},{"pattern":"vit_b16_quant","stem":"vit_b16_quant","type":"Transformer","link":"output/vit_b16_quant.html","cx":"4.83","our_ms":5.95,"conflict_ms":6.034,"mesh_ms":10.472,"ratio":1.2318840579710144,"conflict_ratio":1.0141176470588236,"mesh_ratio":1.7599999999999998},{"pattern":"sd_decoder_quant","stem":"sd_decoder_quant","type":"","link":"output/sd_decoder_quant.html","cx":"6.53","our_ms":7.967,"conflict_ms":8.224,"mesh_ms":12.763,"ratio":1.2200612557427257,"conflict_ratio":1.032258064516129,"mesh_ratio":1.6019831806200577},{"pattern":"pynet_v2_float","stem":"pynet_v2_float","type":"","link":"output/pynet_v2_float.html","cx":"14.38","our_ms":16.869,"conflict_ms":17.956,"mesh_ms":28.968,"ratio":1.1730876216968011,"conflict_ratio":1.0644377260062836,"mesh_ratio":1.7172327938822693},{"pattern":"llama2_quant.cut","stem":"llama2_quant","type":"Transformer","link":"output/llama2_quant.html","cx":"0.71","our_ms":0.788,"conflict_ms":0.796,"mesh_ms":1.508,"ratio":1.1098591549295775,"conflict_ratio":1.0101522842639594,"mesh_ratio":1.913705583756345},{"pattern":"imdn_quant","stem":"imdn_quant","type":"","link":"output/imdn_quant.html","cx":"2.46","our_ms":2.499,"conflict_ms":2.747,"mesh_ms":5.364,"ratio":1.0158536585365854,"conflict_ratio":1.0992396958783512,"mesh_ratio":2.146458583433373},{"pattern":"esrgan__int16","stem":"esrgan_int16","type":"","link":"output/esrgan_int16.html","cx":"3.05","our_ms":3.065,"conflict_ms":3.09,"mesh_ms":5.759,"ratio":1.0049180327868852,"conflict_ratio":1.0081566068515497,"mesh_ratio":1.8789559543230017},{"pattern":"mobilenet_v3_b4_float","stem":"mobilenet_v3_b4_float","type":"","link":"output/mobilenet_v3_b4_float.html","cx":"2.13","our_ms":1.929,"conflict_ms":1.955,"mesh_ms":3.464,"ratio":0.9056338028169014,"conflict_ratio":1.013478486262312,"mesh_ratio":1.795749092794194},{"pattern":"pynet_v2_quant","stem":"pynet_v2_quant","type":"","link":"output/pynet_v2_quant.html","cx":"9.2","our_ms":8.225,"conflict_ms":8.69,"mesh_ms":15.136,"ratio":0.8940217391304348,"conflict_ratio":1.0565349544072948,"mesh_ratio":1.840243161094225},{"pattern":"swin_quant","stem":"swin_quant","type":"Transformer","link":"output/swin_quant.html","cx":"1.0","our_ms":0.845,"conflict_ms":0.846,"mesh_ms":1.532,"ratio":0.845,"conflict_ratio":1.0011834319526627,"mesh_ratio":1.81301775147929},{"pattern":"microisp_quant","stem":"microisp_quant","type":"","link":"output/microisp_quant.html","cx":"5.42","our_ms":4.491,"conflict_ms":4.58,"mesh_ms":7.853,"ratio":0.8285977859778597,"conflict_ratio":1.0198174126029838,"mesh_ratio":1.7486083277666444},{"pattern":"sam_quant.cut","stem":"sam_quant","type":"Transformer","link":"output/sam_quant.html","cx":"2.03","our_ms":1.671,"conflict_ms":1.689,"mesh_ms":3.061,"ratio":0.823152709359606,"conflict_ratio":1.0107719928186714,"mesh_ratio":1.831837223219629},{"pattern":"dped_quant","stem":"dped_quant","type":"","link":"output/dped_quant.html","cx":"23.27","our_ms":17.891,"conflict_ms":18.801,"mesh_ms":32.623,"ratio":0.7688440051568542,"conflict_ratio":1.050863562685149,"mesh_ratio":1.8234307752501258},{"pattern":"mobilenet_v3_b4_quant","stem":"mobilenet_v3_b4_quant","type":"","link":"output/mobilenet_v3_b4_quant.html","cx":"0.77","our_ms":0.528,"conflict_ms":0.532,"mesh_ms":1.037,"ratio":0.6857142857142857,"conflict_ratio":1.0075757575757576,"mesh_ratio":1.9640151515151514},{"pattern":"microisp_float","stem":"microisp_float","type":"","link":"output/microisp_float.html","cx":"8.39","our_ms":5.643,"conflict_ms":6.023,"mesh_ms":11.016,"ratio":0.6725864123957092,"conflict_ratio":1.0673400673400673,"mesh_ratio":1.9521531100478469},{"pattern":"resnet_float","stem":"resnet_float","type":"","link":"output/resnet_float.html","cx":"0.02","our_ms":0.01,"conflict_ms":0.01,"mesh_ms":0.018,"ratio":0.5,"conflict_ratio":1.0,"mesh_ratio":1.7999999999999998},{"pattern":"microisp_int16","stem":"microisp_int16","type":"","link":"output/microisp_int16.html","cx":"7.11","our_ms":2.901,"conflict_ms":2.995,"mesh_ms":5.834,"ratio":0.40801687763713074,"conflict_ratio":1.0324026197862808,"mesh_ratio":2.0110306790761805},{"pattern":"resnet_quant","stem":"resnet_quant","type":"","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.005,"conflict_ms":0.005,"mesh_ms":0.01,"ratio":0.25,"conflict_ratio":1.0,"mesh_ratio":2.0}];
+const LIVE_CSV = "output/mdla6_pattern_regression.csv";
+const ONLY_METRIC_ROWS = true;
+const SHOW_CX = true;
+const DEFAULT_SORT_KEY = "ratio";
+let rows = EMBEDDED_ROWS.slice();
+let sortState = { key: DEFAULT_SORT_KEY, dir: "desc", default: true };
+
+function fmtMs(v) {
+  if (v === null || v === undefined || v === "") return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(3) : String(v);
+}
+function ratioOf(r) {
+  if (r.ratio !== null && r.ratio !== undefined && r.ratio !== "") {
+    const n = Number(r.ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const ms = Number(r.our_ms), cx = Number(r.cx);
+  return Number.isFinite(ms) && Number.isFinite(cx) && cx > 0 ? ms / cx : null;
+}
+function fmtRatio(r) {
+  const n = ratioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
+function conflictRatioOf(r) {
+  if (r.conflict_ratio !== null && r.conflict_ratio !== undefined && r.conflict_ratio !== "") {
+    const n = Number(r.conflict_ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const conflict = Number(r.conflict_ms), fast = Number(r.our_ms);
+  return Number.isFinite(conflict) && Number.isFinite(fast) && fast > 0 ? conflict / fast : null;
+}
+function fmtConflictRatio(r) {
+  const n = conflictRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
+function meshRatioOf(r) {
+  if (r.mesh_ratio !== null && r.mesh_ratio !== undefined && r.mesh_ratio !== "") {
+    const n = Number(r.mesh_ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const mesh = Number(r.mesh_ms), fast = Number(r.our_ms);
+  return Number.isFinite(mesh) && Number.isFinite(fast) && fast > 0 ? mesh / fast : null;
+}
+function fmtMeshRatio(r) {
+  const n = meshRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
+function sortRows(xs) {
+  if (!sortState.default) {
+    const key = sortState.key;
+    const dir = sortState.dir === "asc" ? 1 : -1;
+    xs.sort((a,b) => {
+      const av = sortValue(a, key), bv = sortValue(b, key);
+      let cmp = 0;
+      if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
+          key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
+          key === "mesh_ratio") {
+        const an = numOrNull(av), bn = numOrNull(bv);
+        if (an !== null && bn !== null) cmp = an - bn;
+        else if (an !== null && bn === null) cmp = -1;
+        else if (an === null && bn !== null) cmp = 1;
+      } else {
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
+      }
+      if (cmp === 0) cmp = String(a.pattern).localeCompare(String(b.pattern), undefined, { numeric: true });
+      return cmp * dir;
+    });
+    return xs;
+  }
+  xs.sort((a,b) => {
+    const ar = defaultMetric(a), br = defaultMetric(b);
+    if (ar !== null && br !== null && ar !== br) return br - ar;
+    if (ar !== null && br === null) return -1;
+    if (ar === null && br !== null) return 1;
+    return String(a.pattern).localeCompare(String(b.pattern));
+  });
+  return xs;
+}
+function defaultMetric(r) {
+  return DEFAULT_SORT_KEY === "ratio" ? ratioOf(r) : sortValue(r, DEFAULT_SORT_KEY);
+}
+function sortValue(r, key) {
+  if (key === "ratio") return ratioOf(r);
+  if (key === "conflict_ratio") return conflictRatioOf(r);
+  if (key === "mesh_ratio") return meshRatioOf(r);
+  if (key === "our_ms") return r.our_ms;
+  if (key === "conflict_ms") return r.conflict_ms;
+  if (key === "mesh_ms") return r.mesh_ms;
+  if (key === "cx") return r.cx;
+  if (key === "stem") return r.stem || r.pattern;
+  if (key === "type") return r.type || "";
+  return r.pattern;
+}
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function updateSortButtons() {
+  document.querySelectorAll(".sort-btn").forEach(btn => {
+    const mark = btn.querySelector(".sort-mark");
+    if (!mark) return;
+    if (!sortState.default && btn.dataset.sortKey === sortState.key)
+      mark.textContent = sortState.dir === "asc" ? "^" : "v";
+    else if (sortState.default && btn.dataset.sortKey === DEFAULT_SORT_KEY)
+      mark.textContent = "v";
+    else
+      mark.textContent = "";
+  });
+}
+function render() {
+  const q = document.getElementById("filter").value.trim().toLowerCase();
+  const body = document.getElementById("rows");
+  body.innerHTML = "";
+  for (const r of sortRows(rows.slice())) {
+    const parts = [r.pattern, r.stem || "", r.type || "",
+                   fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   fmtConflictRatio(r), fmtMeshRatio(r)];
+    if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
+    const allText = parts.join(" ").toLowerCase();
+    if (q && !allText.includes(q)) continue;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${esc(r.pattern)}</td>` +
+      `<td><a href="${escAttr(r.link)}">${esc(r.stem || r.pattern)}</a></td>` +
+      `<td>${esc(r.type || "")}</td>` +
+      (SHOW_CX ? `<td class="num">${esc(r.cx || "")}</td>` : "") +
+      `<td class="num">${esc(fmtMs(r.our_ms))}</td>` +
+      `<td class="num">${esc(fmtMs(r.conflict_ms))}</td>` +
+      `<td class="num">${esc(fmtMs(r.mesh_ms))}</td>` +
+      (SHOW_CX ? `<td class="num">${esc(fmtRatio(r))}</td>` : "") +
+      `<td class="num">${esc(fmtConflictRatio(r))}</td>` +
+      `<td class="num">${esc(fmtMeshRatio(r))}</td>`;
+    body.appendChild(tr);
+  }
+  document.getElementById("status").textContent =
+    `${body.children.length} / ${rows.length} profiles`;
+  updateSortButtons();
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function escAttr(s) { return esc(s); }
+function csvParse(text) {
+  const lines = text.trim().split(/\r?\n/);
+  if (!lines.length) return {};
+  const hdr = lines[0].split(",");
+  const out = {};
+  for (const ln of lines.slice(1)) {
+    const cols = ln.split(",");
+    const row = Object.fromEntries(hdr.map((h,i) => [h, cols[i] || ""]));
+    const pat = row.pattern || row.Pattern || "";
+    const stem = pat.endsWith(".cut") ? pat.slice(0, -4) : pat.replaceAll("__", "_");
+    if (stem) out[stem] = {
+      pattern: pat,
+      cx: row.mdla6_cx || row.CX || "",
+      ms: row.mdla7_ms || "",
+      conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
+      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || ""
+    };
+  }
+  return out;
+}
+async function refreshFromOutput() {
+  const status = document.getElementById("status");
+  try {
+    status.textContent = "checking output/ ...";
+    const [dirText, csvText] = await Promise.all([
+      fetch("output/").then(r => r.text()),
+      fetch(LIVE_CSV).then(r => r.ok ? r.text() : "").catch(() => "")
+    ]);
+    const cx = csvParse(csvText);
+    const doc = new DOMParser().parseFromString(dirText, "text/html");
+    const names = [...doc.querySelectorAll("a")]
+      .map(a => a.getAttribute("href") || "")
+      .map(h => decodeURIComponent(h.split("/").pop()))
+      .filter(n => n && n.endsWith(".html") && n !== "model_profile.html" &&
+                   !n.startsWith("profile_") &&
+                   !n.startsWith("._") && !n.endsWith(".fast.html") &&
+                   !n.endsWith(".conflict.html") && !n.endsWith(".mesh.html"));
+    const next = [];
+    for (const name of names) {
+      const stem = name.replace(/\.html$/, "");
+      if (ONLY_METRIC_ROWS && !cx[stem]) continue;
+      let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
+      const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
+      const meshMs = cx[stem] && cx[stem].mesh_ms ? Number(cx[stem].mesh_ms) : null;
+      try {
+        const p = await fetch(`output/${stem}.profile.json`);
+        if (p.ok) {
+          const j = await p.json();
+          if (ms === null && j.summary && j.summary.total_cycles !== undefined)
+            ms = Number(j.summary.total_cycles) / 1.9e6;
+        }
+      } catch (_) {}
+      next.push({
+        pattern: (cx[stem] && cx[stem].pattern) || stem,
+        stem, link: `output/${name}`,
+        type: transformerType(stem),
+        cx: (cx[stem] && cx[stem].cx) || "",
+        our_ms: ms,
+        conflict_ms: conflictMs,
+        mesh_ms: meshMs,
+        ratio: null,
+        conflict_ratio: null,
+        mesh_ratio: null
+      });
+    }
+    if (next.length) rows = next;
+    render();
+  } catch (e) {
+    status.textContent = `using embedded snapshot; serve systemc/ over HTTP for live output scan`;
+    render();
+  }
+}
+function transformerType(stem) {
+  if (stem.includes("_L")) return "Hotspot";
+  const transformer = new Set([
+    "gpt2_quant", "llama2_quant", "mobilebert_quant", "vit_b16_quant",
+    "swin_float", "swin_quant", "mobilevit_v2_float", "mobilevit_v2_quant",
+    "sam_float", "sam_quant"
+  ]);
+  return transformer.has(stem) ? "Transformer" : "";
+}
+document.getElementById("refresh").addEventListener("click", refreshFromOutput);
+document.getElementById("filter").addEventListener("input", render);
+document.querySelectorAll(".sort-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const key = btn.dataset.sortKey;
+    if (sortState.default || sortState.key !== key) sortState = { key, dir: "asc", default: false };
+    else if (sortState.dir === "asc") sortState = { key, dir: "desc", default: false };
+    else sortState = { key: "ratio", dir: "desc", default: true };
+    render();
+  });
+});
+render();
+refreshFromOutput();
+</script>
+</body>
+</html>

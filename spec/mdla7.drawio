@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram name="MDLA7" id="mdla7-v1">
-        <mxGraphModel dx="1224" dy="1304" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2339" pageHeight="1654" math="0" shadow="0">
+        <mxGraphModel dx="836" dy="907" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2339" pageHeight="1654" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -34,7 +34,7 @@
                 <mxCell id="pool" value="POOL Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;Max / Avg / Global pool&lt;br/&gt;K ∈ {2,3,5,7}, ≤11&lt;br/&gt;Stride 1, 2&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1566" y="480" width="280" height="160" as="geometry"/>
                 </mxCell>
-                <mxCell id="tnps" value="TNPS Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;Tensor transpose&lt;br/&gt;axis permute (≤ 6D)&lt;br/&gt;NHWC ↔ NCHW&lt;br/&gt;attention reshape&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+                <mxCell id="tnps" value="TNPS Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;Tensor transpose&lt;br/&gt;axis permute (≤ 6D)&lt;br/&gt;NHWC ↔ NCHW&lt;br/&gt;attention reshape&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1962" y="480" width="280" height="160" as="geometry"/>
                 </mxCell>
                 <mxCell id="e_cmd_conv" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;exitX=0.10;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cmdeng" target="conv" edge="1">
@@ -49,7 +49,7 @@
                 <mxCell id="e_cmd_pool" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;exitX=0.70;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cmdeng" target="pool" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
-                <mxCell id="e_cmd_tnps" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;exitX=0.90;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cmdeng" target="tnps">
+                <mxCell id="e_cmd_tnps" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;exitX=0.90;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cmdeng" target="tnps" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
                 <mxCell id="lbl_W_conv" value="W (1T)" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fillColor=none;strokeColor=none;fontColor=#666666;" parent="1" vertex="1">
@@ -64,11 +64,11 @@
                 <mxCell id="lbl_W_pool" value="W (1T)" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fillColor=none;strokeColor=none;fontColor=#666666;" parent="1" vertex="1">
                     <mxGeometry x="1676" y="436" width="60" height="18" as="geometry"/>
                 </mxCell>
-                <mxCell id="lbl_W_tnps" value="W (1T)" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fillColor=none;strokeColor=none;fontColor=#666666;" vertex="1" parent="1">
+                <mxCell id="lbl_W_tnps" value="W (1T)" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fillColor=none;strokeColor=none;fontColor=#666666;" parent="1" vertex="1">
                     <mxGeometry x="2072" y="436" width="60" height="18" as="geometry"/>
                 </mxCell>
                 <mxCell id="l1mesh" value="L1Mesh&lt;br/&gt;3 MB 4x4 NoC SRAM" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="40" y="740" width="220" height="80" as="geometry"/>
+                    <mxGeometry x="40" y="740" width="190" height="80" as="geometry"/>
                 </mxCell>
                 <mxCell id="l1mgr" value="L1_Manager&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal&quot;&gt;Non-CONV engines / UDMA arbiter&lt;br/&gt;CONV ACT/WGT read bypasses to L1Mesh&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="320" y="740" width="1980" height="80" as="geometry"/>
@@ -78,8 +78,8 @@
                         <mxPoint x="95" y="740" as="sourcePoint"/>
                         <mxPoint x="430" y="640" as="targetPoint"/>
                         <Array as="points">
-                            <mxPoint x="95" y="705"/>
-                            <mxPoint x="430" y="705"/>
+                            <mxPoint x="95" y="680"/>
+                            <mxPoint x="430" y="680"/>
                         </Array>
                     </mxGeometry>
                 </mxCell>
@@ -88,7 +88,8 @@
                         <mxPoint x="205" y="740" as="sourcePoint"/>
                         <mxPoint x="615" y="640" as="targetPoint"/>
                         <Array as="points">
-                            <mxPoint x="205" y="720"/>
+                            <mxPoint x="160" y="740"/>
+                            <mxPoint x="160" y="720"/>
                             <mxPoint x="615" y="720"/>
                         </Array>
                     </mxGeometry>
@@ -129,13 +130,13 @@
                         <mxPoint x="1786" y="740" as="targetPoint"/>
                     </mxGeometry>
                 </mxCell>
-                <mxCell id="e_tnps_axi_r" value="8 AXI_R" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;fillColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+                <mxCell id="e_tnps_axi_r" value="8 AXI_R" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;fillColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;" parent="1" edge="1">
                     <mxGeometry relative="1" as="geometry">
                         <mxPoint x="2022" y="740" as="sourcePoint"/>
                         <mxPoint x="2022" y="640" as="targetPoint"/>
                     </mxGeometry>
                 </mxCell>
-                <mxCell id="e_tnps_axi_w" value="8 AXI_W" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;fillColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+                <mxCell id="e_tnps_axi_w" value="8 AXI_W" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;fillColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;" parent="1" edge="1">
                     <mxGeometry relative="1" as="geometry">
                         <mxPoint x="2182" y="640" as="sourcePoint"/>
                         <mxPoint x="2182" y="740" as="targetPoint"/>
@@ -404,140 +405,6 @@
                 <mxCell id="lgd2_l2" value="Gray dashed = 1T INT32 chain (cluster → its dedicated Requant lane).&amp;nbsp;&amp;nbsp;Blue thick = AXI 128b bus.&amp;nbsp;&amp;nbsp;Each Requant lane has independent (scale, shift, zero-point) → per-output-channel quantization." style="text;html=1;fontSize=11;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
                     <mxGeometry x="60" y="1115" width="1540" height="22" as="geometry"/>
                 </mxCell>
-            </root>
-        </mxGraphModel>
-    </diagram>
-    <diagram name="L1Mesh-4x4-NoC" id="mdla7-l1mesh-4x4-noc">
-        <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
-            <root>
-                <mxCell id="0"/>
-                <mxCell id="1" parent="0"/>
-                <mxCell id="l1n_title" value="L1Mesh 3MB — 4x4 Banked SRAM NoC" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
-                    <mxGeometry x="50" y="30" width="900" height="40" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_note" value="16 banks; each bank = 16 x 768x16B macros = 192KB. Total = 16 x 192KB = 3MB. Four mesh edges each expose 4R + 4W ports; aggregate edge capacity = 16R + 16W." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
-                    <mxGeometry x="50" y="85" width="1540" height="58" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_act" value="CONV ACT_R&lt;br/&gt;32 x 128b direct ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="80" y="210" width="260" height="70" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_wgt" value="CONV WGT_R&lt;br/&gt;32 x 128b direct ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="80" y="330" width="260" height="70" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_mgr" value="L1_Manager&lt;br/&gt;non-CONV R/W ingress&lt;br/&gt;16R + 16W" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="80" y="455" width="260" height="85" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_meshbox" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;strokeWidth=2;" parent="1" vertex="1">
-                    <mxGeometry x="500" y="190" width="760" height="720" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_meshtitle" value="Four 4x4 NoC planes sharing one 16-bank SRAM array" style="text;html=1;fontSize=16;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=#ffffff;" parent="1" vertex="1">
-                    <mxGeometry x="600" y="200" width="560" height="30" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_edge_top" value="Top edge&lt;br/&gt;4R + 4W&lt;br/&gt;WGT_R ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="850" y="155" width="220" height="55" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_edge_left" value="Left edge&lt;br/&gt;4R + 4W&lt;br/&gt;ACT_R ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="390" y="280" width="105" height="110" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_edge_right" value="Right edge&lt;br/&gt;4R + 4W&lt;br/&gt;L1Mgr_R" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="1145" y="540" width="105" height="110" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_edge_bottom" value="Bottom edge&lt;br/&gt;4R + 4W&lt;br/&gt;L1Mgr_W" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="850" y="690" width="220" height="55" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_plane_act" value="ACT_R plane&lt;br/&gt;4x4 mesh&lt;br/&gt;left-edge ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;strokeWidth=2;fontSize=13;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="560" y="255" width="220" height="150" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_wgt" value="WGT_R plane&lt;br/&gt;4x4 mesh&lt;br/&gt;top-edge ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;strokeWidth=2;fontSize=13;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="850" y="255" width="220" height="150" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_l1r" value="L1Manager_R plane&lt;br/&gt;4x4 mesh&lt;br/&gt;right-edge ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;fontSize=13;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="560" y="520" width="220" height="150" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_l1w" value="L1Manager_W plane&lt;br/&gt;4x4 mesh&lt;br/&gt;bottom-edge ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;fontSize=13;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="850" y="520" width="220" height="150" as="geometry"/></mxCell>
-                <mxCell id="l1n_shared_banks" value="shared 16-bank SRAM array&lt;br/&gt;B0..B15, 192KB each&lt;br/&gt;256 macros total&lt;br/&gt;capacity is 3MB, not 4x" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="675" y="740" width="280" height="105" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_grid1" value="4x4" style="text;html=1;fontSize=30;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#0050ef;" parent="1" vertex="1"><mxGeometry x="615" y="305" width="110" height="50" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_grid2" value="4x4" style="text;html=1;fontSize=30;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#0050ef;" parent="1" vertex="1"><mxGeometry x="905" y="305" width="110" height="50" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_grid3" value="4x4" style="text;html=1;fontSize=30;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#8a6d3b;" parent="1" vertex="1"><mxGeometry x="615" y="570" width="110" height="50" as="geometry"/></mxCell>
-                <mxCell id="l1n_plane_grid4" value="4x4" style="text;html=1;fontSize=30;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#8a6d3b;" parent="1" vertex="1"><mxGeometry x="905" y="570" width="110" height="50" as="geometry"/></mxCell>
-                <mxCell id="l1n_addr" value="bank = (addr &gt;&gt; 4) &amp;amp; 0xF&lt;br/&gt;macro = (addr &gt;&gt; 8) / 768&lt;br/&gt;row = (addr &gt;&gt; 8) % 768" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#eef7ff;strokeColor=#6c8ebf;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
-                    <mxGeometry x="1280" y="360" width="290" height="120" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_bw" value="Backend service target&lt;br/&gt;Read peak: 16 x 16B = 256B/SRAM-cycle&lt;br/&gt;Write peak: 16 x 16B = 256B/SRAM-cycle&lt;br/&gt;Direct CONV bypasses L1_Manager, not bank conflicts." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
-                    <mxGeometry x="1280" y="520" width="290" height="140" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_edge_note" value="Edge ports spread injection/ejection traffic across the 4x4 NoC. They reduce NoC-edge hot spots but do not increase per-bank SRAM service bandwidth." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
-                    <mxGeometry x="1280" y="690" width="290" height="115" as="geometry"/>
-                </mxCell>
-                <mxCell id="l1n_e_act" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="l1n_act" target="l1n_meshbox" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="l1n_e_wgt" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="l1n_wgt" target="l1n_meshbox" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="l1n_e_mgr" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="l1n_mgr" target="l1n_meshbox" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-            </root>
-        </mxGraphModel>
-    </diagram>
-    <diagram name="L1Mesh-Bank-Tile" id="mdla7-l1mesh-bank-tile">
-        <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
-            <root>
-                <mxCell id="0"/>
-                <mxCell id="1" parent="0"/>
-                <mxCell id="bt_title" value="L1Mesh Bank Tile — 192KB" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
-                    <mxGeometry x="50" y="35" width="700" height="40" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_tile" value="One L1Mesh bank tile&lt;br/&gt;192KB = 16 macros x 12KB" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;fontSize=16;fontStyle=1;" parent="1" vertex="1">
-                    <mxGeometry x="420" y="120" width="760" height="760" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_arb" value="local bank arbiter&lt;br/&gt;read priority:&lt;br/&gt;1 ACT_R&lt;br/&gt;2 WGT_R&lt;br/&gt;3 L1Mgr_R&lt;br/&gt;write: L1Mgr_W" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;fontStyle=1;align=center;" parent="1" vertex="1">
-                    <mxGeometry x="490" y="180" width="170" height="160" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_dec" value="decoder&lt;br/&gt;macro_id = line / 768&lt;br/&gt;row = line % 768" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;align=center;" parent="1" vertex="1">
-                    <mxGeometry x="710" y="180" width="210" height="110" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_port" value="bank SRAM port&lt;br/&gt;1 x 16B read beat&lt;br/&gt;1 x 16B write beat&lt;br/&gt;per SRAM cycle" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;align=center;" parent="1" vertex="1">
-                    <mxGeometry x="970" y="180" width="160" height="130" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_m0" value="M0&lt;br/&gt;768x16B" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="500" y="420" width="120" height="65" as="geometry"/></mxCell>
-                <mxCell id="bt_m1" value="M1&lt;br/&gt;768x16B" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="650" y="420" width="120" height="65" as="geometry"/></mxCell>
-                <mxCell id="bt_m2" value="M2&lt;br/&gt;768x16B" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="800" y="420" width="120" height="65" as="geometry"/></mxCell>
-                <mxCell id="bt_m3" value="M3&lt;br/&gt;768x16B" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="950" y="420" width="120" height="65" as="geometry"/></mxCell>
-                <mxCell id="bt_m4" value="M4" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="500" y="525" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m5" value="M5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="650" y="525" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m6" value="M6" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="800" y="525" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m7" value="M7" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="950" y="525" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m8" value="M8" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="500" y="620" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m9" value="M9" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="650" y="620" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m10" value="M10" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="800" y="620" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m11" value="M11" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="950" y="620" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m12" value="M12" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="500" y="715" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m13" value="M13" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="650" y="715" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m14" value="M14" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="800" y="715" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_m15" value="M15" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffafa;strokeColor=#b85450;fontSize=12;" parent="1" vertex="1"><mxGeometry x="950" y="715" width="120" height="55" as="geometry"/></mxCell>
-                <mxCell id="bt_inputs" value="Ingress to each bank tile&lt;br/&gt;ACT_R direct&lt;br/&gt;WGT_R direct&lt;br/&gt;L1Manager_R&lt;br/&gt;L1Manager_W" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#eef7ff;strokeColor=#6c8ebf;fontSize=14;align=left;verticalAlign=middle;spacingLeft=14;" parent="1" vertex="1">
-                    <mxGeometry x="80" y="260" width="250" height="165" as="geometry"/>
-                </mxCell>
-                <mxCell id="bt_calc" value="Capacity math&lt;br/&gt;macro = 768 x 16B = 12KB&lt;br/&gt;bank = 16 macros = 192KB&lt;br/&gt;mesh = 16 banks = 3MB" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=14;align=left;verticalAlign=middle;spacingLeft=14;" parent="1" vertex="1">
-                    <mxGeometry x="80" y="500" width="250" height="150" as="geometry"/>
-                </mxCell>
-            </root>
-        </mxGraphModel>
-    </diagram>
-    <diagram name="L1Mesh-Arbitration" id="mdla7-l1mesh-arbitration">
-        <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
-            <root>
-                <mxCell id="0"/>
-                <mxCell id="1" parent="0"/>
-                <mxCell id="arb_title" value="L1Mesh Request Arbitration" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
-                    <mxGeometry x="50" y="35" width="700" height="40" as="geometry"/>
-                </mxCell>
-                <mxCell id="arb_act" value="CONV ACT_R&lt;br/&gt;direct ingress&lt;br/&gt;highest read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="80" y="180" width="260" height="90" as="geometry"/></mxCell>
-                <mxCell id="arb_wgt" value="CONV WGT_R&lt;br/&gt;direct ingress&lt;br/&gt;second read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="80" y="330" width="260" height="90" as="geometry"/></mxCell>
-                <mxCell id="arb_l1r" value="L1Manager_R&lt;br/&gt;Requant / EWE / POOL / TNPS / UDMA" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="80" y="480" width="260" height="90" as="geometry"/></mxCell>
-                <mxCell id="arb_l1w" value="L1Manager_W&lt;br/&gt;write ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="80" y="660" width="260" height="75" as="geometry"/></mxCell>
-                <mxCell id="arb_read" value="per-bank read arbiter&lt;br/&gt;1 ACT_R&lt;br/&gt;2 WGT_R&lt;br/&gt;3 L1Manager_R" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="520" y="260" width="260" height="180" as="geometry"/></mxCell>
-                <mxCell id="arb_write" value="per-bank write slot&lt;br/&gt;L1Manager_W&lt;br/&gt;independent from read slot if dual-lane" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="520" y="610" width="260" height="140" as="geometry"/></mxCell>
-                <mxCell id="arb_bank" value="selected bank tile&lt;br/&gt;16B read beat&lt;br/&gt;16B write beat&lt;br/&gt;per SRAM cycle" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;fontSize=15;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="980" y="385" width="260" height="190" as="geometry"/></mxCell>
-                <mxCell id="arb_read_out" value="read data to requester" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="1350" y="300" width="220" height="70" as="geometry"/></mxCell>
-                <mxCell id="arb_note" value="Direct CONV ingress bypasses L1_Manager arbitration, but all requests still converge at per-bank service. This keeps compute reads preferred without pretending the SRAM has unlimited read ports." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=14;align=left;verticalAlign=middle;spacingLeft=14;" parent="1" vertex="1"><mxGeometry x="970" y="650" width="560" height="100" as="geometry"/></mxCell>
-                <mxCell id="arb_e1" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_act" target="arb_read" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e2" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_wgt" target="arb_read" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e3" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_l1r" target="arb_read" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e4" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_l1w" target="arb_write" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e5" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_read" target="arb_bank" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e6" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_write" target="arb_bank" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-                <mxCell id="arb_e7" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="arb_bank" target="arb_read_out" edge="1"><mxGeometry relative="1" as="geometry"/></mxCell>
             </root>
         </mxGraphModel>
     </diagram>

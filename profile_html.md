@@ -1,32 +1,36 @@
 # Profile HTML Format
 
 This document describes the current MDLA7 profile HTML formats generated under
-`systemc/`.
+`batch/`.
 
-There are two HTML report types:
+There are two HTML report shapes:
 
 | File | Generator | Purpose |
 | --- | --- | --- |
-| `systemc/output/<model>.html` | `systemc/run_model.py::_write_html_report` | Per-model layer profile, engine timeline, compile log, and bandwidth/cycle summary. |
-| `systemc/model_profile.html` | `systemc/scripts/gen_model_profile.py` | Index page listing available per-model HTML reports in `systemc/output/`. |
+| `batch/output/<model>.html` | `batch/run_model.py::_write_html_report` | Per-model layer profile, engine timeline, compile log, and bandwidth/cycle summary. |
+| `batch/profile_mdla6_pattern.html` | `batch/gen_model_profile.py` via `batch/run_mdla6_pattern.py` | MDLA6-pattern index with CX baseline columns. |
+| `batch/profile_hotspot.html` | `batch/gen_model_profile.py` via `batch/run_hotspot.py` | Hotspot-slice index without CX columns; sorted for L1 timing debug. |
+| `batch/profile_ethz_v5.html` | `batch/gen_model_profile.py` via `batch/run_ethz_v5.py` | ETHZ_v5 corpus index without CX columns. |
+| `batch/profile_ethz_v6.html` | `batch/gen_model_profile.py` via `batch/run_ethz_v6.py` | ETHZ_v6 corpus index without CX columns. |
+| `batch/profile_mlperf.html` | `batch/gen_model_profile.py` via `batch/run_mlperf.py` | MLPerf Tiny corpus index without CX columns. |
 
 All HTML files are self-contained snapshots with inline CSS/JS. They can be
-opened directly with `file://`; `model_profile.html` can additionally refresh
-from `output/` when served over HTTP.
+opened directly with `file://`; the profile indexes can additionally refresh
+from `output/` when served from the `batch/` directory over HTTP.
 
 ## Per-Model Profile HTML
 
 Path pattern:
 
 ```text
-systemc/output/<model_stem>.html
+batch/output/<model_stem>.html
 ```
 
 Main data sources:
 
 | Source | Usage |
 | --- | --- |
-| `systemc/output/<model_stem>.profile.json` | Source of truth for simulated cycles, engine busy time, engine tasks, layer stats, verification status, and memory traffic. |
+| `batch/output/<model_stem>.profile.json` | Source of truth for simulated cycles, engine busy time, engine tasks, layer stats, verification status, and memory traffic. |
 | Console compile log from `compile_model.py` | Parsed for compile-log rows, dtype display, and skipped compile layers. |
 
 ### Page Sections
@@ -251,29 +255,41 @@ Current base style:
 | `.filter` | Margin `4px 0 8px`, padding `4px 6px`, min-width 280px. |
 | `.sort-ind` | Small muted sort indicator. |
 
-## Model Profile Index HTML
+## Profile Index HTML
 
-Path:
+Paths:
 
 ```text
-systemc/model_profile.html
+batch/profile_mdla6_pattern.html
+batch/profile_hotspot.html
+batch/profile_ethz_v5.html
+batch/profile_ethz_v6.html
+batch/profile_mlperf.html
 ```
 
 Purpose:
 
-- Provide a systemc-level landing page for all available
-  `systemc/output/*.html` reports.
+- Provide batch-level landing pages for selected `batch/output/*.html` reports.
 - Work as a static snapshot when opened through `file://`.
-- Refresh from `output/` when served by an HTTP server with directory listing.
+- Refresh from `output/` relative to the profile page when served from `batch/`
+  by an HTTP server with directory listing.
 
 ### Columns
 
 | Column | Meaning |
 | --- | --- |
 | `pattern` | Pattern/model name. Prefer CSV pattern name when available. |
-| `link` | Link to `output/<model_stem>.html`. |
-| `cx` | MDLA6 baseline CX value. |
+| `link` | Relative link `output/<model_stem>.html`, which resolves to `batch/output/<model_stem>.html` when opened from `batch/`. |
+| `cx` | MDLA6 baseline CX value. Present only in `profile_mdla6_pattern.html`. |
 | `our_ms` | MDLA7 measured time in milliseconds. This is not cycles. |
+| `conflict_ms` | MDLA7 time with per-bank SRAM port conflict timing. |
+| `mesh_ms` | MDLA7 time with mesh router/link timing. |
+| `conflict/fast` | `conflict_ms / our_ms`. |
+| `mesh/fast` | `mesh_ms / our_ms`. |
+
+Only `profile_mdla6_pattern.html` shows `cx` and `myms/cx`. Hotspot, ETHZ, and
+MLPerf indexes intentionally hide CX columns because those corpora do not have
+an MDLA6 baseline in the runner CSV.
 
 ### Embedded Row Shape
 
@@ -296,24 +312,32 @@ const EMBEDDED_ROWS = [
 The generator scans:
 
 ```text
-systemc/output/*.html
+batch/output/*.html
 ```
 
 Excluded names:
 
 ```text
-model_profile.html
+profile_mdla6_pattern.html
+profile_hotspot.html
 ._*
+*.fast.html
+*.conflict.html
+*.mesh.html
 ```
 
 Metric sources:
 
 | Source | Usage |
 | --- | --- |
-| `systemc/mdla6_ethz_v6_sorted.csv` | Baseline pattern list and CX values. |
-| `systemc/output/mdla6_pattern_regression.csv` | Latest regression result rows and preferred `our_ms` values. |
-| `systemc/output/<stem>.profile.json` | Fallback `our_ms = total_cycles / 1.9e6`. |
-| `systemc/output/<stem>.html` | Fallback parse of `Sim time` ms or cycles. |
+| `batch/mdla6_ethz_v6_sorted.csv` | Baseline pattern list and CX values for MDLA6-pattern reports. |
+| `batch/output/mdla6_pattern_regression.csv` | Latest regression result rows and preferred `our_ms` values. |
+| `batch/output/hotspot_regression.csv` | Latest Hotspot slice result rows. |
+| `batch/output/ethz_v5_regression.csv` | Latest ETHZ_v5 corpus result rows. |
+| `batch/output/ethz_v6_regression.csv` | Latest ETHZ_v6 corpus result rows. |
+| `batch/output/mlperf_regression.csv` | Latest MLPerf Tiny corpus result rows. |
+| `batch/output/<stem>.profile.json` | Fallback `our_ms = total_cycles / 1.9e6`. |
+| `batch/output/<stem>.html` | Fallback parse of `Sim time` ms or cycles. |
 
 Pattern normalization:
 
@@ -326,7 +350,8 @@ Pattern normalization:
 2. `total_cycles / 1.9e6` from `<stem>.profile.json`.
 3. Parsed `Sim time` from `<stem>.html`.
 
-Rows are sorted by numeric `cx`, then by pattern name.
+MDLA6 rows default-sort by `myms/cx`. Non-CX indexes default-sort by
+`mesh/fast`.
 
 ### Refresh Behavior
 
@@ -334,7 +359,7 @@ Toolbar controls:
 
 | Control | Behavior |
 | --- | --- |
-| `Refresh Output` | Fetch `output/` directory listing and rebuild rows. |
+| `Refresh Output` | Fetch `output/` directory listing relative to the opened profile page and rebuild rows. |
 | `filter pattern` | Substring filter on pattern/stem/link fields. |
 | Status text | Shows whether data came from embedded snapshot or refresh. |
 
@@ -363,5 +388,5 @@ Current index style:
   CONV-side waiting. It is different from `ideal util`.
 - `ideal cyc/layer` is intentionally optimistic. Use it to compare compute
   demand, not to explain total layer latency by itself.
-- `our_ms` in `model_profile.html` is milliseconds. Raw cycles should only be
+- `our_ms` in profile index pages is milliseconds. Raw cycles should only be
   shown inside the per-model HTML summary.

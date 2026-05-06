@@ -7,7 +7,7 @@ emits a CSV next to the regular ETHZ sweep that pairs the MDLA7 sim time
 with the MDLA6 baseline:
 
     output/mdla6_pattern_regression.csv
-        pattern,mdla6_cx,mdla7_ms,mdla7_conflict_ms,status,conflict_status
+        pattern,mdla6_cx,mdla7_ms,mdla7_conflict_ms,mdla7_mesh_ms,status,conflict_status,mesh_status
 
     output/<model>.html
         per-model profile report, matching run_model.py's HTML view
@@ -30,14 +30,14 @@ exceeds the practical 32-bit descriptor/file-offset budget and produces
 multi-GB artifacts.
 
 Usage:
-    python3 systemc/run_mdla6_pattern.py                    # default: cache prior ok
-    python3 systemc/run_mdla6_pattern.py --rerun-all        # force re-test all rows
-    python3 systemc/run_mdla6_pattern.py --csv-in  <path>   # override input
-    python3 systemc/run_mdla6_pattern.py --csv-out <path>   # override output cache
-    python3 systemc/run_mdla6_pattern.py --filter mobilenet # substring filter
-    python3 systemc/run_mdla6_pattern.py --limit 5          # only run first 5 rows
-    python3 systemc/run_mdla6_pattern.py --offset 10 --limit 5
-    python3 systemc/run_mdla6_pattern.py --include-excluded # debug excluded rows
+    ./batch/run_mdla6_pattern.py                    # default: cache prior ok
+    ./batch/run_mdla6_pattern.py --rerun-all        # force re-test all rows
+    ./batch/run_mdla6_pattern.py --csv-in  <path>   # override input
+    ./batch/run_mdla6_pattern.py --csv-out <path>   # override output cache
+    ./batch/run_mdla6_pattern.py --filter mobilenet # substring filter
+    ./batch/run_mdla6_pattern.py --limit 5          # only run first 5 rows
+    ./batch/run_mdla6_pattern.py --offset 10 --limit 5
+    ./batch/run_mdla6_pattern.py --include-excluded # debug excluded rows
 """
 
 from __future__ import annotations
@@ -55,10 +55,11 @@ from pathlib import Path
 
 HERE       = Path(__file__).resolve().parent
 REPO_ROOT  = HERE.parent
-COMPILE_PY = HERE / "scripts" / "compile_model.py"
-PLOT_PY    = HERE / "scripts" / "plot_profile.py"
-MODEL_PROFILE_PY = HERE / "scripts" / "gen_model_profile.py"
-TEST_BIN   = HERE / "build" / "test_model"
+SYSTEMC_DIR = REPO_ROOT / "systemc"
+COMPILE_PY = SYSTEMC_DIR / "scripts" / "compile_model.py"
+PLOT_PY    = SYSTEMC_DIR / "scripts" / "plot_profile.py"
+MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
+TEST_BIN   = SYSTEMC_DIR / "build" / "test_model"
 OUT_DIR    = HERE / "output"
 
 DEFAULT_CSV_IN  = HERE / "mdla6_ethz_v6_sorted.csv"
@@ -93,7 +94,10 @@ _BANNER_HINTS = ("ALL RIGHTS RESERVED", "Accellera", "Copyright (c)",
 
 def _refresh_model_profile_index() -> None:
     try:
-        subprocess.run([sys.executable, str(MODEL_PROFILE_PY)],
+        subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
+                        "--html-out", "profile_mdla6_pattern.html",
+                        "--title", "MDLA7 MDLA6 Pattern Profiles",
+                        "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
     except Exception:
         pass
@@ -178,22 +182,29 @@ def _write_mode_html(model_path: Path, paths: dict[str, Path],
 def _write_combined_html(model_path: Path,
                          fast_html: Path,
                          conflict_html: Path,
+                         mesh_html: Path,
                          fast_ms: float | None,
                          conflict_ms: float | None,
+                         mesh_ms: float | None,
                          fast_status: str,
-                         conflict_status: str) -> Path:
+                         conflict_status: str,
+                         mesh_status: str) -> Path:
     paths = _artefact_paths(model_path)
-    ratio = ""
+    conflict_ratio = ""
     if fast_ms and conflict_ms is not None:
-        ratio = f"{conflict_ms / fast_ms:.3f}x"
+        conflict_ratio = f"{conflict_ms / fast_ms:.3f}x"
+    mesh_ratio = ""
+    if fast_ms and mesh_ms is not None:
+        mesh_ratio = f"{mesh_ms / fast_ms:.3f}x"
     fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
     conflict_doc = conflict_html.read_text(errors="ignore") if conflict_html.exists() else ""
+    mesh_doc = mesh_html.read_text(errors="ignore") if mesh_html.exists() else ""
     def ms(v: float | None) -> str:
         return f"{v:.3f} ms" if v is not None else ""
     doc = f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MDLA7 profile — {html.escape(model_path.name)} — fast/conflict</title>
+<title>MDLA7 profile — {html.escape(model_path.name)} — fast/conflict/mesh</title>
 <style>
 body {{ margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
        color:#222; background:#f6f7f9; }}
@@ -211,15 +222,18 @@ iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; dis
 </style></head>
 <body>
 <header>
-  <h1>{html.escape(model_path.name)} — fast/conflict profile</h1>
+  <h1>{html.escape(model_path.name)} — fast/conflict/mesh profile</h1>
   <div class="summary">
     <span><b>fast:</b> {html.escape(ms(fast_ms))} {html.escape(fast_status)}</span>
     <span><b>conflict:</b> {html.escape(ms(conflict_ms))} {html.escape(conflict_status)}</span>
-    <span><b>conflict/fast:</b> {html.escape(ratio)}</span>
+    <span><b>mesh:</b> {html.escape(ms(mesh_ms))} {html.escape(mesh_status)}</span>
+    <span><b>conflict/fast:</b> {html.escape(conflict_ratio)}</span>
+    <span><b>mesh/fast:</b> {html.escape(mesh_ratio)}</span>
   </div>
   <div class="tabs">
     <button class="tab active" data-target="fast">fast</button>
     <button class="tab" data-target="conflict">conflict</button>
+    <button class="tab" data-target="mesh">mesh</button>
   </div>
 </header>
 <section id="fast" class="pane active">
@@ -227,6 +241,9 @@ iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; dis
 </section>
 <section id="conflict" class="pane">
   <iframe title="conflict profile" srcdoc="{html.escape(conflict_doc, quote=True)}"></iframe>
+</section>
+<section id="mesh" class="pane">
+  <iframe title="mesh profile" srcdoc="{html.escape(mesh_doc, quote=True)}"></iframe>
 </section>
 <script>
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {{
@@ -268,15 +285,16 @@ def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, st
     return ms, status, sr.stdout or ""
 
 
-def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | None, float | None, str, str]:
-    """Compile + simulate one model in fast and conflict modes."""
+def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | None, float | None, float | None, str, str, str]:
+    """Compile + simulate one model in fast, conflict, and mesh modes."""
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
     if not model_path.exists():
-        return pattern, None, None, f"missing-tflite: {model_path.name}", ""
+        return pattern, None, None, None, f"missing-tflite: {model_path.name}", "", ""
     paths = _artefact_paths(model_path)
     bin_path = paths["prog"]
     conflict_paths = _mode_paths(model_path, "conflict")
+    mesh_paths = _mode_paths(model_path, "mesh")
 
     # ---- compile ----
     if progress:
@@ -287,12 +305,12 @@ def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | 
             capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
-        return pattern, None, None, "compile-timeout", ""
+        return pattern, None, None, None, "compile-timeout", "", ""
     if cr.returncode != 0:
         last = _meaningful_stderr_line(cr.stderr) or f"exit {cr.returncode}"
         if "Model provided has model identifier" in last:
             last = "corrupt .tflite"
-        return pattern, None, None, f"compile-fail: {last[:80]}", ""
+        return pattern, None, None, None, f"compile-fail: {last[:80]}", "", ""
 
     # ---- simulate: fast report path ----
     if progress:
@@ -333,16 +351,37 @@ def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | 
         else:
             conflict_status = f"{conflict_status}; html-fail"
 
+    # ---- simulate: mesh timing + report ----
+    if progress:
+        progress("simulate mesh")
+    try:
+        shutil.copyfile(bin_path, mesh_paths["prog"])
+    except OSError:
+        pass
+    mesh_ms, mesh_status, mesh_stdout = _simulate_one(mesh_paths["prog"], "mesh")
+
+    if progress:
+        progress("html mesh")
+    mesh_html = mesh_paths["html"]
+    try:
+        _write_mode_html(model_path, mesh_paths, cr.stdout or "", mesh_stdout)
+    except Exception as e:
+        if mesh_status == "ok":
+            mesh_status = f"html-fail: {str(e)[:80]}"
+        else:
+            mesh_status = f"{mesh_status}; html-fail"
+
     if progress:
         progress("html combined")
     try:
-        if fast_html.exists() and conflict_html.exists():
-            _write_combined_html(model_path, fast_html, conflict_html,
-                                 ms, conflict_ms, status, conflict_status)
+        if fast_html.exists() and conflict_html.exists() and mesh_html.exists():
+            _write_combined_html(model_path, fast_html, conflict_html, mesh_html,
+                                 ms, conflict_ms, mesh_ms,
+                                 status, conflict_status, mesh_status)
     except Exception as e:
         if status == "ok":
             status = f"html-fail: combined {str(e)[:70]}"
-    return pattern, ms, conflict_ms, status, conflict_status
+    return pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status
 
 
 def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
@@ -368,7 +407,8 @@ def _load_prior_results(csv_path: Path) -> dict[str, dict]:
     re-run because the underlying source likely changed since."""
     return {p: r for p, r in _load_prior_csv(csv_path).items()
             if r.get("status") == "ok" and r.get("mdla7_ms") and
-            r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms")}
+            r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
+            r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")}
 
 
 def main():
@@ -468,7 +508,8 @@ def main():
         with csv_path.open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["pattern", "mdla6_cx",
                                               "mdla7_ms", "mdla7_conflict_ms",
-                                              "status", "conflict_status"])
+                                              "mdla7_mesh_ms", "status",
+                                              "conflict_status", "mesh_status"])
             w.writeheader()
             w.writerows(merged)
 
@@ -483,20 +524,25 @@ def main():
             cached = prior_ok[pat]
             cached_ms = cached.get("mdla7_ms", "")
             cached_conflict_ms = cached.get("mdla7_conflict_ms", "")
+            cached_mesh_ms = cached.get("mdla7_mesh_ms", "")
             cached_status = cached.get("status", "ok")
             cached_conflict_status = cached.get("conflict_status", "ok")
+            cached_mesh_status = cached.get("mesh_status", "ok")
             ms_str = f"{float(cached_ms):>10.3f} ms" if cached_ms else f"{'—':>10s}    "
             cms_str = f"{float(cached_conflict_ms):>10.3f} ms" if cached_conflict_ms else f"{'—':>10s}    "
+            mesh_str = f"{float(cached_mesh_ms):>10.3f} ms" if cached_mesh_ms else f"{'—':>10s}    "
             _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
-                       f"fast={ms_str} conflict={cms_str} cached  "
-                       f"{cached_status}/{cached_conflict_status}")
+                       f"fast={ms_str} conflict={cms_str} mesh={mesh_str} cached  "
+                       f"{cached_status}/{cached_conflict_status}/{cached_mesh_status}")
             rows_out.append({
                 "pattern":           pat,
                 "mdla6_cx":          cx,
                 "mdla7_ms":          cached_ms,
                 "mdla7_conflict_ms": cached_conflict_ms,
+                "mdla7_mesh_ms":     cached_mesh_ms,
                 "status":            cached_status,
                 "conflict_status":   cached_conflict_status,
+                "mesh_status":       cached_mesh_status,
             })
             _checkpoint(rows_out)
             continue
@@ -506,28 +552,33 @@ def main():
             _row_update(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
                         f"{'—':>10s}      ({elapsed:5.1f}s)  running {stage}...")
 
-        pattern, ms, conflict_ms, status, conflict_status = run_one(
+        pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
             pat, Path(args.model_dir), progress=_progress)
         elapsed = time.time() - t0
         ms_str  = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         cms_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
                    else f"{'—':>10s}    ")
+        mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
+                    else f"{'—':>10s}    ")
         _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
-                   f"fast={ms_str} conflict={cms_str}  ({elapsed:5.1f}s)  "
-                   f"{status}/{conflict_status}")
+                   f"fast={ms_str} conflict={cms_str} mesh={mesh_str}  ({elapsed:5.1f}s)  "
+                   f"{status}/{conflict_status}/{mesh_status}")
         rows_out.append({
             "pattern":           pat,
             "mdla6_cx":          cx,
             "mdla7_ms":          f"{ms:.3f}" if ms is not None else "",
             "mdla7_conflict_ms": f"{conflict_ms:.3f}" if conflict_ms is not None else "",
+            "mdla7_mesh_ms":     f"{mesh_ms:.3f}" if mesh_ms is not None else "",
             "status":            status,
             "conflict_status":   conflict_status,
+            "mesh_status":       mesh_status,
         })
         _checkpoint(rows_out)            # durable after each row
         if not args.keep_bin:
             canonical = _normalise_pattern(pat)
             for bin_path in (OUT_DIR / f"{canonical}.bin",
-                             OUT_DIR / f"{canonical}.conflict.bin"):
+                             OUT_DIR / f"{canonical}.conflict.bin",
+                             OUT_DIR / f"{canonical}.mesh.bin"):
                 try:
                     if bin_path.exists():
                         bin_path.unlink()
@@ -536,15 +587,17 @@ def main():
 
     n_ok    = sum(1 for r in rows_out if r["mdla7_ms"])
     n_conflict_ok = sum(1 for r in rows_out if r.get("mdla7_conflict_ms"))
+    n_mesh_ok = sum(1 for r in rows_out if r.get("mdla7_mesh_ms"))
     n_fail  = len(rows_out) - n_ok
     total_s = time.time() - t_total
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r["mdla7_ms"])
     print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran, "
-          f"conflict {n_conflict_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
+          f"conflict {n_conflict_ok}/{len(rows_out)} ran, "
+          f"mesh {n_mesh_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
           f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()
-    print(f"html: {HERE / 'model_profile.html'}", flush=True)
+    print(f"html: {HERE / 'profile_mdla6_pattern.html'}", flush=True)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ Usage:
   ./run_model.py --all                 # try every INT8 model
   ./run_model.py --layer N             # legacy: run only one CONV layer
   ./run_model.py <pattern> --l1-timing conflict
+  ./run_model.py <pattern> --l1-timing mesh
 """
 
 from __future__ import annotations
@@ -29,15 +30,16 @@ import sys
 import time
 from pathlib import Path
 
-HERE        = Path(__file__).resolve().parent          # .../systemc/
+HERE        = Path(__file__).resolve().parent          # .../batch/
 REPO_ROOT   = HERE.parent
+SYSTEMC_DIR = REPO_ROOT / "systemc"
 MODEL_ROOT  = REPO_ROOT / "model"
-BUILD_DIR   = HERE / "build"
-OUTPUT_DIR  = HERE / "output"                           # v6: per-model artefacts live here
-EXTRACT_PY  = HERE / "scripts" / "extract_conv.py"      # legacy single-layer
-COMPILE_PY  = HERE / "scripts" / "compile_model.py"     # full-model compiler
-PLOT_PY     = HERE / "scripts" / "plot_profile.py"      # gantt renderer
-MODEL_PROFILE_PY = HERE / "scripts" / "gen_model_profile.py"
+BUILD_DIR   = SYSTEMC_DIR / "build"
+OUTPUT_DIR  = HERE / "output"                         # per-model artefacts
+EXTRACT_PY  = SYSTEMC_DIR / "scripts" / "extract_conv.py"   # legacy single-layer
+COMPILE_PY  = SYSTEMC_DIR / "scripts" / "compile_model.py"  # full-model compiler
+PLOT_PY     = SYSTEMC_DIR / "scripts" / "plot_profile.py"   # gantt renderer
+MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
 TEST_BIN    = BUILD_DIR / "test_tflite_conv"            # legacy single-layer
 MODEL_BIN   = BUILD_DIR / "test_model"                  # full-model runner
 BLOB_PATH   = BUILD_DIR / "conv_layer.bin"
@@ -62,7 +64,10 @@ def _artefact_paths(model: Path) -> dict[str, Path]:
 
 def _refresh_model_profile_index() -> None:
     try:
-        subprocess.run([sys.executable, str(MODEL_PROFILE_PY)],
+        subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
+                        "--html-out", "profile_mdla6_pattern.html",
+                        "--title", "MDLA7 MDLA6 Pattern Profiles",
+                        "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
     except Exception:
         pass
@@ -219,13 +224,13 @@ def check_python_deps():
             print(f"   - {m}")
         print("\ninstall with:")
         print(f"   {py} -m pip install --user numpy {tf_pkg}")
-        print(f"   (or: pip install -r {HERE / 'requirements.txt'})")
+        print(f"   (or: pip install -r {SYSTEMC_DIR / 'requirements.txt'})")
         sys.exit(1)
 
 
 def build():
     print("[step 1/3] make")
-    r = subprocess.run(["make", "-s", "-C", str(HERE)])
+    r = subprocess.run(["make", "-s", "-C", str(SYSTEMC_DIR)])
     if r.returncode:
         sys.exit(f"build failed (exit {r.returncode})")
 
@@ -1550,9 +1555,9 @@ def main():
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="Keep .bin and .profile.json intermediates "
                          "(default: deleted on successful run; .csv/.png/.html stay)")
-    ap.add_argument("--l1-timing", choices=("fast", "conflict"), default="fast",
+    ap.add_argument("--l1-timing", choices=("fast", "conflict", "mesh"), default="fast",
                     help="L1Mesh timing mode: fast aggregate estimate (default) "
-                         "or per-bank SRAM port conflict model")
+                         "or per-bank SRAM port conflict model, or 4x4 mesh router/link conflict model")
     args = ap.parse_args()
     global _keep_intermediate
     _keep_intermediate = bool(args.keep_intermediate)

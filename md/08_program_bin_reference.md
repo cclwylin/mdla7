@@ -314,7 +314,7 @@ Regression scripts 會 parse 這些 line。
 | `.profile.json` | summary、layers、engine timelines |
 | `.profile.csv` | table-friendly layer profile |
 | `.profile.png` | matplotlib Gantt |
-| `.html` | interactive report，由 run_model.py 生成 |
+| `.html` | interactive report，由 batch/run_model.py 生成 |
 
 profile 裡會包含：
 

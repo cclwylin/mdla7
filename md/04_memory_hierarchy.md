@@ -74,7 +74,7 @@ MDLA7 simulator 的 address space 在 [`descriptor.h`](../systemc/include/mdla7/
 
 ```cpp
 constexpr uint32_t L1MESH_BASE  = 0x0000'0000;
-constexpr uint32_t L1MESH_END   = 0x001F'FFFF;
+constexpr uint32_t L1MESH_END   = 0x002F'FFFF;
 constexpr uint32_t L1MESH_BYTES = L1MESH_END + 1;
 constexpr uint32_t DRAM_BASE    = 0x1000'0000;
 constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;
@@ -190,6 +190,263 @@ NoC edge ports：
 不是把 SRAM backend bandwidth 乘四；真正的 per-bank service 仍是每 bank
 每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
 
+### 4.5.1 怎麼讀 `L1Mesh-4x4-NoC` 圖
+
+如果你對 NoC 不熟，先不要把圖看成「一大塊 SRAM」。比較好的看法是：
+
+```text
+外面的 engine / L1Manager
+        |
+        v
+  mesh 邊界入口 ingress
+        |
+        v
+  4x4 router grid
+        |
+        v
+  目標 bank 的 SRAM macro port
+```
+
+圖上的每個名詞可以這樣拆：
+
+| 名詞 | 白話意思 | 在 L1Mesh 圖上代表什麼 |
+|---|---|---|
+| NoC | Network-on-Chip，晶片內的小網路 | 4x4 router grid，用來把 request 送到正確 SRAM bank |
+| mesh | 網格狀連線 | router 只跟上下左右鄰居相連，不是所有點互接 |
+| router | 交叉路口 | 決定下一步往左、右、上、下，或送進本地 bank |
+| link | 兩個 router 中間的路 | 同一方向同一 cycle 只能過有限資料，會塞車 |
+| bank | 可以獨立服務的 SRAM 區塊 | B0..B15，總共 16 個 |
+| macro | bank 裡更小的 SRAM 顆粒 | 每顆 `768 x 16B = 12 KB` |
+| ingress | 進入 NoC 的入口 | request 從外部 engine 進到 mesh 的邊界 port |
+| egress | 離開 NoC 的出口 | read data 從 SRAM bank 回 engine，或 write ack 離開 |
+
+`ingress` 是最容易誤會的詞。它不是一顆 SRAM，也不是一個 bank。
+它只是「traffic 從外面進入 mesh 的門口」。
+
+用日常比喻：
+
+```text
+SRAM bank = 目的地建築物
+router    = 路口
+link      = 道路
+ingress   = 高速公路交流道入口
+```
+
+所以「ACT_R left-edge ingress」的意思是：
+
+```text
+CONV 要讀 activation。
+這些 read request 不走 L1Manager。
+它們從 L1Mesh 左邊的入口進入 NoC。
+進去後再沿著 4x4 mesh 路由到目標 bank。
+```
+
+同理：
+
+```text
+WGT_R top-edge ingress
+```
+
+意思是：
+
+```text
+CONV 要讀 weight。
+這些 read request 也不走 L1Manager。
+它們從 L1Mesh 上方的入口進入 NoC。
+```
+
+為什麼要分 left / top / right / bottom？因為不同 traffic 如果全部從同一邊進來，
+很容易在同一批 edge port 和前幾個 router link 塞住。四邊分流的目的，是讓
+traffic 一開始就分散：
+
+```text
+left   edge -> ACT_R
+top    edge -> WGT_R
+right  edge -> L1Manager_R
+bottom edge -> L1Manager_W
+```
+
+這裡的重點是「分散入口」，不是「容量變成四倍」。最後資料還是要進某個 SRAM
+bank，而 bank 本身每 cycle 能服務的 16B beat 數仍然有限。
+
+### 4.5.2 一個 16B read beat 怎麼走
+
+假設 CONV 要讀一個 activation byte range，其中某個 16B beat 的 address 算出來是
+bank 6：
+
+```text
+bank_id = (addr >> 4) & 0xF = 6
+```
+
+4x4 bank 位置可以這樣看：
+
+```text
+row 0: B0  B1  B2  B3
+row 1: B4  B5  B6  B7
+row 2: B8  B9  B10 B11
+row 3: B12 B13 B14 B15
+```
+
+所以 bank 6 在：
+
+```text
+x = bank_id % 4 = 2
+y = bank_id / 4 = 1
+```
+
+如果這是 ACT_R，從 left edge 進來。left edge 對每一列都有一個入口，所以這個
+request 可以從 row 1 的左邊進入：
+
+```text
+left ingress row 1 -> B4 router -> B5 router -> B6 router -> local SRAM bank
+```
+
+用座標表示：
+
+```text
+source = (0, 1)
+dest   = (2, 1)
+route  = (0,1) -> (1,1) -> (2,1)
+```
+
+目前 mesh mode 用 deterministic XY routing：
+
+```text
+先走 X 方向，再走 Y 方向。
+```
+
+在這個例子裡，Y 一樣，所以只需要往右走兩步。
+
+如果目標是 bank 14：
+
+```text
+B14 -> x=2, y=3
+```
+
+ACT_R 從 left edge row 3 進來：
+
+```text
+source = (0, 3)
+dest   = (2, 3)
+route  = (0,3) -> (1,3) -> (2,3)
+```
+
+WGT_R 的概念一樣，只是主要從 top edge 進來。若要更接近實體圖，top edge 可以想成
+每一欄有入口；right / bottom 則給 L1Manager read / write traffic 使用。
+
+### 4.5.3 什麼叫 router/link conflict
+
+假設兩個 request 同一個 cycle 都想走同一條路：
+
+```text
+request A: B4 -> B5 link
+request B: B4 -> B5 link
+```
+
+如果這條 directed link 一個 cycle 只能送一個 flit，那第二個 request 就要等。
+這就是 link conflict。
+
+router output conflict 類似。假設同一個 router 同一時間有兩個 request 都想從 east
+output 出去：
+
+```text
+router B4 east output -> B5
+```
+
+那也要仲裁，一個先走，一個等。
+
+在 `--l1-timing=mesh` 裡，一個 16B beat 會依序消耗：
+
+```text
+1. edge ingress port
+2. 每一跳 router output
+3. 每一跳 directed link
+4. 目標 router 的 local output
+5. 目標 bank 的 SRAM macro port
+```
+
+所以 mesh mode 比 port-conflict mode 多看了「路上會不會塞」，不只看「到了 bank
+以後 SRAM port 會不會塞」。
+
+### 4.5.4 edge ports 為什麼不是 SRAM bandwidth
+
+圖上寫：
+
+```text
+top edge    : 4R + 4W
+right edge  : 4R + 4W
+bottom edge : 4R + 4W
+left edge   : 4R + 4W
+aggregate   : 16R + 16W
+```
+
+這代表 NoC 邊界有很多入口/出口，讓 traffic 比較容易進出 mesh。
+
+但 SRAM backend 是另一回事。最後每個 bank 還是：
+
+```text
+bank service = 16B / SRAM cycle
+```
+
+因此不要把 `16R edge ports` 解讀成：
+
+```text
+每個 bank 都變 16 倍快
+```
+
+正確解讀是：
+
+```text
+很多 request 可以從不同邊進 mesh，降低入口塞車。
+但是如果它們最後都打到同一個 bank，同一個 bank 還是會 serialize。
+```
+
+這也是為什麼我們分三種 timing mode：
+
+| Mode | 看什麼瓶頸 | 沒看的東西 |
+|---|---|---|
+| `fast` | 總頻寬大概夠不夠 | bank hotspot、router/link hotspot |
+| `conflict` | bank port 會不會撞 | NoC 入口、router、link 會不會撞 |
+| `mesh` | edge/router/link/bank 一起估 | 還沒分 ACT/WGT/UDMA 的完整 QoS priority |
+
+### 4.5.5 現在 simulator 的 mesh mode 做了什麼、沒做什麼
+
+目前 code 在 [`memory.h`](../systemc/include/mdla7/memory.h) 裡，核心是
+`L1Mesh::impose_mesh_latency()`。
+
+它做了：
+
+```text
+每 16B stripe = 1 個 flit
+bank = (addr / 16) % 16
+bank -> 4x4 座標
+read 從 left edge 進
+write 從 right edge 進
+route 使用 deterministic XY
+每個 edge ingress / router output / link / bank port 都有 finish time
+如果資源忙，就等到它空
+```
+
+它還沒做完整硬體 QoS：
+
+```text
+還沒有把 requester 精確分成 CONV ACT_R / CONV WGT_R / L1Manager_R / L1Manager_W。
+目前 L1Manager read/write API 沒帶 requester class。
+所以 mesh mode 是 NoC 壅塞近似模型，不是 final RTL-grade NoC simulator。
+```
+
+這個限制很重要。它表示 `mesh/fast` 很高時，你應該把它當成：
+
+```text
+這個 layer 的 access pattern 可能有 NoC hotspot，值得看。
+```
+
+而不是馬上解讀成：
+
+```text
+硬體一定會慢這麼多。
+```
+
 source 裡的 constants：
 
 ```cpp
@@ -239,15 +496,18 @@ row_addr       = bank_line % 768
 
 write slot 由 `L1Manager_W` 使用。
 
-Simulator 提供兩種 L1 timing mode：
+Simulator 提供三種 L1 timing mode：
 
 | Mode | CLI | 用途 |
 |---|---|---|
 | fast estimate | `--l1-timing=fast` | 預設。用 aggregate bandwidth 估算，不逐 bank 計算 port conflict，適合 regression sweep。 |
 | port conflict | `--l1-timing=conflict` | 逐 bank finish-array 模型，read/read 和 write/write 同 bank 會 serialize，適合架構分析。 |
+| mesh conflict | `--l1-timing=mesh` | 在 bank port conflict 之外，加入 4x4 mesh edge ingress、XY router/link arbitration，再進 SRAM macro port，適合找 NoC hotspot。 |
 
-`run_model.py`、`run_ethz_v5.py`、`run_ethz_v6.py`、`run_mlperf.py` 都可轉傳
-`--l1-timing`。
+`batch/run_model.py` 可用 `--l1-timing` 單跑其中一種模式。`batch/run_mdla6_pattern.py`、
+`batch/run_hotspot.py`、`batch/run_ethz_v5.py`、`batch/run_ethz_v6.py`、
+`batch/run_mlperf.py` 則預設一次跑 fast / conflict / mesh 三種模式，方便同一份 HTML
+裡直接比較 L1Mesh overhead。
 
 ---
 

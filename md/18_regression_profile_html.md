@@ -7,7 +7,7 @@
 - `run_model.py` 如何串 compile、simulate、plot、HTML。
 - `run_mdla6_pattern.py` 和 `run_ethz_v6.py` 的用途。
 - profile JSON / CSV / PNG / HTML 各自怎麼用。
-- `model_profile.html` index 如何生成。
+- `profile_mdla6_pattern.html` / `profile_hotspot.html` index 如何生成。
 - regression status 要如何解讀。
 - ETHZ_v6 裡哪些模型屬於 Transformer / attention 類 coverage。
 
@@ -18,8 +18,7 @@
 主要入口：
 
 ```bash
-cd systemc
-python3 run_model.py inception_v3_quant
+./batch/run_model.py inception_v3_quant
 ```
 
 flow：
@@ -27,11 +26,11 @@ flow：
 ```text
 resolve model
 make build/test_model
-compile_model.py -> output/<stem>.bin
+compile_model.py -> batch/output/<stem>.bin
 test_model -> profile.json/csv
 plot_profile.py -> profile.png
-_write_html_report -> output/<stem>.html
-gen_model_profile.py -> model_profile.html
+_write_html_report -> batch/output/<stem>.html
+gen_model_profile.py -> profile_mdla6_pattern.html 或 profile_hotspot.html
 ```
 
 `run_model.py` 也會自動 re-exec 到 venv：
@@ -62,17 +61,17 @@ dtype priority 會讓 ETHZ_v6 / INT8 等 active bundles 優先。
 per-model output：
 
 ```text
-systemc/output/<stem>.bin
-systemc/output/<stem>.profile.json
-systemc/output/<stem>.profile.csv
-systemc/output/<stem>.profile.png
-systemc/output/<stem>.html
+batch/output/<stem>.bin
+batch/output/<stem>.profile.json
+batch/output/<stem>.profile.csv
+batch/output/<stem>.profile.png
+batch/output/<stem>.html
 ```
 
 預設成功後 `.bin` / `.profile.json` 可能被刪掉，保留 `.csv` / `.png` / `.html`。用：
 
 ```bash
-python3 run_model.py model --keep-intermediate
+./batch/run_model.py model --keep-intermediate
 ```
 
 可保留中間檔方便 debug。
@@ -130,23 +129,30 @@ HTML 對 debug overlap 和 labeling 很有用。
 
 ---
 
-## 18.7 model_profile.html
+## 18.7 Profile Index HTML
 
-[`gen_model_profile.py`](../systemc/scripts/gen_model_profile.py) 掃 `systemc/output/*.html`，生成 index：
+[`gen_model_profile.py`](../batch/gen_model_profile.py) 掃 `batch/output/*.html`，
+並依 runner 指定的 CSV 生成 index：
 
 ```text
-systemc/model_profile.html
+batch/profile_mdla6_pattern.html
+batch/profile_hotspot.html
 ```
 
-它會整理：
+`profile_mdla6_pattern.html` 會整理：
 
 - pattern
 - link
 - cx
 - our_ms
+- conflict_ms
+- mesh_ms
 - ratio
 
-用來看整個 regression corpus 的 performance 排名。
+用來看整個 MDLA6 baseline corpus 的 performance 排名。
+
+`profile_hotspot.html` 是 Hotspot micro-pattern index，不顯示 `cx` /
+`myms/cx`，預設用 `mesh/fast` 排序，適合看 L1Mesh / NoC timing overhead。
 
 ---
 
@@ -155,7 +161,7 @@ systemc/model_profile.html
 這是 MDLA6 pattern A/B style regression：
 
 ```bash
-python3 run_mdla6_pattern.py --filter unet_int16 --rerun-all
+./batch/run_mdla6_pattern.py --filter unet_int16 --rerun-all
 ```
 
 特點：
@@ -163,7 +169,7 @@ python3 run_mdla6_pattern.py --filter unet_int16 --rerun-all
 - pattern list 有 MDLA6 cx baseline。
 - 可 cache ok rows。
 - 每個 pattern 產 HTML。
-- 更新 `output/mdla6_pattern_regression.csv`。
+- 更新 `batch/output/mdla6_pattern_regression.csv`。
 
 status：
 
@@ -177,15 +183,55 @@ status：
 
 ---
 
+## 18.8b run_hotspot.py
+
+Hotspot runner 會跑 `model/Hotspot/*.tflite` 裡切出來的 repeated
+Transformer-like bottleneck slice：
+
+```bash
+./batch/run_hotspot.py --filter vit --rerun-all
+./batch/run_hotspot.py --limit 3
+```
+
+如果已經 `cd batch`，要改用：
+
+```bash
+./run_hotspot.py --rerun-all
+```
+
+不要直接打 `run_hotspot.py --rerun-all`；zsh 預設不會從目前目錄找 executable。
+
+它和 `run_mdla6_pattern.py` 一樣會跑 fast / conflict / mesh 三種 timing，
+但輸出的是 Hotspot 專用報表：
+
+```text
+batch/output/hotspot_regression.csv
+batch/profile_hotspot.html
+```
+
+Hotspot 沒有 MDLA6 `cx` baseline，所以報表不顯示 `cx` 欄位。
+
+---
+
 ## 18.9 run_ethz_v6.py
 
 ETHZ_v6 sweep：
 
 ```bash
-python3 run_ethz_v6.py
+./batch/run_ethz_v6.py
+./batch/run_ethz_v6.py --filter vit --limit 3
 ```
 
-它跑 `model/ETHZ_v6` corpus，輸出 regression CSV。
+它跑 `model/ETHZ_v6` corpus，介面和 `run_hotspot.py` 一致，支援 `--filter`、
+`--limit`、`--offset`、`--rerun-all`、`--list`。每個 model 會一次跑 fast /
+conflict / mesh 三種 L1 timing，輸出：
+
+```text
+batch/output/ethz_v6_regression.csv
+batch/profile_ethz_v6.html
+```
+
+ETHZ corpus 沒有 MDLA6 `cx` baseline，所以報表不顯示 `cx` 欄位。
 
 用途：
 
@@ -237,20 +283,19 @@ ETHZ_v6 corpus 裡有一批模型明顯屬於 Transformer、ViT、LLM、BERT 或
 如果要快速找 Transformer 類 regression，可以用檔名關鍵字先篩：
 
 ```bash
-cd systemc
-python3 run_ethz_v6.py --filter gpt2
-python3 run_ethz_v6.py --filter llama2
-python3 run_ethz_v6.py --filter mobilebert
-python3 run_ethz_v6.py --filter vit
-python3 run_ethz_v6.py --filter swin
-python3 run_ethz_v6.py --filter sam
+./batch/run_ethz_v6.py --filter gpt2
+./batch/run_ethz_v6.py --filter llama2
+./batch/run_ethz_v6.py --filter mobilebert
+./batch/run_ethz_v6.py --filter vit
+./batch/run_ethz_v6.py --filter swin
+./batch/run_ethz_v6.py --filter sam
 ```
 
 如果要用 profile 交叉確認，可以看每個 model 的 `.profile.csv`，統計 op mix：
 
 ```bash
 awk -F, 'NR>1{gsub(/^ +| +$/,"",$2); c[$2]++}
-         END{for(k in c) print k,c[k]}' output/vit_b16_quant.profile.csv
+         END{for(k in c) print k,c[k]}' batch/output/vit_b16_quant.profile.csv
 ```
 
 典型 Transformer-like profile 會看到：
@@ -312,8 +357,9 @@ Regression flow：
 ```text
 single model -> run_model.py
 pattern sweep -> run_mdla6_pattern.py
+hotspot sweep -> run_hotspot.py
 corpus sweep -> run_ethz_v6.py
-visual index -> model_profile.html
+visual indexes -> profile_mdla6_pattern.html / profile_hotspot.html
 ```
 
 有效 debug 的方法是：

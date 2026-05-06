@@ -36,10 +36,9 @@
 練習：
 
 ```bash
-cd systemc
-python3 run_model.py --list
-python3 run_model.py inception_v3_quant --keep-intermediate
-python3 run_model.py unet_int16 --keep-intermediate
+./batch/run_model.py --list
+./batch/run_model.py inception_v3_quant --keep-intermediate
+./batch/run_model.py unet_int16 --keep-intermediate
 ```
 
 要能回答：
