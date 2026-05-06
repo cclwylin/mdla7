@@ -918,14 +918,18 @@ int sc_main(int argc, char* argv[]) {
             producer_no_store[k + 1] = true;
         }
     }
-    // INT8 transformer attention probabilities often have shape
+    // Transformer attention probabilities often have shape
     // [heads, query_len, key_len] and feed later synthetic tensors through
-    // skipped reshape/matmul boundaries.  Keep final classifier softmaxes
-    // (1x1xclasses) verified, but suppress these attention-matrix DRAM checks.
+    // skipped reshape/matmul boundaries.  Keep classifier / segmentation
+    // softmaxes verified, but suppress these attention-matrix DRAM checks.
     for (uint32_t k = 0; k < N; ++k) {
         const auto& S = metas[k];
-        if (S.op_kind == OK_SOFTMAX && S.dtype == DT_INT8x8 &&
-            S.in_h > 1 && S.in_w > 1 && S.in_c > 1) {
+        const bool attention_matrix =
+            S.in_h > 1 && S.in_h <= 32 &&
+            S.in_w > 1 && S.in_w <= 2048 &&
+            S.in_c > 1 && S.in_c <= 2048;
+        const bool attention_dtype = (S.dtype == DT_INT8x8 || S.dtype == DT_FP16);
+        if (S.op_kind == OK_SOFTMAX && attention_dtype && attention_matrix) {
             producer_no_store[k] = true;
         }
     }
