@@ -36,6 +36,8 @@ enum UdmaMode : uint8_t {
     UM_SCATTER_CONCAT = 3,
     UM_STRIDED_SLICE  = 4,
     UM_DEPTH_TO_SPACE = 5,
+    UM_ACT_DECOMP_COPY = 6,
+    UM_ACT_COMP_COPY   = 7,
 };
 
 enum PoolMode : uint8_t {

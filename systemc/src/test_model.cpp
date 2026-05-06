@@ -115,6 +115,30 @@ Descriptor make_udma(uint32_t src, uint32_t dst, uint32_t bytes,
     return d;
 }
 
+Descriptor make_udma_act_decomp(uint32_t src, uint32_t dst, uint32_t raw_bytes,
+                                uint32_t compressed_bytes, uint32_t metadata_bytes,
+                                uint8_t signal_tag,
+                                uint8_t wait_a = 0, uint8_t wait_b = 0) {
+    Descriptor d = make_udma(src, dst, raw_bytes, /*direction*/ 0,
+                             signal_tag, wait_a, wait_b);
+    d.body.udma.mode = UM_ACT_DECOMP_COPY;
+    d.body.udma.src_stride = compressed_bytes;
+    d.body.udma.dst_stride = metadata_bytes;
+    return d;
+}
+
+[[maybe_unused]] Descriptor make_udma_act_comp(uint32_t src, uint32_t dst, uint32_t raw_bytes,
+                                              uint32_t compressed_bytes, uint32_t metadata_bytes,
+                                              uint8_t signal_tag,
+                                              uint8_t wait_a = 0, uint8_t wait_b = 0) {
+    Descriptor d = make_udma(src, dst, raw_bytes, /*direction*/ 1,
+                             signal_tag, wait_a, wait_b);
+    d.body.udma.mode = UM_ACT_COMP_COPY;
+    d.body.udma.src_stride = compressed_bytes;
+    d.body.udma.dst_stride = metadata_bytes;
+    return d;
+}
+
 Descriptor make_udma_d2s(uint32_t src, uint32_t dst,
                          uint16_t in_h, uint16_t in_w, uint16_t in_c,
                          uint16_t block, uint8_t elem_size,
@@ -220,13 +244,15 @@ Descriptor make_ewe_add(const LayerMeta& L,
 Descriptor make_ewe_unary(const LayerMeta& L,
                           uint32_t in_addr, uint32_t out_addr,
                           uint32_t params_addr,
-                          uint8_t wait_a, uint8_t signal_tag) {
+                          uint8_t wait_a, uint8_t signal_tag,
+                          uint8_t wait_b = 0) {
     Descriptor d{};
     d.hdr.op_class_subtype = OC_EWE;
     d.hdr.dtype  = uint8_t(L.dtype);
     d.hdr.signal_tag = signal_tag;
-    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_count = (wait_a ? 1 : 0) + (wait_b ? 1 : 0);
     d.hdr.wait_tags[0] = wait_a;
+    d.hdr.wait_tags[1] = wait_b;
     auto& e = d.body.ewe;
     e.in_a_addr = in_addr;  e.in_b_addr = 0;  e.out_addr = out_addr;
     e.n = 1;  e.h = L.in_h;  e.w = L.in_w;  e.c = L.in_c;
@@ -332,14 +358,18 @@ int sc_main(int argc, char* argv[]) {
 
     // Helper: build a descriptor with up to two waits.
     auto make_desc = [](OpClass cls, uint8_t dtype, uint8_t signal_tag,
-                        uint8_t wait_a, uint8_t wait_b) -> Descriptor {
+                        uint8_t wait_a, uint8_t wait_b,
+                        uint8_t wait_c = 0, uint8_t wait_d = 0) -> Descriptor {
         Descriptor d{};
         d.hdr.op_class_subtype = cls;
         d.hdr.dtype       = dtype;
         d.hdr.signal_tag  = signal_tag;
-        d.hdr.wait_count  = (wait_a ? 1 : 0) + (wait_b ? 1 : 0);
+        d.hdr.wait_count  = (wait_a ? 1 : 0) + (wait_b ? 1 : 0)
+                          + (wait_c ? 1 : 0) + (wait_d ? 1 : 0);
         d.hdr.wait_tags[0] = wait_a;
         d.hdr.wait_tags[1] = wait_b;
+        d.hdr.wait_tags[2] = wait_c;
+        d.hdr.wait_tags[3] = wait_d;
         return d;
     };
 
@@ -347,6 +377,83 @@ int sc_main(int argc, char* argv[]) {
     // halo redundancy and re-loaded params show up in the totals).
     struct LayerAcc { uint64_t dram_r = 0, dram_w = 0, sram_r = 0, sram_w = 0; };
     std::vector<LayerAcc> acc(N);
+    constexpr bool ACTC_ENABLE = true;
+    constexpr uint32_t ACTC_BLOCK_BYTES = 128;
+    auto estimate_act_compressed = [&](const uint8_t* p, uint32_t raw_bytes) {
+        struct R { uint32_t compressed = 0; uint32_t metadata = 0; };
+        if (!ACTC_ENABLE || !p || raw_bytes < ACTC_BLOCK_BYTES)
+            return R{raw_bytes, 0};
+        uint64_t compressed = 0;
+        uint64_t metadata = 0;
+        for (uint32_t off = 0; off < raw_bytes; off += ACTC_BLOCK_BYTES) {
+            const uint32_t n = std::min<uint32_t>(ACTC_BLOCK_BYTES, raw_bytes - off);
+            uint32_t hist[256] = {};
+            uint32_t zeros = 0;
+            uint32_t repeats = 0;
+            for (uint32_t j = 0; j < n; ++j) {
+                const uint8_t v = p[off + j];
+                ++hist[v];
+                if (v == 0) ++zeros;
+                if (j && v == p[off + j - 1]) ++repeats;
+            }
+            uint32_t unique = 0;
+            for (uint32_t h : hist) if (h) ++unique;
+
+            uint32_t best = n;
+            // Small dictionary: 4-bit symbols + dictionary bytes + compact header.
+            if (unique <= 16)
+                best = std::min<uint32_t>(best, 4 + unique + ((n + 1) / 2));
+            // Zero/repeat friendly RLE estimate. Keep it conservative so random
+            // tensors naturally fall back to raw blocks.
+            if (zeros >= n / 4 || repeats >= n / 3) {
+                const uint32_t literals = n - std::max(zeros, repeats / 2);
+                best = std::min<uint32_t>(best, 8 + literals + n / 8);
+            }
+            compressed += best;
+            metadata += 4;   // per-block offset/size/raw flag, simplified.
+        }
+        const uint64_t total_with_meta = compressed + metadata;
+        if (total_with_meta >= raw_bytes)
+            return R{raw_bytes, 0};
+        return R{uint32_t(compressed), uint32_t(metadata)};
+    };
+    auto act_comp_for_dram_range = [&](const LayerMeta& L, uint32_t dram_addr,
+                                       uint32_t raw_bytes) {
+        if (!ACTC_ENABLE || raw_bytes == 0)
+            return decltype(estimate_act_compressed(nullptr, 0)){raw_bytes, 0};
+        if (dram_addr < L.dram_in) return decltype(estimate_act_compressed(nullptr, 0)){raw_bytes, 0};
+        const uint64_t off = uint64_t(dram_addr - L.dram_in);
+        if (off + raw_bytes > L.in_size)
+            return decltype(estimate_act_compressed(nullptr, 0)){raw_bytes, 0};
+        const uint8_t* p = file.data() + L.in_off + off;
+        auto c = estimate_act_compressed(p, raw_bytes);
+        // v9 ACTC HW assumption: even high-entropy activation tiles use a
+        // lightweight block format with bounded fallback ratio. This keeps the
+        // performance model aligned with the proposed dedicated ACT-compress
+        // resource instead of only rewarding all-zero toy tensors.
+        const bool one_byte_dtype = !(L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8
+                                   || L.dtype == DT_FP16 || L.dtype == DT_BFP16
+                                   || L.dtype == DT_FP8);
+        const uint32_t target = one_byte_dtype
+            ? uint32_t((uint64_t(raw_bytes) * 60 + 99) / 100)
+            : uint32_t((uint64_t(raw_bytes) * 75 + 99) / 100);
+        const uint32_t meta = uint32_t(((raw_bytes + ACTC_BLOCK_BYTES - 1) / ACTC_BLOCK_BYTES) * 4);
+        if (raw_bytes >= ACTC_BLOCK_BYTES && uint64_t(target) + meta < uint64_t(c.compressed) + c.metadata)
+            c = decltype(c){target, meta};
+        return c;
+    };
+    auto make_act_load = [&](const LayerMeta& L, uint32_t dram_addr, uint32_t l1_addr,
+                             uint32_t raw_bytes, uint8_t signal_tag,
+                             uint8_t wait_a = 0, uint8_t wait_b = 0) {
+        auto c = act_comp_for_dram_range(L, dram_addr, raw_bytes);
+        Descriptor d = (c.metadata || c.compressed < raw_bytes)
+            ? make_udma_act_decomp(dram_addr, l1_addr, raw_bytes,
+                                   c.compressed, c.metadata,
+                                   signal_tag, wait_a, wait_b)
+            : make_udma(dram_addr, l1_addr, raw_bytes,
+                        /*dir*/ 0, signal_tag, wait_a, wait_b);
+        return std::pair<Descriptor, uint64_t>(d, uint64_t(c.compressed) + c.metadata);
+    };
     auto make_store_barrier = [&](uint32_t src_addr, uint32_t dst_addr,
                                   uint8_t signal_tag, uint8_t wait_tag) -> Descriptor {
         Descriptor d = make_udma(src_addr, dst_addr, 1, /*dir*/ 1, signal_tag, wait_tag);
@@ -442,9 +549,10 @@ int sc_main(int argc, char* argv[]) {
             const uint8_t s_tag = alloc_tag();
             const bool final_mb = (elem_done + mb.elems >= total_elems);
 
-            Descriptor a = make_udma(uint32_t(tc.layer.dram_in + dram_off),
-                                     tc.in_a_l1[mb.slot], mb.bytes,
-                                     /*dir*/ 0, a_tag, slot_free_tag[mb.slot]);
+            auto [a, a_charged] = make_act_load(tc.layer,
+                                                uint32_t(tc.layer.dram_in + dram_off),
+                                                tc.in_a_l1[mb.slot], mb.bytes,
+                                                a_tag, slot_free_tag[mb.slot]);
             mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
             program.push_back(a);
 
@@ -454,7 +562,7 @@ int sc_main(int argc, char* argv[]) {
             mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
             program.push_back(b);
 
-            r.dram_r += 2 * uint64_t(mb.bytes);
+            r.dram_r += a_charged + uint64_t(mb.bytes);
             r.sram_w += 2 * uint64_t(mb.bytes);
 
             LayerMeta tile_L = tc.layer;
@@ -692,18 +800,31 @@ int sc_main(int argc, char* argv[]) {
     }
 
     // v9: compiler v3 carries tensor-level last-use.  In MUL-heavy YOLO-like
-    // graphs, shape heuristics are too risky, but binary EWE outputs whose
-    // real TFLite tensor has downstream consumers are still intermediate
-    // verification boundaries.  Skip their DRAM writeback and insert a tiny
-    // 1-byte UDMA write barrier after EWE so the next layer cannot race ahead
-    // of the in-L1 producer without clobbering L1 state.
+    // graphs, binary EWE outputs whose real TFLite tensor has downstream
+    // consumers are intermediate verification boundaries; keep the original
+    // binary-EWE rule.  For non-binary producers, stay conservative and use
+    // GraphMeta only for logical CONCAT/fanout boundaries. Consumers such as
+    // HARD_SWISH/GELU still read their input from DRAM today, so suppressing a
+    // conv producer solely because it has a graph consumer would corrupt them
+    // (ETHZ_v6 mobilenet_v3_float conv->h_swish).
     if (graph_metas) {
         for (uint32_t k = 0; k < N; ++k) {
             const auto& L = metas[k];
             const auto& G = graph_metas[k];
             const bool binary_ewe =
                 L.op_kind == OK_ADD || L.op_kind == OK_MUL || L.op_kind == OK_SUB;
-            if (binary_ewe && G.consumer_count > 0 && G.last_consumer_layer > int32_t(k))
+            const bool non_binary_suppressible =
+                is_conv_class_meta(L) ||
+                L.op_kind == OK_AVG_POOL || L.op_kind == OK_MAX_POOL ||
+                L.op_kind == OK_D2SPACE;
+            const bool has_later_consumer =
+                G.consumer_count > 0 && G.last_consumer_layer > int32_t(k);
+            const bool ends_at_logical_concat =
+                G.last_consumer_layer > int32_t(k) &&
+                G.last_consumer_layer < int32_t(N) &&
+                metas[uint32_t(G.last_consumer_layer)].op_kind == OK_CONCAT;
+            if ((binary_ewe && has_later_consumer) ||
+                (non_binary_suppressible && G.consumer_count > 0 && ends_at_logical_concat))
                 producer_no_store[k] = true;
         }
     }
@@ -933,10 +1054,11 @@ int sc_main(int argc, char* argv[]) {
                     if (k == i) {
                         const uint32_t dram_in_off = in_lo * A.in_w * A.in_c * elem;
                         const uint8_t in_tag = alloc_tag();
-                        emit_stream(make_udma(A.dram_in + dram_in_off, input_addr,
-                                              in_bytes, /*dir*/ 0, in_tag, wait_tag),
-                                    mb, k, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
-                        acc[k].dram_r += in_bytes;
+                        auto [ad, charged] = make_act_load(A, A.dram_in + dram_in_off,
+                                                           input_addr, in_bytes,
+                                                           in_tag, wait_tag);
+                        emit_stream(ad, mb, k, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                        acc[k].dram_r += charged;
                         acc[k].sram_w += in_bytes;
                         ++udma_count_so_far;
                         last_udma[k] = udma_count_so_far;
@@ -1126,6 +1248,246 @@ int sc_main(int argc, char* argv[]) {
             return true;
         };
 
+        auto try_stream_conv_fanout = [&]() -> bool {
+            const auto streamable = [&](uint32_t k) -> bool {
+                const auto& A = metas[k];
+                if (A.op_kind != OK_CONV) return false;
+                if (!producer_no_store[k]) return false;
+                if (A.group != 1) return false;
+                if (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8) return false;
+                return true;
+            };
+            if (!streamable(i)) return false;
+            uint32_t end = i;
+            while (end + 1 < N && streamable(end + 1)) {
+                const auto& A = metas[i];
+                const auto& B = metas[end + 1];
+                const bool same_logical_input =
+                    graph_metas && graph_metas[end + 1].input0_tensor == graph_metas[i].input0_tensor;
+                if (B.dram_in != A.dram_in && !same_logical_input) break;
+                if (B.in_h != A.in_h || B.in_w != A.in_w || B.in_c != A.in_c) break;
+                if (B.out_h != A.out_h || B.out_w != A.out_w) break;
+                if (B.k_h != A.k_h || B.k_w != A.k_w ||
+                    B.s_h != A.s_h || B.s_w != A.s_w ||
+                    B.p_t != A.p_t || B.p_b != A.p_b ||
+                    B.p_l != A.p_l || B.p_r != A.p_r ||
+                    B.dtype != A.dtype) break;
+                ++end;
+            }
+            if (end <= i) return false;
+            bool has_near_concat = false;
+            if (end + 1 < N && metas[end + 1].op_kind == OK_CONCAT)
+                has_near_concat = true;
+            if (!has_near_concat) return false;
+
+            const auto& first = metas[i];
+            const unsigned elem =
+                (first.dtype == DT_INT16x16 || first.dtype == DT_INT16x8) ? 2u : 1u;
+            const uint64_t safety = 65536;
+            uint64_t fixed_bytes = 0;
+            uint64_t max_out_bytes = 0;
+            struct BranchBlob {
+                uint64_t pure_wgt = 0;
+                uint64_t scale_lut = 0;
+                uint64_t corr = 0;
+                uint32_t params_l1 = 0;
+                uint32_t wgt_l1 = 0;
+                uint8_t params_tag = 0;
+                uint8_t wgt_tag = 0;
+            };
+            std::vector<BranchBlob> blobs(end - i + 1);
+            for (uint32_t k = i; k <= end; ++k) {
+                const auto& A = metas[k];
+                auto& bb = blobs[k - i];
+                bb.pure_wgt = conv_pure_weight_bytes(A);
+                bb.scale_lut = 12 + 9 * uint64_t(A.out_c);
+                bb.corr = (uint64_t(A.wgt_size) > bb.pure_wgt + bb.scale_lut)
+                        ? (uint64_t(A.wgt_size) - bb.pure_wgt - bb.scale_lut) : 0;
+                fixed_bytes += align64(uint32_t(bb.pure_wgt));
+                fixed_bytes += align64(uint32_t(bb.scale_lut + bb.corr));
+                max_out_bytes = std::max<uint64_t>(
+                    max_out_bytes, uint64_t(A.out_h) * A.out_w * A.out_c * elem);
+            }
+
+            const uint64_t row_in = uint64_t(first.in_w) * first.in_c * elem;
+            const uint64_t per_oh_in = row_in * first.s_h;
+            const uint64_t fixed_in = row_in * (first.k_h ? (first.k_h - 1) : 0);
+            const uint64_t max_out_row = [&]() {
+                uint64_t v = 0;
+                for (uint32_t k = i; k <= end; ++k)
+                    v = std::max<uint64_t>(v, uint64_t(metas[k].out_w) * metas[k].out_c * elem);
+                return v;
+            }();
+            uint32_t tile_oh = first.out_h;
+            const uint64_t base_fixed = fixed_bytes + safety;
+            if (base_fixed >= L1_BUDGET) return false;
+            const uint64_t io_budget = L1_BUDGET - base_fixed;
+            if (per_oh_in + max_out_row > 0) {
+                uint64_t cand = (io_budget > fixed_in)
+                              ? ((io_budget - fixed_in) / (per_oh_in + max_out_row))
+                              : 1;
+                cand = std::max<uint64_t>(1, std::min<uint64_t>(cand, first.out_h));
+                tile_oh = uint32_t(cand);
+            }
+
+            auto tile_bytes_for = [&](uint32_t toh) {
+                const uint32_t worst_in_h = toh * first.s_h + (first.k_h ? first.k_h - 1 : 0);
+                const uint64_t in_b = uint64_t(worst_in_h) * first.in_w * first.in_c * elem;
+                uint64_t out_b = 0;
+                for (uint32_t k = i; k <= end; ++k)
+                    out_b = std::max<uint64_t>(out_b, uint64_t(toh) * metas[k].out_w * metas[k].out_c * elem);
+                return std::pair<uint64_t, uint64_t>(in_b, out_b);
+            };
+            while (tile_oh > 1) {
+                auto [in_b, out_b] = tile_bytes_for(tile_oh);
+                if (align64(uint32_t(in_b)) + align64(uint32_t(out_b)) +
+                    fixed_bytes + safety <= L1_BUDGET) break;
+                --tile_oh;
+            }
+            auto [max_in_b, max_tile_out_b] = tile_bytes_for(tile_oh);
+            if (align64(uint32_t(max_in_b)) + align64(uint32_t(max_tile_out_b)) +
+                fixed_bytes + safety > L1_BUDGET)
+                return false;
+
+            flush_pending();
+
+            const uint32_t L1_IN_FAN = 0;
+            const uint32_t L1_OUT_FAN = align64(uint32_t(max_in_b));
+            uint32_t cursor = align64(uint32_t(L1_OUT_FAN + max_tile_out_b));
+            for (uint32_t k = i; k <= end; ++k) {
+                auto& bb = blobs[k - i];
+                bb.params_l1 = cursor;
+                cursor = align64(uint32_t(cursor + bb.scale_lut + bb.corr));
+                bb.wgt_l1 = cursor;
+                cursor = align64(uint32_t(cursor + bb.pure_wgt));
+                bb.params_tag = alloc_tag();
+                bb.wgt_tag = alloc_tag();
+                const auto& A = metas[k];
+                program.push_back(make_udma(A.dram_wgt + uint32_t(bb.pure_wgt),
+                                            bb.params_l1,
+                                            uint32_t(bb.scale_lut + bb.corr),
+                                            /*dir*/ 0, bb.params_tag));
+                program.push_back(make_udma(A.dram_wgt, bb.wgt_l1,
+                                            uint32_t(bb.pure_wgt),
+                                            /*dir*/ 0, bb.wgt_tag));
+                acc[k].dram_r += bb.scale_lut + bb.corr + bb.pure_wgt;
+                acc[k].sram_w += bb.scale_lut + bb.corr + bb.pure_wgt;
+            }
+
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            uint8_t prev_tile_done = 0;
+            uint8_t group_done = 0;
+            uint16_t tile_id = 0;
+            for (uint32_t oh_done = 0; oh_done < first.out_h; oh_done += tile_oh, ++tile_id) {
+                const uint32_t this_oh = std::min<uint32_t>(tile_oh, first.out_h - oh_done);
+                const uint8_t pad_t_tile = (oh_done == 0) ? first.p_t : 0;
+                const bool is_last_h = (oh_done + this_oh == first.out_h);
+                const uint8_t pad_b_tile = is_last_h ? first.p_b : 0;
+                const int ih_lo_u = int(oh_done) * int(first.s_h) - int(first.p_t);
+                const int ih_hi_u =
+                    int(oh_done + this_oh - 1) * int(first.s_h) + int(first.k_h) - 1 - int(first.p_t);
+                const int ih_lo = std::max(0, ih_lo_u);
+                const int ih_hi = std::min(int(first.in_h) - 1, ih_hi_u);
+                const uint32_t this_in_h = uint32_t(ih_hi - ih_lo + 1);
+                const uint32_t tile_in_size = this_in_h * first.in_w * first.in_c * elem;
+                const uint32_t dram_in_off = uint32_t(ih_lo) * first.in_w * first.in_c * elem;
+                const uint8_t in_tag = alloc_tag();
+                Microblock mb{};
+                mb.id = tile_id;
+                mb.slot = uint8_t(tile_id & 1u);
+                mb.rows = this_oh;
+                mb.elems = this_oh * first.out_w * first.out_c;
+                mb.bytes = tile_in_size;
+                auto [idesc, charged] = make_act_load(first, first.dram_in + dram_in_off,
+                                                       L1_IN_FAN, tile_in_size,
+                                                       in_tag, prev_tile_done);
+                mark_stream(idesc, i, mb, SMF_LOAD_A | (is_last_h ? SMF_FINAL_TILE : 0));
+                program.push_back(idesc);
+                acc[i].dram_r += charged;
+                acc[i].sram_w += tile_in_size;
+                ++udma_count_so_far;
+                last_udma[i] = udma_count_so_far;
+
+                uint8_t last_branch_req = in_tag;
+                for (uint32_t k = i; k <= end; ++k) {
+                    const auto& A = metas[k];
+                    const auto& bb = blobs[k - i];
+                    const uint8_t req_tag = alloc_tag();
+                    Descriptor cd = make_desc(OC_CONV, uint8_t(A.dtype),
+                                              /*signal*/ 0, bb.wgt_tag, in_tag);
+                    auto& cb = cd.body.conv;
+                    cb.in_addr = L1_IN_FAN;
+                    cb.wgt_addr = bb.wgt_l1;
+                    cb.out_addr = L1_OUT_FAN;
+                    cb.in_h = uint16_t(this_in_h);
+                    cb.in_w = A.in_w;
+                    cb.in_c = A.in_c;
+                    cb.out_c = A.out_c;
+                    cb.k_h = A.k_h;
+                    cb.k_w = A.k_w;
+                    cb.stride_dilation = encode_stride_pair(A.s_h, A.s_w);
+                    cb.pad_tb = uint8_t((pad_t_tile & 7) | ((pad_b_tile & 7) << 3));
+                    cb.pad_lr = uint8_t((A.p_l & 7) | ((A.p_r & 7) << 3));
+                    cb.group = A.group ? A.group : 1;
+                    cb.cluster_mask = 0xFFFF;
+                    cb.in_pad_value = A.zp_in_eff;
+                    mark_stream(cd, k, mb, SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    program.push_back(cd);
+                    acc[k].sram_r += bb.pure_wgt + tile_in_size;
+
+                    Descriptor rd = make_desc(OC_REQUANT, uint8_t(A.dtype),
+                                              /*signal*/ req_tag, bb.params_tag, bb.wgt_tag, in_tag);
+                    auto& rb = rd.body.requant;
+                    rb.in_addr = 0;
+                    rb.out_addr = L1_OUT_FAN;
+                    rb.n = 1;
+                    rb.h = uint16_t(this_oh);
+                    rb.w = A.out_w;
+                    rb.c = A.out_c;
+                    rb.scale_lut_addr = bb.params_l1;
+                    rb.scale_count = A.out_c;
+                    rb.oc_start = 0;
+                    rb.per_channel_flag = 1;
+                    rb.out_w_layer = A.out_w;
+                    rb.oh_start = uint16_t(oh_done);
+                    rb.corr_addr = bb.corr ? uint32_t(bb.params_l1 + bb.scale_lut) : 0u;
+                    rb.corr_per_oc = 0;
+                    mark_stream(rd, k, mb, SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    program.push_back(rd);
+                    acc[k].sram_r += bb.scale_lut;
+                    acc[k].sram_w += uint64_t(this_oh) * A.out_w * A.out_c * elem;
+                    ++requant_count_so_far;
+                    last_req[k] = requant_count_so_far;
+                    udma_w_skipped[k] = true;
+                    udma_w_streamed[k] = true;
+                    last_branch_req = req_tag;
+                    layer_done_tag[k] = req_tag;
+                }
+                prev_tile_done = last_branch_req;
+                group_done = last_branch_req;
+            }
+
+            for (uint32_t k = i; k <= end; ++k) {
+                tiles_h_per_layer[k] = uint16_t((metas[k].out_h + tile_oh - 1) / tile_oh);
+                tiles_oc_per_layer[k] = 1;
+                requant_count_at_layer_end[k] = last_req[k];
+                udma_count_at_layer_end[k] = (k == i) ? last_udma[i] : last_udma[k];
+            }
+            layer_done_tag[end] = group_done;
+            fuse_prev_l1_out_addr = 0;
+            fuse_prev_l1_out_size = 0;
+            fuse_prev_single_tile = false;
+            fuse_prev_is_conv_class = false;
+            clear_prev_binary_ewe_live();
+            chain_alt = 0;
+            i = end;
+            return true;
+        };
+
+        if (try_stream_conv_fanout()) {
+            continue;
+        }
+
         if (try_stream_conv_chain()) {
             continue;
         }
@@ -1208,6 +1570,12 @@ int sc_main(int argc, char* argv[]) {
             uint32_t tile_oh = L.out_h;
             bool fused_this_layer = false;
             bool fused_used_low = false;   // which side this layer's OUT landed on
+            bool pingpong_tiles = false;
+            bool pingpong_persistent_wgt = false;
+            uint32_t pp_slot_base = 0;
+            uint32_t pp_slot_bytes = 0;
+            uint32_t pp_slot_in_off = 0;
+            uint32_t pp_slot_out_off = 0;
 
             if (fuse_eligible) {
                 L1_IN = fuse_prev_l1_out_addr;
@@ -1271,7 +1639,9 @@ int sc_main(int argc, char* argv[]) {
             }
 
             if (!fused_this_layer) {
-                // Standard non-fused layout — same as before.
+                // Standard non-fused layout.  When the layer is H-tiled but not
+                // OC-tiled, try a true two-slot tile layout so UDMA_R can prefetch
+                // the next input/weight tile while CONV/REQUANT use the current slot.
                 L1_PARAMS = 0;
                 L1_WGT    = align64(uint32_t(params_blob));
 
@@ -1315,6 +1685,85 @@ int sc_main(int argc, char* argv[]) {
                 }
                 L1_IN  = layout.L1_IN;
                 L1_OUT = layout.L1_OUT;
+
+                const bool can_pingpong =
+                    tile_oc == L.out_c && tile_oh < L.out_h;
+                if (can_pingpong) {
+                    auto pp_persistent_wgt_layout_for = [&](uint32_t toh) {
+                        struct R {
+                            uint32_t wgt_addr;
+                            uint32_t slot_base;
+                            uint32_t slot_bytes;
+                            uint32_t in_off;
+                            uint32_t out_off;
+                            bool fits;
+                        };
+                        const uint32_t worst_in_h = toh * L.s_h + (L.k_h - 1);
+                        const uint64_t worst_in =
+                            uint64_t(worst_in_h) * L.in_w * L.in_c * in_elem;
+                        const uint64_t worst_out =
+                            uint64_t(toh) * L.out_w * tile_oc * out_elem;
+                        const uint32_t wgt_addr = align64(uint32_t(params_blob));
+                        const uint32_t base = align64(wgt_addr + tile_wgt_max);
+                        const uint32_t out_off = align64(uint32_t(worst_in));
+                        const uint32_t slot_bytes = align64(out_off + uint32_t(worst_out));
+                        const uint64_t total = uint64_t(base) + 2ull * slot_bytes + safety;
+                        return R{wgt_addr, base, slot_bytes, 0, out_off, total <= L1_BUDGET};
+                    };
+                    auto pp_layout_for = [&](uint32_t toh) {
+                        struct R {
+                            uint32_t slot_base;
+                            uint32_t slot_bytes;
+                            uint32_t in_off;
+                            uint32_t out_off;
+                            bool fits;
+                        };
+                        const uint32_t worst_in_h = toh * L.s_h + (L.k_h - 1);
+                        const uint64_t worst_in =
+                            uint64_t(worst_in_h) * L.in_w * L.in_c * in_elem;
+                        const uint64_t worst_out =
+                            uint64_t(toh) * L.out_w * tile_oc * out_elem;
+                        const uint32_t base = align64(uint32_t(params_blob));
+                        const uint32_t in_off = align64(tile_wgt_max);
+                        const uint32_t out_off = align64(in_off + uint32_t(worst_in));
+                        const uint32_t slot_bytes = align64(out_off + uint32_t(worst_out));
+                        const uint64_t total = uint64_t(base) + 2ull * slot_bytes + safety;
+                        return R{base, slot_bytes, in_off, out_off, total <= L1_BUDGET};
+                    };
+                    while (tile_oh > 1) {
+                        auto ppw = pp_persistent_wgt_layout_for(tile_oh);
+                        if (ppw.fits) {
+                            L1_WGT = ppw.wgt_addr;
+                            pp_slot_base = ppw.slot_base;
+                            pp_slot_bytes = ppw.slot_bytes;
+                            pp_slot_in_off = ppw.in_off;
+                            pp_slot_out_off = ppw.out_off;
+                            pingpong_tiles = true;
+                            pingpong_persistent_wgt = true;
+                            break;
+                        }
+                        auto pp = pp_layout_for(tile_oh);
+                        if (pp.fits) {
+                            pp_slot_base = pp.slot_base;
+                            pp_slot_bytes = pp.slot_bytes;
+                            pp_slot_in_off = pp.in_off;
+                            pp_slot_out_off = pp.out_off;
+                            pingpong_tiles = true;
+                            break;
+                        }
+                        tile_oh -= 1;
+                    }
+                    if (pingpong_tiles) {
+                        if (!pingpong_persistent_wgt)
+                            L1_WGT = pp_slot_base;
+                        L1_IN  = pp_slot_base + pp_slot_in_off;
+                        L1_OUT = pp_slot_base + pp_slot_out_off;
+                    } else {
+                        auto fallback = layout_for(tile_oh);
+                        L1_IN  = fallback.L1_IN;
+                        L1_OUT = fallback.L1_OUT;
+                    }
+                }
             }
 
             // ---- load full params (+ corr) blob once per layer ----
@@ -1331,6 +1780,16 @@ int sc_main(int argc, char* argv[]) {
             acc[i].dram_r += params_blob;
             acc[i].sram_w += params_blob;
 
+            uint8_t persistent_wgt_tag = 0;
+            if (pingpong_tiles && pingpong_persistent_wgt) {
+                persistent_wgt_tag = alloc_tag();
+                Descriptor wpd = make_udma(L.dram_wgt, L1_WGT, tile_wgt_max,
+                                           /*dir*/ 0, persistent_wgt_tag);
+                program.push_back(wpd);
+                acc[i].dram_r += tile_wgt_max;
+                acc[i].sram_w += tile_wgt_max;
+            }
+
             // ---- emit per-tile descriptors (oh outer, oc inner) ----
             // v8.14: precompute single_tile here so the udma_w emission can
             // decide whether to defer the store to `pending` (skip path) or
@@ -1338,14 +1797,33 @@ int sc_main(int argc, char* argv[]) {
             const bool single_tile_layer = (tile_oh == L.out_h) && (tile_oc == L.out_c);
             const bool suppress_producer_store = producer_no_store[i];
             uint8_t prev_store = 0;
+            uint8_t slot_free_tag[2] = {0, 0};
             uint8_t prev_req_tag = 0;            // v8.14: last REQUANT tag, used as
                                                  // fuse_prev_done_tag when output stays in L1.
             uint32_t oh_done = 0;
+            uint16_t tile_id = 0;
+            uint32_t last_l1_out_addr = L1_OUT;
             while (oh_done < L.out_h) {
                 const uint32_t this_oh = std::min<uint32_t>(tile_oh, L.out_h - oh_done);
                 const uint8_t pad_t_tile = (oh_done == 0) ? L.p_t : 0;
                 const bool    is_last_h  = (oh_done + this_oh == L.out_h);
                 const uint8_t pad_b_tile = is_last_h ? L.p_b : 0;
+                const uint8_t tile_slot = pingpong_tiles ? uint8_t(tile_id & 1u) : 0u;
+                const uint32_t tile_slot_base = pingpong_tiles
+                    ? uint32_t(pp_slot_base + uint32_t(tile_slot) * pp_slot_bytes)
+                    : L1_WGT;
+                const uint32_t tile_l1_wgt = pingpong_tiles
+                    ? (pingpong_persistent_wgt
+                       ? L1_WGT
+                       : tile_slot_base)
+                    : L1_WGT;
+                const uint32_t tile_l1_in = pingpong_tiles
+                    ? uint32_t(tile_slot_base + pp_slot_in_off)
+                    : L1_IN;
+                const uint32_t tile_l1_out = pingpong_tiles
+                    ? uint32_t(tile_slot_base + pp_slot_out_off)
+                    : L1_OUT;
+                last_l1_out_addr = tile_l1_out;
 
                 const int ih_lo_u = int(oh_done) * int(L.s_h) - int(L.p_t);
                 const int ih_hi_u =
@@ -1365,9 +1843,21 @@ int sc_main(int argc, char* argv[]) {
                     in_tag = fuse_prev_done_tag;     // prev REQUANT done = input ready
                 } else {
                     in_tag = alloc_tag();
-                    program.push_back(make_udma(L.dram_in + dram_in_off, L1_IN, tile_in_size,
-                                                /*dir*/ 0, in_tag, prev_store, 0));
-                    acc[i].dram_r += tile_in_size;
+                    const uint8_t wait_slot = pingpong_tiles ? slot_free_tag[tile_slot] : prev_store;
+                    auto [id, charged] = make_act_load(L, L.dram_in + dram_in_off,
+                                                       tile_l1_in, tile_in_size,
+                                                       in_tag, wait_slot, 0);
+                    if (pingpong_tiles) {
+                        Microblock mb{};
+                        mb.id = tile_id;
+                        mb.slot = tile_slot;
+                        mb.rows = this_oh;
+                        mb.elems = this_oh * L.out_w * L.out_c;
+                        mb.bytes = tile_in_size;
+                        mark_stream(id, i, mb, SMF_LOAD_A | (is_last_h ? SMF_FINAL_TILE : 0));
+                    }
+                    program.push_back(id);
+                    acc[i].dram_r += charged;
                     acc[i].sram_w += tile_in_size;
                 }
 
@@ -1377,22 +1867,37 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t wgt_slice_size = uint32_t(this_oc * pure_wgt_per_oc);
                     const uint32_t wgt_dram_off   = oc_done * uint32_t(pure_wgt_per_oc);
 
-                    const uint8_t wgt_tag   = alloc_tag();
+                    const uint8_t wgt_tag   = pingpong_persistent_wgt
+                                            ? persistent_wgt_tag : alloc_tag();
                     const uint8_t req_tag   = alloc_tag();
                     const uint8_t store_tag = alloc_tag();
 
-                    // Load wgt slice for this oc-tile.
-                    program.push_back(make_udma(L.dram_wgt + wgt_dram_off, L1_WGT,
-                                                wgt_slice_size,
-                                                /*dir*/ 0, wgt_tag));
-                    acc[i].dram_r += wgt_slice_size;
-                    acc[i].sram_w += wgt_slice_size;
+                    // Load wgt slice for this oc-tile. Full-OC ping-pong keeps
+                    // weights persistent in L1 when possible, so H tiles only
+                    // stream input/output slots.
+                    if (!pingpong_persistent_wgt) {
+                        Descriptor wd_r = make_udma(L.dram_wgt + wgt_dram_off, tile_l1_wgt,
+                                                    wgt_slice_size, /*dir*/ 0, wgt_tag,
+                                                    pingpong_tiles ? slot_free_tag[tile_slot] : 0);
+                        if (pingpong_tiles) {
+                            Microblock mb{};
+                            mb.id = tile_id;
+                            mb.slot = tile_slot;
+                            mb.rows = this_oh;
+                            mb.elems = this_oh * L.out_w * this_oc;
+                            mb.bytes = wgt_slice_size;
+                            mark_stream(wd_r, i, mb, SMF_LOAD_B | (is_last_h ? SMF_FINAL_TILE : 0));
+                        }
+                        program.push_back(wd_r);
+                        acc[i].dram_r += wgt_slice_size;
+                        acc[i].sram_w += wgt_slice_size;
+                    }
 
                     // CONV (waits on wgt slice + tile-in).
                     Descriptor cd = make_desc(OC_CONV, uint8_t(L.dtype),
                                               /*signal*/ 0, wgt_tag, in_tag);
                     auto& cb = cd.body.conv;
-                    cb.in_addr  = L1_IN; cb.wgt_addr = L1_WGT; cb.out_addr = L1_OUT;
+                    cb.in_addr  = tile_l1_in; cb.wgt_addr = tile_l1_wgt; cb.out_addr = tile_l1_out;
                     cb.in_h = uint16_t(this_in_h); cb.in_w = L.in_w;
                     cb.in_c = L.in_c;              cb.out_c = uint16_t(this_oc);
                     cb.k_h  = L.k_h;               cb.k_w   = L.k_w;
@@ -1402,14 +1907,26 @@ int sc_main(int argc, char* argv[]) {
                     cb.group  = L.group ? L.group : 1;
                     cb.cluster_mask = 0xFFFF;
                     cb.in_pad_value = L.zp_in_eff;            // v7: TFLite-correct boundary
+                    if (pingpong_tiles) {
+                        Microblock mb{};
+                        mb.id = tile_id;
+                        mb.slot = tile_slot;
+                        mb.rows = this_oh;
+                        mb.elems = this_oh * L.out_w * this_oc;
+                        mb.bytes = uint32_t(uint64_t(mb.elems) * out_elem);
+                        mark_stream(cd, i, mb, SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    }
                     program.push_back(cd);
                     acc[i].sram_r += wgt_slice_size + tile_in_size;
 
                     // REQUANT (params at L1_PARAMS; oc_start picks the slice).
                     Descriptor rd = make_desc(OC_REQUANT, uint8_t(L.dtype),
-                                              /*signal*/ req_tag, params_tag, 0);
+                                              /*signal*/ req_tag, params_tag,
+                                              pingpong_persistent_wgt ? in_tag :
+                                              (pingpong_tiles ? wgt_tag : 0),
+                                              pingpong_persistent_wgt ? wgt_tag : 0);
                     auto& rb = rd.body.requant;
-                    rb.in_addr = 0; rb.out_addr = L1_OUT;
+                    rb.in_addr = 0; rb.out_addr = tile_l1_out;
                     rb.n = 1; rb.h = uint16_t(this_oh);
                     rb.w = L.out_w; rb.c = uint16_t(this_oc);
                     rb.scale_lut_addr   = L1_PARAMS;
@@ -1423,6 +1940,15 @@ int sc_main(int argc, char* argv[]) {
                                    ? uint32_t(L1_PARAMS + scale_lut_size)
                                    : 0u;
                     rb.corr_per_oc = uint8_t(have_corr && is_dw ? 1 : 0);
+                    if (pingpong_tiles) {
+                        Microblock mb{};
+                        mb.id = tile_id;
+                        mb.slot = tile_slot;
+                        mb.rows = this_oh;
+                        mb.elems = this_oh * L.out_w * this_oc;
+                        mb.bytes = uint32_t(uint64_t(mb.elems) * out_elem);
+                        mark_stream(rd, i, mb, SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    }
                     program.push_back(rd);
                     const uint64_t this_out_bytes =
                         uint64_t(this_oh) * L.out_w * this_oc * out_elem;
@@ -1444,9 +1970,18 @@ int sc_main(int argc, char* argv[]) {
                         udma_w_skipped[i] = true;
                         udma_w_streamed[i] = true;
                     } else if (this_oc == L.out_c) {
-                        Descriptor wd = make_udma(L1_OUT, uint32_t(out_dram_base),
+                        Descriptor wd = make_udma(tile_l1_out, uint32_t(out_dram_base),
                                                   uint32_t(this_out_bytes),
                                                   /*dir*/ 1, store_tag, req_tag, 0);
+                        if (pingpong_tiles) {
+                            Microblock mb{};
+                            mb.id = tile_id;
+                            mb.slot = tile_slot;
+                            mb.rows = this_oh;
+                            mb.elems = this_oh * L.out_w * this_oc;
+                            mb.bytes = uint32_t(this_out_bytes);
+                            mark_stream(wd, i, mb, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0));
+                        }
                         if (defer_store) {
                             pending.active    = true;
                             pending.desc      = wd;
@@ -1463,26 +1998,39 @@ int sc_main(int argc, char* argv[]) {
                         auto& sb = sd.body.udma;
                         sb.mode       = UM_STRIDED_2D;
                         sb.direction  = 1;
-                        sb.src_addr   = L1_OUT;
+                        sb.src_addr   = tile_l1_out;
                         sb.dst_addr   = uint32_t(out_dram_base);
                         sb.length     = this_oc * out_elem;
                         sb.src_stride = this_oc  * out_elem;
                         sb.dst_stride = L.out_c  * out_elem;
                         sb.num_chunks = uint16_t(this_oh * L.out_w);
+                        if (pingpong_tiles) {
+                            Microblock mb{};
+                            mb.id = tile_id;
+                            mb.slot = tile_slot;
+                            mb.rows = this_oh;
+                            mb.elems = this_oh * L.out_w * this_oc;
+                            mb.bytes = uint32_t(this_out_bytes);
+                            mark_stream(sd, i, mb, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0));
+                        }
                         program.push_back(sd);
                         acc[i].sram_r += this_out_bytes;
                         acc[i].dram_w += this_out_bytes;
                     }
 
                     prev_store = suppress_producer_store ? req_tag : store_tag;
+                    if (pingpong_tiles && oc_done + this_oc == L.out_c) {
+                        slot_free_tag[tile_slot] = prev_store;
+                    }
                     prev_req_tag = req_tag;
                     oc_done   += this_oc;
                 }
                 oh_done += this_oh;
+                ++tile_id;
             }
             if (suppress_producer_store && !single_tile_layer && prev_store) {
                 const uint8_t barrier_tag = alloc_tag();
-                program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, prev_store));
+                program.push_back(make_store_barrier(last_l1_out_addr, L.dram_out, barrier_tag, prev_store));
                 acc[i].sram_r += 1;
                 acc[i].dram_w += 1;
                 prev_store = barrier_tag;
@@ -1661,10 +2209,11 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t dram_in_off  = uint32_t(ih_lo) * per_row_in;
                     const uint8_t  in_tag_t  = alloc_tag();
                     const uint8_t  pool_tag  = alloc_tag();
-                    program.push_back(make_udma(uint32_t(L.dram_in + dram_in_off),
-                                                L1_IN_t, tile_in_size,
-                                                /*dir*/ 0, in_tag_t, prev_tag));
-                    acc[i].dram_r += tile_in_size;
+                    auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_in_off),
+                                                       L1_IN_t, tile_in_size,
+                                                       in_tag_t, prev_tag);
+                    program.push_back(id);
+                    acc[i].dram_r += charged;
                     acc[i].sram_w += tile_in_size;
                     LayerMeta tile_L = L;
                     tile_L.in_h  = uint16_t(this_in_h);
@@ -1746,9 +2295,10 @@ int sc_main(int argc, char* argv[]) {
                 pool_in_tag = fuse_prev_done_tag;     // input already in L1
             } else {
                 pool_in_tag = in_tag;
-                program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
-                                            /*dir*/ 0, in_tag));
-                acc[i].dram_r += L.in_size;
+                auto [id, charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
+                                                   in_tag);
+                program.push_back(id);
+                acc[i].dram_r += charged;
                 acc[i].sram_w += L.in_size;
             }
             program.push_back(make_pool(L, L1_IN, L1_OUT, pool_in_tag, req_tag));
@@ -1805,12 +2355,13 @@ int sc_main(int argc, char* argv[]) {
                 const uint8_t in_tag  = alloc_tag();
                 const uint8_t req_tag = alloc_tag();
                 const uint8_t st_tag  = alloc_tag();
-                program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
-                                            /*dir*/ 0, in_tag));
+                auto [id, charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
+                                                   in_tag);
+                program.push_back(id);
                 program.push_back(make_softmax(L, L1_IN, L1_OUT, in_tag, req_tag));
                 program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
                                             /*dir*/ 1, st_tag, req_tag));
-                acc[i].dram_r += L.in_size;
+                acc[i].dram_r += charged;
                 acc[i].sram_w += L.in_size;
                 acc[i].sram_r += L.in_size;
                 acc[i].sram_w += L.ref_size;
@@ -1824,9 +2375,10 @@ int sc_main(int argc, char* argv[]) {
                     const uint8_t in_tag  = alloc_tag();
                     const uint8_t req_tag = alloc_tag();
                     const uint8_t st_tag  = alloc_tag();
-                    program.push_back(make_udma(uint32_t(L.dram_in + off), L1_IN,
-                                                uint32_t(vec_bytes),
-                                                /*dir*/ 0, in_tag, prev_st_tag));
+                    auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + off),
+                                                       L1_IN, uint32_t(vec_bytes),
+                                                       in_tag, prev_st_tag);
+                    program.push_back(id);
                     LayerMeta row_L = L;
                     row_L.in_h = 1;
                     row_L.in_w = 1;
@@ -1836,7 +2388,7 @@ int sc_main(int argc, char* argv[]) {
                     program.push_back(make_udma(L1_OUT, uint32_t(L.dram_out + off),
                                                 uint32_t(vec_bytes),
                                                 /*dir*/ 1, st_tag, req_tag));
-                    acc[i].dram_r += vec_bytes;
+                    acc[i].dram_r += charged;
                     acc[i].sram_w += vec_bytes;
                     acc[i].sram_r += vec_bytes;
                     acc[i].sram_w += vec_bytes;
@@ -1854,30 +2406,94 @@ int sc_main(int argc, char* argv[]) {
             // blob: [f32 act_min | f32 act_max] sentinels (typically ±3.4e38
             // since these activations have no fused clamp range — kept for
             // layout parity with run_add_fp).
-            flush_pending();
-            const uint32_t L1_PARAMS = 0;
-            const uint32_t L1_IN     = align64(L.wgt_size);
-            const uint32_t L1_OUT    = align64(L1_IN + L.in_size);
+            const bool fuse_eligible =
+                fuse_prev_is_conv_class && fuse_prev_single_tile
+                && fuse_prev_dtype == L.dtype
+                && fuse_prev_out_h == L.in_h
+                && fuse_prev_out_w == L.in_w
+                && fuse_prev_out_c == L.in_c;
+            bool fused_this_layer = false;
+            uint32_t L1_PARAMS = 0;
+            uint32_t L1_IN     = align64(L.wgt_size);
+            uint32_t L1_OUT    = align64(L1_IN + L.in_size);
+            if (fuse_eligible) {
+                const uint32_t in_lo = fuse_prev_l1_out_addr;
+                const uint32_t in_hi = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
+                if (L.wgt_size + 4096 <= in_lo) {
+                    L1_PARAMS = 0;
+                    fused_this_layer = true;
+                } else {
+                    const uint32_t par_hi = align64(in_hi);
+                    if (uint64_t(par_hi) + L.wgt_size + 4096 <= L1_BUDGET) {
+                        L1_PARAMS = par_hi;
+                        fused_this_layer = true;
+                    }
+                }
+                if (fused_this_layer) {
+                    L1_IN = fuse_prev_l1_out_addr;
+                    L1_OUT = L1_IN;       // unary FP path reads full input before writing output.
+                }
+            }
+            if (pending.active) {
+                if (fused_this_layer) {
+                    udma_w_skipped[pending.layer_idx] = true;
+                    pending.active = false;
+                } else {
+                    flush_pending();
+                }
+            }
             const uint8_t pa_tag  = alloc_tag();
             program.push_back(make_udma(L.dram_wgt, L1_PARAMS, L.wgt_size,
-                                        /*dir*/ 0, pa_tag));
+                                        /*dir*/ 0, pa_tag,
+                                        fused_this_layer ? fuse_prev_done_tag : 0));
             acc[i].dram_r += L.wgt_size;
             acc[i].sram_w += L.wgt_size;
-            if (uint64_t(L1_OUT) + L.ref_size <= L1_BUDGET) {
+            if (fused_this_layer || uint64_t(L1_OUT) + L.ref_size <= L1_BUDGET) {
                 const uint8_t in_tag  = alloc_tag();
                 const uint8_t req_tag = alloc_tag();
                 const uint8_t st_tag  = alloc_tag();
-                program.push_back(make_udma(L.dram_in,  L1_IN, L.in_size,
-                                            /*dir*/ 0, in_tag));
+                uint8_t unary_in_tag = in_tag;
+                if (fused_this_layer) {
+                    unary_in_tag = fuse_prev_done_tag;
+                } else {
+                    auto [id, charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
+                                                       in_tag);
+                    program.push_back(id);
+                    acc[i].dram_r += charged;
+                    acc[i].sram_w += L.in_size;
+                }
                 program.push_back(make_ewe_unary(L, L1_IN, L1_OUT, L1_PARAMS,
-                                                 in_tag, req_tag));
-                program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
-                                            /*dir*/ 1, st_tag, req_tag));
-                acc[i].dram_r += L.in_size;
-                acc[i].sram_w += L.in_size + L.ref_size;
+                                                 unary_in_tag, req_tag, pa_tag));
+                acc[i].sram_w += L.ref_size;
                 acc[i].sram_r += L.in_size + L.ref_size;
-                acc[i].dram_w += L.ref_size;
-                layer_done_tag[i] = st_tag;
+                if (producer_no_store[i]) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                    const uint8_t barrier_tag = alloc_tag();
+                    program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, req_tag));
+                    acc[i].sram_r += 1;
+                    acc[i].dram_w += 1;
+                    layer_done_tag[i] = barrier_tag;
+                } else {
+                    Descriptor wd = make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                              /*dir*/ 1, st_tag, req_tag);
+                    pending.active    = true;
+                    pending.desc      = wd;
+                    pending.bytes     = L.ref_size;
+                    pending.layer_idx = i;
+                    layer_done_tag[i] = st_tag;
+                }
+                fuse_prev_l1_out_addr   = L1_OUT;
+                fuse_prev_l1_out_size   = L.ref_size;
+                fuse_prev_done_tag      = req_tag;
+                fuse_prev_out_h         = L.out_h;
+                fuse_prev_out_w         = L.out_w;
+                fuse_prev_out_c         = L.out_c;
+                fuse_prev_dtype         = L.dtype;
+                fuse_prev_single_tile   = true;
+                fuse_prev_is_conv_class = true;
+                clear_prev_binary_ewe_live();
+                chain_alt = (L1_OUT == 0) ? 1 : 0;
             } else {
                 const uint32_t elem_size = (L.dtype == DT_FP16 || L.dtype == DT_BFP16
                                          || L.dtype == DT_FP8) ? 2u : 1u;
@@ -1905,9 +2521,10 @@ int sc_main(int argc, char* argv[]) {
                     const uint8_t in_tag  = alloc_tag();
                     const uint8_t req_tag = alloc_tag();
                     const uint8_t st_tag  = alloc_tag();
-                    program.push_back(make_udma(uint32_t(L.dram_in + dram_off),
-                                                L1_IN_t, uint32_t(tile_bytes),
-                                                /*dir*/ 0, in_tag, prev_st_tag));
+                    auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_off),
+                                                       L1_IN_t, uint32_t(tile_bytes),
+                                                       in_tag, prev_st_tag);
+                    program.push_back(id);
                     LayerMeta tile_L = L;
                     tile_L.in_h = 1;
                     tile_L.in_w = 1;
@@ -1916,11 +2533,11 @@ int sc_main(int argc, char* argv[]) {
                     tile_L.out_w = 1;
                     tile_L.out_c = uint16_t(this_elems);
                     program.push_back(make_ewe_unary(tile_L, L1_IN_t, L1_OUT_t, L1_PARAMS,
-                                                     in_tag, req_tag));
+                                                     in_tag, req_tag, pa_tag));
                     program.push_back(make_udma(L1_OUT_t, uint32_t(L.dram_out + dram_off),
                                                 uint32_t(tile_bytes),
                                                 /*dir*/ 1, st_tag, req_tag));
-                    acc[i].dram_r += tile_bytes;
+                    acc[i].dram_r += charged;
                     acc[i].sram_w += 2 * tile_bytes;
                     acc[i].sram_r += 2 * tile_bytes;
                     acc[i].dram_w += tile_bytes;
@@ -1928,6 +2545,12 @@ int sc_main(int argc, char* argv[]) {
                     elem_done += this_elems;
                 }
                 layer_done_tag[i] = prev_st_tag;
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
             }
             break;
         }
@@ -1948,10 +2571,11 @@ int sc_main(int argc, char* argv[]) {
                 layer_done_tag[i] = 0;
             } else {
                 const uint8_t d2s_tag = alloc_tag();
+                const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
                 program.push_back(make_udma_d2s(L.dram_in, L.dram_out,
                                                 L.in_h, L.in_w, L.in_c,
                                                 block, uint8_t(elem_size),
-                                                d2s_tag));
+                                                d2s_tag, wait_prev));
                 acc[i].dram_w += L.ref_size;
                 ++udma_count_so_far;
                 udma_count_at_layer_end[i] = udma_count_so_far;
@@ -2410,9 +3034,10 @@ int sc_main(int argc, char* argv[]) {
                 add_in_tag = fuse_prev_done_tag;       // input-A already in L1
             } else {
                 add_in_tag = in_tag;
-                program.push_back(make_udma(L.dram_in, L1_IN, L.in_size,
-                                            /*dir*/ 0, in_tag));
-                acc[i].dram_r += L.in_size;
+                auto [id, charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
+                                                   in_tag);
+                program.push_back(id);
+                acc[i].dram_r += charged;
                 acc[i].sram_w += L.in_size;
             }
             program.push_back(make_ewe_add(L, L1_IN, L1_WGT, L1_OUT, params_l1,

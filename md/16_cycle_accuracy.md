@@ -123,32 +123,34 @@ cycle tuning 就是在這兩者之間找平衡。
 Requant lanes：
 
 ```cpp
-LANES = 256
+LANES = 512
 ```
 
 cycle：
 
 ```text
-ceil(output_elements / 256)
+ceil(output_elements / 512)
 ```
 
-它代表 requant fused into cluster output stage 的近似。Functional path 仍用 chain FIFO，但 timing 上假設有高吞吐。
+它代表 CONV / EWE 共用的 quantize-pack / clamp resource。Functional path 仍用 chain FIFO，但 timing 上假設硬體有 512 elem/cycle 吞吐。
 
 ---
 
 ## 16.6 EWE cycle model
 
-EWE lanes：
+EWE lanes 依 dtype：
 
-```cpp
-EWE_LANES = 64
-```
+| dtype | lanes |
+|---|---:|
+| INT8 | 64 |
+| INT16 | 32 |
+| FP | 32 |
 
 | op | cycle |
 |---|---|
-| ADD / MUL / SUB | `ceil(elems / 64)` |
-| HARD_SWISH / GELU | `ceil(elems / 64)` |
-| SOFTMAX | `3 * ceil(elems / 64)` |
+| ADD / MUL / SUB | `ceil(elems / lanes)` |
+| HARD_SWISH / GELU | `ceil(elems / lanes)` |
+| SOFTMAX | `3 * ceil(elems / lanes)` |
 
 softmax 是三 pass：max / exp-sum / divide。
 
@@ -160,9 +162,11 @@ POOL cycle：
 
 ```text
 out_elems = OH * OW * OC
-per_lane = ceil(out_elems / 16)
+per_lane = ceil(out_elems / lanes)
 cycles = per_lane * max(Kh * Kw, 1)
 ```
+
+lanes 跟 EWE 相同：INT8=64、INT16=32、FP=32。
 
 global average pool 的 `Kh*Kw` 可能很大，所以 tail op 不一定便宜。
 

@@ -362,14 +362,12 @@ def _infer_shapes(fb, model, sg):
                     b = max(1, osh[0] // max(H, 1))
                 out_shape = (H * b, W * b, C // (b * b))
             elif op_name == "CONCATENATION":
-                # Concat along channel dim by default.
-                total_c = 0
-                for k in range(op.InputsLength()):
-                    sh = shapes.get(op.Inputs(k))
-                    if sh is None:
-                        sh = _to_hwc(_tensor_shape(sg.Tensors(op.Inputs(k))))
-                    total_c += sh[2]
-                out_shape = (H, W, total_c)
+                # CONCAT may happen on non-NHWC-channel axes in sequence models
+                # (e.g. LSTM rank-2 [1,500]+[1,512] -> [1,1012]). The op is a
+                # byte-preserving copy in our reduced program, so trust the
+                # TFLite output tensor's canonical HWC shape instead of trying
+                # to infer the axis in the collapsed HWC domain.
+                out_shape = _to_hwc(_tensor_shape(sg.Tensors(op.Outputs(0))))
             # else (ADD/MUL/SUB/HARD_SWISH/etc.): preserve input shape.
         except Exception:
             pass
@@ -1951,7 +1949,7 @@ def main():
                 ref_b = ref.astype(np.int8).tobytes(order="C")
 
         elif opname == "CONCATENATION":
-            # ---- v6: channel-axis concat (most common Inception case) ----
+            # ---- v6/v8.31: concat as a byte-preserving copy layer ----
             # Sim implements concat as a pure DRAM->DRAM copy of pre-arranged
             # bytes (compile_model concatenates the synth inputs in numpy and
             # the byte order already matches the NHWC output stream).
@@ -1963,14 +1961,16 @@ def main():
             except Exception:
                 axis = -1
             n_in = op.InputsLength()
-            # Canonicalise axis to NHWC channel axis = 3 (or -1).
-            # Most TFLite models concat along the last axis (channel).
+            osh_full = list(_tensor_shape(out_t))
+            concat_rank = len(osh_full) if osh_full else len(_tensor_shape(sg.Tensors(op.Inputs(0))))
+            if concat_rank <= 0:
+                concat_rank = 1
             if axis < 0:
-                axis = axis + 4   # rank 4 typical
-            channel_concat = (axis in (3, -1))
-            if not channel_concat:
+                axis += concat_rank
+            if axis < 0 or axis >= concat_rank:
                 print(f"  layer {li:>2d}   concat  in={H}x{W}x{Cin} "
-                      f"skipped (axis={axis} non-channel concat)")
+                      f"skipped (axis={axis} out of rank {concat_rank})")
+                last_output_arr = None
                 continue
             # Verify all inputs share output's scale/zp (else skip — requant TBD).
             oq = out_t.Quantization()
@@ -1990,36 +1990,63 @@ def main():
                       f"skipped (input requant on concat not yet implemented)")
                 continue
 
-            # Build synthesised input slices — each (H, W, Cin_k); concat to (H, W, OC).
+            def _concat_synth(tk, k):
+                shk = list(_tensor_shape(tk))
+                if not shk:
+                    shk = [1]
+                # Match TFLite storage policy: FP source tensors are lowered to
+                # FP16 bytes, INT16 stays 2B, INT8/UINT8 use byte storage.
+                if tk.Type() in FP_TFLITE_TYPES:
+                    dt = np.float16
+                elif tk.Type() == fb.TensorType.INT16:
+                    dt = np.int16
+                else:
+                    dt = np.int8
+                size = int(np.prod(shk))
+                if (k == 0 and last_output_arr is not None
+                    and last_output_arr.size == size
+                    and last_output_arr.dtype == dt):
+                    return last_output_arr.reshape(shk)
+                if dt == np.float16:
+                    return (rng.standard_normal(shk) * 0.5).astype(np.float16)
+                if dt == np.int16:
+                    return rng.integers(-128, 128, size=shk, dtype=np.int16)
+                return rng.integers(-8, 8, size=shk, dtype=np.int8)
+
+            # Build synthesised input slices in their native ranks, concatenate
+            # along TFLite's axis, then canonicalise the result back to HWC for
+            # the MDLA descriptor. This covers both image channel concat and
+            # rank-2 sequence concat used by ETHZ_v5 lstm_float.
             slices = []
             for k in range(n_in):
                 tk = sg.Tensors(op.Inputs(k))
-                shk = list(_tensor_shape(tk))
-                if len(shk) >= 4:
-                    Hk, Wk, Ck = int(shk[1]), int(shk[2]), int(shk[3])
-                else:
-                    Hk, Wk, Ck = H, W, int(shk[-1])
-                if (Hk, Wk) != (H, W):
-                    raise SystemExit(f"layer {li}: concat slice {k} shape mismatch")
-                if k == 0:
-                    s_arr = in_arr           # reuse the first per-layer rng draw
-                    if s_arr.shape != (H, W, Ck):
-                        s_arr = (rng.integers(-128, 128, size=(H, W, Ck), dtype=np.int16)
-                                 if is_int16
-                                 else rng.integers(-8, 8, size=(H, W, Ck), dtype=np.int8))
-                else:
-                    s_arr = (rng.integers(-128, 128, size=(H, W, Ck), dtype=np.int16)
-                             if is_int16
-                             else rng.integers(-8, 8, size=(H, W, Ck), dtype=np.int8))
-                slices.append(s_arr)
-            ref = np.concatenate(slices, axis=-1)
+                slices.append(_concat_synth(tk, k))
+            try:
+                ref_full = np.concatenate(slices, axis=axis)
+            except ValueError as e:
+                print(f"  layer {li:>2d}   concat  in={H}x{W}x{Cin} "
+                      f"skipped (shape mismatch on axis={axis}: {e})")
+                last_output_arr = None
+                continue
+            OH, OW, OC = to_hwc(osh_full)
+            if ref_full.size != OH * OW * OC:
+                print(f"  layer {li:>2d}   concat  in={H}x{W}x{Cin} "
+                      f"skipped (output size mismatch: ref={ref_full.size} "
+                      f"!= {OH*OW*OC})")
+                last_output_arr = None
+                continue
+            ref = ref_full.reshape(OH, OW, OC)
             op_kind = OP_CONCAT
-            OH, OW, OC = H, W, ref.shape[-1]
             ref_b = ref.tobytes(order="C")
             # Override in_arr/in_b so post-loop accounting stores the concat blob
             # as the layer "input" (sim will dram->dram copy it).
             in_arr = ref
-            Cin = OC                          # so in_size matches ref_size
+            H, W, Cin = OH, OW, OC            # so descriptor dims match bytes
+            if ref.dtype == np.float16:
+                layer_dtype = DT_FP16
+                is_int16 = False
+                is_fp_layer = True
+                elem_size = 2
 
         elif opname == "GATHER":
             # ---- v6: indexed lookup (embedding tables / mel-bin tables) ----

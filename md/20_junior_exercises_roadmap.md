@@ -242,7 +242,9 @@ TFLite graph
 
 你作為新進工程師，最重要的能力不是一次懂所有細節，而是遇到一個 FAIL 時能沿著這條主線往回找。
 
-這本 notebook 到第 20 章完成。下一步可以把它拿來做：
+這本 notebook 到第 20 章已經具備完整 onboarding 主線。下一章會把 performance debug 獨立整理成實戰方法。
+
+你可以把目前內容拿來做：
 
 - 新人 onboarding。
 - debug checklist。
@@ -250,4 +252,4 @@ TFLite graph
 - coverage planning。
 - cycle tuning baseline。
 
-> 完結。
+> 下一章 → [第 21 章 — Performance Bug：如何看 Profile 與 Fix DRAM Write](21_performance_bug_playbook.md)

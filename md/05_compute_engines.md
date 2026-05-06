@@ -670,15 +670,15 @@ FP mismatch 常見原因：
 RequantEngine 裡：
 
 ```cpp
-static constexpr uint64_t LANES = 256;
+static constexpr uint64_t LANES = 512;
 ```
 
-註解說明這是把 requant 視為融合到 CONV cluster output stage 的效果。functional 仍然透過 chain FIFO，但 timing 上用 256 elem/cycle。
+這代表 CONV / EWE 共用的 quantize-pack / clamp resource。functional 仍然透過 chain FIFO，但 timing 上用 512 elem/cycle。
 
 cycle：
 
 ```text
-pipe = ceil(total_elements / 256)
+pipe = ceil(total_elements / 512)
 ```
 
 同 CONV，一樣使用 overlap 概念：
@@ -857,11 +857,11 @@ FP softmax 使用 numerically stable 3-pass：
 cycle model：
 
 ```text
-per_pass = ceil(elems / 64)
+per_pass = ceil(elems / lanes)
 cycles = 3 * per_pass
 ```
 
-其中 `EWE_LANES = 64`。
+其中 lanes 依 dtype 決定：INT8=64、INT16=32、FP=32。
 
 softmax 常見 mismatch：
 
@@ -880,9 +880,17 @@ EWE cycle 基本公式：
 
 | op | cycle |
 |---|---|
-| ADD / MUL / SUB | `ceil(elems / 64)` |
-| HARD_SWISH / GELU | `ceil(elems / 64)` |
-| SOFTMAX | `3 * ceil(elems / 64)` |
+| ADD / MUL / SUB | `ceil(elems / lanes)` |
+| HARD_SWISH / GELU | `ceil(elems / lanes)` |
+| SOFTMAX | `3 * ceil(elems / lanes)` |
+
+lanes 依 dtype：
+
+| dtype | lanes |
+|---|---:|
+| INT8 | 64 |
+| INT16 | 32 |
+| FP | 32 |
 
 memory read / write latency 由 L1Manager imposing。EWE code 目前多數 path 是：
 
@@ -1033,18 +1041,18 @@ POOL cycle：
 
 ```text
 out_elems = out_h * out_w * out_c
-per_lane = ceil(out_elems / 16)
+per_lane = ceil(out_elems / lanes)
 cycles = per_lane * max(k_h * k_w, 1)
 ```
 
-也就是 16 lanes，每個 output element 要看 `k_h*k_w` 個 input。
+lanes 依 dtype 決定：INT8=64、INT16=32、FP=32。每個 output element 要看 `k_h*k_w` 個 input。
 
 這對大 kernel global average pool 很敏感：
 
 ```text
 global avgpool 8x8
 k_h*k_w = 64
-cycles = ceil(out_elems/16) * 64
+cycles = ceil(out_elems/lanes) * 64
 ```
 
 所以某些模型 tail 的 pooling 可能不是完全免費。

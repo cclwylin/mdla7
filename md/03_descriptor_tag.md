@@ -603,7 +603,7 @@ out_w = (in_w + pad_l + pad_r - k_w) / stride_w + 1
 
 ## 3.17 RequantBody 導讀
 
-Requant 是 CONV 後面很重要的 sink。CONV 把 int32 / FP32 partial sum 推進 16-lane chain，Requant 負責把它轉成 output tensor。
+Requant 是 CONV 後面很重要的 sink，也是 CONV / EWE 共用的 quantize-pack / clamp resource。CONV 把 int32 / FP32 partial sum 推進 16-lane functional chain，Requant timing model 以 512 elem/cycle 估算，把它轉成 output tensor。
 
 `RequantBody` 重點欄位：
 
@@ -658,16 +658,24 @@ EWE 是 element-wise engine。它支援：
 | `lut_addr` | params / LUT 位址 |
 | `subtype` | EWE subtype |
 
-EWE 的 cycle model 以 `EWE_LANES = 64` 為基礎。binary op 通常：
+EWE 的 cycle model 依 dtype 選 lanes：
+
+| dtype | EWE lanes |
+|---|---:|
+| INT8 | 64 |
+| INT16 | 32 |
+| FP | 32 |
+
+binary op 通常：
 
 ```text
-cycles ~= ceil(elements / 64)
+cycles ~= ceil(elements / lanes)
 ```
 
 softmax 是三 pass：
 
 ```text
-cycles ~= 3 * ceil(elements / 64)
+cycles ~= 3 * ceil(elements / lanes)
 ```
 
 功能上，FP path 使用 FP16 storage、FP32 compute；INT path 使用量化參數 blob。
@@ -698,6 +706,18 @@ POOL 支援 max、average、global：
 | `count_include_pad` | avg pool 是否把 padding 算進 divisor |
 
 POOL 的 stride decode 也支援 1、2、4、8。這對某些模型的 global / large stride pooling 很重要。
+
+POOL 的 cycle model 跟 EWE 使用同一套 dtype lanes：
+
+| dtype | POOL lanes |
+|---|---:|
+| INT8 | 64 |
+| INT16 | 32 |
+| FP | 32 |
+
+```text
+cycles ~= ceil(out_elements / lanes) * max(k_h * k_w, 1)
+```
 
 ---
 

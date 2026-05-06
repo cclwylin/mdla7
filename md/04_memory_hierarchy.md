@@ -979,7 +979,95 @@ UDMA extra  ~= 16 cycles per descriptor
 
 ---
 
-## 4.27 Memory debug checklist
+## 4.27 Activation Compression 在 memory hierarchy 的位置
+
+當 profile 顯示 `UDMA_R` 長期 dominate，代表 DRAM→L1 的 activation load 可能比 compute 更重要。這時可以考慮在 memory hierarchy 加一個 ACT compression/decompression path。
+
+最保守的設計是：
+
+```text
+DRAM compressed activation
+  -> UDMA_R + ACT_DECOMP
+  -> L1 raw NHWC tile
+  -> CONV / EWE / POOL existing engines
+```
+
+這個設計有一個關鍵原則：**L1 裡仍然放 raw tensor**。所以 CONV 的 3x3 window、padding、stride、halo address 都不用知道 compression。Compression 只存在 DRAM storage format 與 UDMA_R/UDMA_W path 中。
+
+如果一開始就做：
+
+```text
+L1 compressed activation -> CONV on-the-fly decompress
+```
+
+會馬上遇到幾個困難：
+
+| 困難 | 原因 |
+|---|---|
+| random window access | CONV 會重複讀 halo row / overlapping window |
+| block boundary | 3x3 window 可能跨 compressed block |
+| stride / padding | address mapping 不再是簡單 NHWC offset |
+| cycle model | 每個 MAC 讀 operand 前可能有 decompress latency |
+| L1 lifetime | compressed block 和 raw window cache 都要管理 |
+
+所以教材建議先做 DRAM compressed、L1 decompressed。
+
+### 4.27.1 新增 UDMA mode 的想法
+
+可以把 ACTC 建成 UDMA 的新 mode：
+
+```text
+UM_ACT_DECOMP_COPY:
+  src_addr = DRAM compressed stream
+  dst_addr = L1 raw tile
+  idx_table_addr = block metadata table
+  length = raw output bytes
+
+UM_ACT_COMP_COPY:
+  src_addr = L1 raw tile
+  dst_addr = DRAM compressed stream
+  idx_table_addr = block metadata table
+  length = raw input bytes
+```
+
+Cycle model 至少要計：
+
+| 項目 | 是否會變 |
+|---|---|
+| DRAM read bytes | 降低，讀 compressed bytes |
+| metadata read bytes | 增加，讀 block table/header |
+| L1 write bytes | 不變，寫 raw tile |
+| ACT_DECOMP cycles | 增加，取決於 lanes / bytes per cycle |
+| UDMA descriptor startup | 仍存在 |
+
+因此 ACT compression 不是把 `dram_r` 直接除以 2。它是用較少 DRAM bytes 換一個新硬體 block 的 decompress latency。
+
+### 4.27.2 Profile 上怎麼看值不值得做
+
+先拆 `dram_r`：
+
+```text
+dram_r = activation read + weight read + params read + metadata/layout read
+```
+
+ACT compression 只影響 activation read。若 layer 的 DRAM read 主要是 weights，例如大 1x1 convolution 的 weight table，ACTC 幫助就小。若 layer 是高解析度、多 H tile、重複讀 input window，ACTC 才會有明顯收益。
+
+判斷順序：
+
+```text
+1. UDMA_R 是否是 peak utilization？
+2. top dram_r layer 的 bytes 是否主要來自 activation？
+3. weight 是否已經 persistent？
+4. fanout input 是否已經共用？
+5. halo reload 是否還很多？
+6. activation entropy 是否可能壓縮？
+```
+
+只有前幾個 scheduling / tiling 問題先排掉後，ACTC 的收益才比較乾淨。
+
+---
+
+## 4.28 Memory debug checklist
 
 遇到 output mismatch，請照這個順序看：
 
@@ -1010,7 +1098,7 @@ UDMA extra  ~= 16 cycles per descriptor
 
 ---
 
-## 4.28 一個手算例子：linear load
+## 4.29 一個手算例子：linear load
 
 假設有一筆 UDMA read：
 
@@ -1057,7 +1145,7 @@ DRAM read 2098 + L1 write 561 + 16 = 2675 cycles
 
 ---
 
-## 4.29 一個手算例子：compute overlap
+## 4.30 一個手算例子：compute overlap
 
 假設 CONV descriptor 需要：
 
@@ -1093,7 +1181,7 @@ CONV total ~= 2000 cycles
 
 ---
 
-## 4.30 常見誤解
+## 4.31 常見誤解
 
 | 誤解 | 正確理解 |
 |---|---|
@@ -1105,10 +1193,11 @@ CONV total ~= 2000 cycles
 | `length` 是 element count | UDMA 裡大多是 bytes，dtype 要自己換算 |
 | CONV time = memory + compute | 目前 model 對 engine 內部採用 overlap，近似 max(memory, compute) |
 | 很多小 UDMA 沒關係 | 每筆有 decode startup，也更容易 row miss |
+| ACT compression 會讓 L1 也自動變小 | 若採 DRAM compressed / L1 decompressed，L1 footprint 不變，只省 DRAM bandwidth |
 
 ---
 
-## 4.31 本章小結
+## 4.32 本章小結
 
 MDLA7 memory hierarchy 的主線是：
 
@@ -1126,6 +1215,7 @@ tiling 決定 L1 是否裝得下與能否 overlap
 2. DRAM 是 48 B/cycle，含 row miss 與 refresh，通常是大模型瓶頸之一。
 3. UDMA 的功能正確仰賴 address、length、stride、wait tag 全部正確。
 4. Scratchpad 不會自動保護資料，compiler / scheduler 必須管理 lifetime。
+5. ACT compression 若採 DRAM compressed / L1 decompressed，可以先省 DRAM activation read，而不打擾 CONV/EWE/POOL 的 raw NHWC path。
 
 下一章會進入 compute engines，看看 CONV、Requant、EWE、POOL 如何消費 descriptor body，並把 memory data 轉成 tensor output。
 

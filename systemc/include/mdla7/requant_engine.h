@@ -1,6 +1,6 @@
 #pragma once
 
-// Requant Engine — 16 per-cluster lanes (spec §3A.5).
+// Requant Engine — shared CONV/EWE quantize-pack resource (spec §3A.5).
 //
 // v1.2 / v1.3 + v3.5 fused activation + v6 bias/zp_in folding:
 //   - Drains chain[oc % 16] in NHWC scan order (matching CONV's push order).
@@ -38,14 +38,11 @@ SC_MODULE(RequantEngine) {
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     uint8_t last_dtype = DT_INT8x8;     // v4.1: latched by CmdEng each layer
 
-    // v8.8: Requant lanes effectively fused into the CONV cluster output stage.
-    // Spec §3A.5 has 16 clusters × 16 chain outputs each; once MBQM (or FP
-    // bias+clamp) is integrated at every cluster's output, requant throughput
-    // = 16 × 16 = 256 elem/cyc.  Bumping LANES from 16 to 256 captures this
-    // fusion without restructuring the descriptor flow (CONV still pushes
-    // through chain; engine just drains 16× faster).  Real HW would skip
-    // chain entirely; the timing we measure is the same.
-    static constexpr uint64_t LANES = 256;
+    // v8.38: Requant is modeled as the shared CONV/EWE quantize-pack resource.
+    // Spec resource is 512 elem/cyc: enough to keep large image workloads from
+    // stalling behind MBQM/clamp/writeback. Functional simulation still drains
+    // the 16 CONV chain FIFOs; timing lumps the wider shared HW behind it.
+    static constexpr uint64_t LANES = 512;
 
     SC_HAS_PROCESS(RequantEngine);
     RequantEngine(sc_core::sc_module_name nm, L1Manager& mgr)

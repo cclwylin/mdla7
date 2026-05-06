@@ -106,9 +106,19 @@ public:
         std::memcpy(dst, &mem[addr - DRAM_BASE], n);
         if (in_process()) impose_latency(addr, n);
     }
+    void read_compressed(uint32_t addr, void* dst, uint32_t raw_n,
+                         uint32_t compressed_n) {
+        std::memcpy(dst, &mem[addr - DRAM_BASE], raw_n);
+        if (in_process()) impose_latency(addr, compressed_n);
+    }
     void write(uint32_t addr, const void* src, uint32_t n) {
         std::memcpy(&mem[addr - DRAM_BASE], src, n);
         if (in_process()) impose_latency(addr, n);
+    }
+    void write_compressed(uint32_t addr, const void* src, uint32_t raw_n,
+                          uint32_t compressed_n) {
+        std::memcpy(&mem[addr - DRAM_BASE], src, raw_n);
+        if (in_process()) impose_latency(addr, compressed_n);
     }
     std::size_t size() const { return mem.size(); }
 
@@ -175,9 +185,21 @@ public:
         else if (addr_in_dram(addr)) dram_.read(addr, dst, n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
     }
+    void read_compressed(uint32_t addr, void* dst, uint32_t raw_n,
+                         uint32_t compressed_n) {
+        if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
+        else if (addr_in_dram(addr)) dram_.read_compressed(addr, dst, raw_n, compressed_n);
+        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+    }
     void write(uint32_t addr, const void* src, uint32_t n) {
         if (addr_in_l1mesh(addr)) mesh_.write(addr, src, n);
         else if (addr_in_dram(addr)) dram_.write(addr, src, n);
+        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+    }
+    void write_compressed(uint32_t addr, const void* src, uint32_t raw_n,
+                          uint32_t compressed_n) {
+        if (addr_in_l1mesh(addr)) mesh_.write(addr, src, raw_n);
+        else if (addr_in_dram(addr)) dram_.write_compressed(addr, src, raw_n, compressed_n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
     }
 

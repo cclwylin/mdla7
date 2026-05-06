@@ -17,14 +17,13 @@ toc = md.toc
 
 # Part 分界
 PARTS = [
-    ("Part I — 使用 SystemC", 0, 14),
-    ("Part II — Library 內部走讀", 15, 24),
-    ("Part III — SoC Bus 通訊協定", 25, 30),
-    ("Part IV — Memory Subsystem", 31, 36),
-    ("Part V — Pipeline 實作", 37, 41),
-    ("Part VI — NoC 實作", 42, 47),
-    ("Part VII — Cache 實作", 48, 52),
-    ("Part VIII — Capstone 整合", 53, 53),
+    ("Part I — 入門與地圖", 0, 1),
+    ("Part II — HW Spec", 2, 5),
+    ("Part III — Compiler", 6, 8),
+    ("Part IV — SystemC Architecture", 9, 13),
+    ("Part V — Scheduler & Performance", 14, 16),
+    ("Part VI — Verification", 17, 18),
+    ("Part VII — 實戰與 Roadmap", 19, 21),
 ]
 
 # 從 body 抓 chapter H1（split_h1 之前的原始形式）

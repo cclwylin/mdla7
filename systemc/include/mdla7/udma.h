@@ -17,6 +17,12 @@
 //                    src_stride=input row bytes, dst_stride=output row bytes,
 //                    num_chunks=input rows, slice_begin={W,Cin,block,Cout},
 //                    length=element bytes.
+//   ACT_DECOMP_COPY: DRAM compressed activation -> L1 raw activation.
+//                    length=raw bytes, src_stride=compressed bytes,
+//                    dst_stride=metadata/header bytes.
+//   ACT_COMP_COPY  : L1 raw activation -> DRAM compressed activation.
+//                    Functional DRAM image stays raw for verification; timing
+//                    uses src_stride compressed bytes + dst_stride metadata.
 
 #include <systemc>
 #include <cstring>
@@ -62,6 +68,8 @@ SC_MODULE(Udma) {
             case UM_SCATTER_CONCAT: do_concat(u);   break;
             case UM_STRIDED_SLICE:  do_slice(u);    break;
             case UM_DEPTH_TO_SPACE: do_depth_to_space(u); break;
+            case UM_ACT_DECOMP_COPY: do_act_decomp(u); break;
+            case UM_ACT_COMP_COPY:   do_act_comp(u);   break;
             default:
                 std::cout << "[UDMA] unknown mode=" << int(u.mode) << "\n";
                 wait(10, sc_core::SC_NS);
@@ -205,6 +213,51 @@ SC_MODULE(Udma) {
         }
         l1mgr.write(u.dst_addr, dst.data(), dst.size());
         wait_bytes(src_bytes);
+    }
+
+    void wait_act_codec(uint64_t raw_bytes) {
+        // v9 ACTC: 512 B/cycle codec pipe. This is intentionally
+        // separate from DRAM/L1 bandwidth; it models the hardware resource
+        // between UDMA and L1, after compressed bytes have been fetched.
+        wait(double((raw_bytes + 511) / 512), sc_core::SC_NS);
+    }
+
+    void do_act_decomp(const UdmaBody& u) {
+        const uint32_t raw_bytes = u.length;
+        const uint32_t comp_bytes = u.src_stride ? u.src_stride : raw_bytes;
+        const uint32_t meta_bytes = u.dst_stride;
+        std::cout << "[UDMA] ACT_DECOMP  src=0x" << std::hex << u.src_addr
+                  << "  dst=0x" << u.dst_addr << std::dec
+                  << "  raw=" << raw_bytes
+                  << "  comp=" << comp_bytes
+                  << "  meta=" << meta_bytes << " B\n";
+        std::vector<uint8_t> buf(raw_bytes);
+        // Functional memory remains raw so existing references still verify.
+        // Timing charges only compressed payload + metadata for the DRAM read.
+        l1mgr.read_compressed(u.src_addr, buf.data(), raw_bytes,
+                              comp_bytes + meta_bytes);
+        wait_act_codec(raw_bytes);
+        l1mgr.write(u.dst_addr, buf.data(), raw_bytes);
+        wait_bytes(comp_bytes + meta_bytes);
+    }
+
+    void do_act_comp(const UdmaBody& u) {
+        const uint32_t raw_bytes = u.length;
+        const uint32_t comp_bytes = u.src_stride ? u.src_stride : raw_bytes;
+        const uint32_t meta_bytes = u.dst_stride;
+        std::cout << "[UDMA] ACT_COMP  src=0x" << std::hex << u.src_addr
+                  << "  dst=0x" << u.dst_addr << std::dec
+                  << "  raw=" << raw_bytes
+                  << "  comp=" << comp_bytes
+                  << "  meta=" << meta_bytes << " B\n";
+        std::vector<uint8_t> buf(raw_bytes);
+        l1mgr.read(u.src_addr, buf.data(), raw_bytes);
+        wait_act_codec(raw_bytes);
+        // Functional DRAM remains raw; timing charges compressed payload +
+        // metadata so final output verification can keep reading raw bytes.
+        l1mgr.write_compressed(u.dst_addr, buf.data(), raw_bytes,
+                               comp_bytes + meta_bytes);
+        wait_bytes(comp_bytes + meta_bytes);
     }
 };
 

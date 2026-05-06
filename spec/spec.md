@@ -767,9 +767,9 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 1. **Command Engine** 收到 NN graph layer，發 config 給：
    - UDMA：把這層的 weight / activation tile 從 DRAM 拉到 L1Mesh SRAM。
    - CONV / Requant / EWE / POOL：依 layer 類別啟動。
-2. **CONV Engine** 從 L1_Manager 讀 ACT + WGT，做 MAC，把 partial sum 寫回 L1Mesh。
-3. **Requant Engine** 讀 INT32 partial sum，做 scale/shift，寫 INT8 結果回 L1Mesh。
-4. **EWE Engine**：殘差連接 / activation function。
+2. **CONV Engine** 從 L1_Manager 讀 ACT + WGT，做 MAC，把 partial sum 送到 shared Requant / pack datapath。
+3. **Requant Engine / shared quantize-pack resource** 讀 INT32 partial sum 或 EWE value，做 scale/shift/clamp，512 lanes，寫 INT8 / INT16 / FP 結果回 L1Mesh。
+4. **EWE Engine**：殘差連接 / activation function，可共用 Requant / pack resource 做 output quantize / clamp。
 5. **POOL Engine**：spatial downsample。
 6. **TNPS Engine**：軸重排 / transpose（attention Q·Kᵀ 之間、layout 轉換）。
 7. **UDMA** 在背景把上一個 tile 的結果寫回 DRAM、預取下一個 tile（double-buffer `[TBD]`）。
@@ -799,7 +799,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - **Host → Command Engine（白線, 1T descriptor）**：v0 用 `sc_fifo<descriptor_t>`，host 把 descriptor `write()` 進去，CmdEngine 用 `read()` 取出。v1 改成 `simple_initiator_socket`（AXI-Lite stub）後可掛 RISC-V ISS。
 - **Command Engine → Engine config（白線, 1T payload）**：用 `sc_signal<descriptor_t>` 或自定 `sc_fifo<>`(depth=1)，1 cycle latch 即可，**不需要 TLM socket**。
 - **Engine ↔ L1_Manager（藍線, AXI 128b × N）**：`tlm_utils::simple_initiator_socket` / `simple_target_socket`，AXI-like payload；N 條並列在 v0 可先合併成「N×16B / cycle」單條 socket，等 contention 模型上線再展開。
-- **CONV → Requant chain**：`std::array<sc_fifo<int32_t>, 16> chain;`，每 lane depth=2；CONV 內部 `Cluster` 子模組各自 push、Requant 內部 `RequantLane` 子模組各自 read，**繞過 L1_Manager**。
+- **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 16> chain;` 連 CONV partial sums，每 lane depth=2；timing 上 Requant 是 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
 - **L1_Manager 內部 arbiter**：用 `sc_event_queue` 或 round-robin 排程 `[TBD]`。
 - **DRAM latency**：用 `wait()` 模 fixed latency，第一版不模 DDR controller。
 

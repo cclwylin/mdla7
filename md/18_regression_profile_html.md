@@ -9,6 +9,7 @@
 - profile JSON / CSV / PNG / HTML 各自怎麼用。
 - `model_profile.html` index 如何生成。
 - regression status 要如何解讀。
+- ETHZ_v6 裡哪些模型屬於 Transformer / attention 類 coverage。
 
 ---
 
@@ -195,7 +196,74 @@ python3 run_ethz_v6.py
 
 ---
 
-## 18.10 Regression triage
+## 18.10 ETHZ_v6 Transformer / attention coverage
+
+ETHZ_v6 corpus 裡有一批模型明顯屬於 Transformer、ViT、LLM、BERT 或 attention-heavy 架構。這些模型對 MDLA7 很重要，因為它們會覆蓋大量 non-CNN pattern：
+
+- `FULLY_CONNECTED` / 1x1 matmul-like path
+- `RESHAPE`
+- `ADD` / `MUL` / `SUB`
+- `SOFTMAX`
+- `GATHER`
+- `GELU`
+- high-rank tensor lowering
+- attention Q/K/V 類資料流
+
+確定是 Transformer 類的模型：
+
+| Model | 類型 | 典型 coverage |
+|---|---|---|
+| `gpt2_quant.tflite` | decoder-only Transformer / GPT | FC、reshape、softmax、gather |
+| `llama2_quant.tflite` | decoder-only Transformer / LLM | FC、mul、add、softmax、gather |
+| `mobilebert_quant.tflite` | BERT encoder | large FC count、reshape、softmax |
+| `vit_b16_quant.tflite` | Vision Transformer | patch/token reshape、FC、softmax |
+| `swin_float.tflite` | Swin Transformer | window attention、FC、softmax、GELU |
+| `swin_quant.tflite` | Swin Transformer | quantized attention-style graph |
+| `mobilevit_v2_float.tflite` | CNN + Transformer hybrid | conv/dwconv + attention blocks |
+| `mobilevit_v2_quant.tflite` | CNN + Transformer hybrid | quantized hybrid coverage |
+| `sam_float.tflite` | Segment Anything style Transformer | FC、softmax、GELU、attention blocks |
+| `sam_quant.tflite` | Segment Anything style Transformer | quantized attention blocks |
+
+也很可能含 attention / Transformer block 的模型：
+
+| Model | 為什麼列入 |
+|---|---|
+| `sd_encoder_quant.tflite` | diffusion encoder，profile 有 reshape / add / mul / softmax |
+| `sd_decoder_quant.tflite` | diffusion decoder，profile 有 reshape / add / mul / softmax |
+| `sd_diffusion_quant.tflite` | diffusion core，attention-like op mix 很重 |
+| `midas_v3_float.tflite` | vision model，profile 有 FC / reshape / softmax pattern |
+| `midas_v3_quant.tflite` | quantized MiDaS，覆蓋同類 pattern |
+
+如果要快速找 Transformer 類 regression，可以用檔名關鍵字先篩：
+
+```bash
+cd systemc
+python3 run_ethz_v6.py --filter gpt2
+python3 run_ethz_v6.py --filter llama2
+python3 run_ethz_v6.py --filter mobilebert
+python3 run_ethz_v6.py --filter vit
+python3 run_ethz_v6.py --filter swin
+python3 run_ethz_v6.py --filter sam
+```
+
+如果要用 profile 交叉確認，可以看每個 model 的 `.profile.csv`，統計 op mix：
+
+```bash
+awk -F, 'NR>1{gsub(/^ +| +$/,"",$2); c[$2]++}
+         END{for(k in c) print k,c[k]}' output/vit_b16_quant.profile.csv
+```
+
+典型 Transformer-like profile 會看到：
+
+```text
+fc / reshape / add / mul / sub / softmax
+```
+
+注意：`xlsr_float.tflite` / `xlsr_quant.tflite` 名稱上像 speech Transformer 家族，但目前 profile 主要呈現 `conv/concat/d2spac`，沒有明顯 `fc/softmax` attention pattern。因此在這份 textbook 裡先不列為確定 Transformer coverage。
+
+---
+
+## 18.11 Regression triage
 
 看 regression 時先分三類：
 
@@ -209,7 +277,7 @@ python3 run_ethz_v6.py
 
 ---
 
-## 18.11 HTML Gantt 怎麼看
+## 18.12 HTML Gantt 怎麼看
 
 看 Gantt 時問：
 
@@ -224,7 +292,7 @@ Gantt 是 scheduler debug 的最佳入口。
 
 ---
 
-## 18.12 常見誤解
+## 18.13 常見誤解
 
 | 誤解 | 正確理解 |
 |---|---|
@@ -233,10 +301,11 @@ Gantt 是 scheduler debug 的最佳入口。
 | HTML 只是美化 | HTML Gantt 是 scheduler/debug 工具 |
 | ok rows 永遠不用 rerun | 改 scheduler/cycle model 時要 rerun |
 | ratio 越低一定越差 | 要看 cx baseline、model class、coverage |
+| `xlsr` 名稱像 Transformer 就一定算 attention coverage | 要看 profile op mix；目前主要是 conv/concat/d2spac |
 
 ---
 
-## 18.13 本章小結
+## 18.14 本章小結
 
 Regression flow：
 

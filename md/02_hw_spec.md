@@ -261,14 +261,16 @@ CONV Engine 負責：
 
 Requant Engine 負責：
 
-- drain 16 lanes int32 chain
+- CONV / EWE 共用 quantize-pack / clamp resource
+- timing throughput 512 elem/cycle
+- drain CONV int32 chain functional path
 - per-channel multiplier / shift
 - bias_eff
 - activation min / max clamp
 - int8 / int16 output write
 - FP path 的 output conversion
 
-它從 L1 讀 params，從 chain 讀 psum，最後寫 L1 output。
+它從 L1 讀 params，從 chain 或 element-wise datapath 取得 psum/value，最後寫 L1 output。
 
 ### EWE Engine
 

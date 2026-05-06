@@ -120,7 +120,7 @@ pdf/
 
 ## 2. 150 頁章節配置
 
-目標 150 頁，分成 7 個 Part、21 章。頁數是寫作預算，不必逐字精準，但總量要控制在 145 到 160 頁。
+目標 150 頁左右，分成 7 個 Part、22 章。頁數是寫作預算，不必逐字精準，但總量要控制在 145 到 170 頁。
 
 | Part | 章 | 主題 | 頁數 |
 |---|---:|---|---:|
@@ -145,7 +145,8 @@ pdf/
 | VI. Verification | 18 | Regression scripts 與 profile HTML | 8 |
 | VII. 實戰 | 19 | Debug playbook：從 N-FAIL 到 root cause | 7 |
 | VII. 實戰 | 20 | Junior exercises 與 roadmap | 7 |
-|  |  | **合計** | **160** |
+| VII. 實戰 | 21 | Performance bug：profile、DRAM write、UDMA_R、ACT compression | 8 |
+|  |  | **合計** | **168** |
 
 如果必須壓到剛好 150 頁，優先縮：
 
@@ -327,7 +328,7 @@ make -s
 章節內容：
 
 - CONV：read L1 input / weight，push int32 chain
-- REQUANT：drain 16 lanes，apply TFLite MBQM，write int8/int16/fp output
+- REQUANT：CONV / EWE 共用 512-lane quantize-pack resource，apply TFLite MBQM，write int8/int16/fp output
 - EWE：ADD / MUL / SUB / activation / softmax
 - POOL：AVG / MAX / global-ish pooling
 - D2SPACE：用 UDMA layout op 表達 pixel shuffle
@@ -753,11 +754,31 @@ python3 run_ethz_v6.py
 Roadmap：
 
 - Last-LSB fidelity
-- real 16-lane Requant
+- shared 512-lane Requant resource modeling
 - better L1 arbitration
 - generic microblock wavefront
 - tiled SOFTMAX
 - INT16 POOL / CONCAT support
+- ACT compression / decompression：DRAM compressed、L1 raw NHWC tile
+
+### 第 21 章 — Performance Bug：如何看 Profile 與 Fix DRAM Write
+
+頁數目標：8
+
+本章是 performance 實戰章，補第 14 到第 16 章之後的 debug workflow。
+
+章節內容：
+
+- 從 `.profile.csv` 找 top `dram_w / dram_r` layer。
+- 判斷 final output、intermediate output、logical concat boundary。
+- Tile fuse、microblock fuse、pending store、GraphMeta suppress store。
+- Case study：`imdn_quant` / `imdn_float`。
+- 當 `UDMA_R` 還是 dominate 時，評估 persistent weight、fanout input reuse、rolling halo。
+- ACT compression / decompression 作為下一級硬體解法：
+  - DRAM compressed、L1 decompressed。
+  - UDMA_R + ACT_DECOMP。
+  - UDMA_W + ACT_COMP。
+  - raw fallback、metadata overhead、cycle model。
 
 ---
 
@@ -858,7 +879,7 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 | 模組 | 目前 cycle model | 準確度風險 |
 |---|---|---|
 | CONV | bit-mult throughput + startup | tile fill latency 仍粗 |
-| REQUANT | chain drain + lane throughput | 16 lanes 仍集中在 single thread 模型 |
+| REQUANT | chain drain + 512-lane shared resource throughput | shared CONV/EWE arbitration 仍簡化 |
 | UDMA | bandwidth + startup + mode cost | real AXI arbitration 未完全建模 |
 | DRAM | row hit / miss / bandwidth / refresh | bank scheduling 簡化 |
 | L1 | bank conflict model | priority policy 簡化 |

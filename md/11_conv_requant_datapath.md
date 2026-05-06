@@ -325,10 +325,10 @@ engine time ~= max(L1 read elapsed, conv_cycles)
 Requant：
 
 ```text
-engine time ~= max(L1 write elapsed, ceil(elements / 256))
+engine time ~= max(L1 write elapsed, ceil(elements / 512))
 ```
 
-這是對 pipeline overlap 的近似。
+這是對 CONV / EWE 共用 quantize-pack / clamp resource 的 pipeline overlap 近似。
 
 若 profile 顯示 CONV 很慢，先比較：
 

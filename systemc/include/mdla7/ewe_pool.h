@@ -4,11 +4,14 @@
 //
 // v1: real INT8 compute (bit-exact vs reference).
 // v2.2 cycle model:
-//   POOL: pipelined; cycle = max(K_h*K_w, 1) per output element across 16 lanes
+//   POOL: dtype-scaled pipelined engine:
+//         INT8=64 lanes, INT16=32 lanes, FP=32 lanes.
+//         cycle = ceil(out_elem/lanes) * max(K_h*K_w, 1)
 //         + AXI fill (length / 128b) + drain (16 cycle).
-//   EWE: 64-lane element-wise engine.
+//   EWE: dtype-scaled element-wise engine:
+//        INT8=64 lanes, INT16=32 lanes, FP=32 lanes.
 //   EWE softmax: 3-pass exp+reduce_sum+div;
-//         cycle = ceil(elem/64) * 3 + AXI fill/drain.
+//         cycle = ceil(elem/lanes) * 3 + AXI fill/drain.
 
 #include <systemc>
 #include <iostream>
@@ -22,7 +25,27 @@
 
 namespace mdla7 {
 
-static constexpr uint64_t EWE_LANES = 64;
+static constexpr uint64_t EWE_INT8_LANES  = 64;
+static constexpr uint64_t EWE_INT16_LANES = 32;
+static constexpr uint64_t EWE_FP_LANES    = 32;
+
+inline uint64_t ewe_lanes_for_dtype(uint8_t dtype) {
+    if (is_fp_dtype(dtype)) return EWE_FP_LANES;
+    switch (static_cast<DType>(dtype)) {
+        case DT_INT16x4:
+        case DT_INT16x8:
+        case DT_INT16x16:
+            return EWE_INT16_LANES;
+        case DT_INT8x4:
+        case DT_INT8x8:
+        default:
+            return EWE_INT8_LANES;
+    }
+}
+
+inline uint64_t pool_lanes_for_dtype(uint8_t dtype) {
+    return ewe_lanes_for_dtype(dtype);
+}
 
 SC_MODULE(EweEngine) {
     sc_core::sc_fifo_in<DescriptorBody> cfg_in;
@@ -194,6 +217,7 @@ SC_MODULE(EweEngine) {
             const EweBody& e = body.ewe;
             uint64_t elems = uint64_t(e.h) * e.w * e.c;
             const bool fp = is_fp_dtype(last_dtype);
+            const uint64_t lanes = ewe_lanes_for_dtype(last_dtype);
             // v8.30: binary ADD/MUL/SUB share the same dispatch shape (two
             // input tensors + 48-byte params) — only the math differs. Unary
             // HARD_SWISH/GELU mirror the softmax shape (single input + 8-byte
@@ -214,7 +238,7 @@ SC_MODULE(EweEngine) {
                         else                          run_add(e, elems);
                     }
                 }
-                wait((elems + EWE_LANES - 1) / EWE_LANES, sc_core::SC_NS);
+                wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH || e.subtype == ES_GELU) {
                 const char* nm = (e.subtype == ES_GELU) ? "gelu" : "h_swsh";
                 std::cout << "[EWE] " << nm << " " << e.h << "x" << e.w << "x" << e.c
@@ -224,7 +248,7 @@ SC_MODULE(EweEngine) {
                 }
                 // GELU = exp + tanh + arith (~6 ops); HARD_SWISH ~ 4 ops.
                 // Lump under 1 cycle/elem/lane (matches softmax exp pass).
-                wait((elems + EWE_LANES - 1) / EWE_LANES, sc_core::SC_NS);
+                wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else {
                 std::cout << "[EWE] softmax " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
@@ -263,7 +287,7 @@ SC_MODULE(EweEngine) {
                 // v2.2 compute cycles only (memory time already accrued inside
                 // L1Mesh/Dram via the read/write calls above).
                 //   3-pass schedule: exp / reduce_sum / div, pipelined lanes.
-                const uint64_t per_pass = (elems + EWE_LANES - 1) / EWE_LANES;
+                const uint64_t per_pass = (elems + lanes - 1) / lanes;
                 wait(3 * per_pass, sc_core::SC_NS);
             }
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
@@ -347,21 +371,75 @@ SC_MODULE(PoolEngine) {
         l1mgr.write(p.out_addr, out16.data(), out_elems * sizeof(uint16_t));
     }
 
+    template <typename T>
+    void run_pool_int(const PoolBody& p) {
+        const uint32_t s_h = pool_decode_stride(p.stride & 0x3);
+        const uint32_t s_w = pool_decode_stride((p.stride >> 2) & 0x3);
+        const uint32_t pT  = p.pad_tb & 7;
+        const uint32_t pL  = p.pad_lr & 7;
+        const uint32_t k_h = (p.k_h == 255) ? uint32_t(p.in_h) : uint32_t(p.k_h);
+        const uint32_t k_w = (p.k_w == 255) ? uint32_t(p.in_w) : uint32_t(p.k_w);
+        const uint64_t in_elems  = uint64_t(p.in_h)  * p.in_w  * p.in_c;
+        const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
+        const int32_t min_v = (sizeof(T) == 2) ? -32768 : -128;
+        const int32_t max_v = (sizeof(T) == 2) ?  32767 :  127;
+        std::vector<T> in_buf(in_elems), out_buf(out_elems);
+        l1mgr.read(p.in_addr, in_buf.data(), in_elems * sizeof(T));
+
+        for (uint32_t oh = 0; oh < p.out_h; ++oh)
+        for (uint32_t ow = 0; ow < p.out_w; ++ow)
+        for (uint32_t c  = 0; c  < p.out_c; ++c) {
+            if (p.mode == PM_MAX) {
+                int32_t best = min_v;
+                for (uint32_t kh = 0; kh < k_h; ++kh)
+                for (uint32_t kw = 0; kw < k_w; ++kw) {
+                    int ih = int(oh)*int(s_h) + int(kh) - int(pT);
+                    int iw = int(ow)*int(s_w) + int(kw) - int(pL);
+                    if (ih < 0 || ih >= int(p.in_h)) continue;
+                    if (iw < 0 || iw >= int(p.in_w)) continue;
+                    int32_t v = int32_t(in_buf[(ih * p.in_w + iw) * p.in_c + c]);
+                    if (v > best) best = v;
+                }
+                out_buf[(oh * p.out_w + ow) * p.out_c + c] = T(best);
+            } else {                            // AVG (or GLOBAL via avg)
+                int32_t s = 0; uint32_t n = 0;
+                for (uint32_t kh = 0; kh < k_h; ++kh)
+                for (uint32_t kw = 0; kw < k_w; ++kw) {
+                    int ih = int(oh)*int(s_h) + int(kh) - int(pT);
+                    int iw = int(ow)*int(s_w) + int(kw) - int(pL);
+                    if (ih < 0 || ih >= int(p.in_h)) continue;
+                    if (iw < 0 || iw >= int(p.in_w)) continue;
+                    s += int32_t(in_buf[(ih * p.in_w + iw) * p.in_c + c]); ++n;
+                }
+                uint32_t div = p.count_include_pad ? (k_h * k_w)
+                                                   : (n ? n : 1);
+                int32_t q = (s >= 0)
+                          ?  ( s + int32_t(div) / 2) / int32_t(div)
+                          : -((-s + int32_t(div) / 2) / int32_t(div));
+                if (q > max_v) q = max_v;
+                if (q < min_v) q = min_v;
+                out_buf[(oh * p.out_w + ow) * p.out_c + c] = T(q);
+            }
+        }
+
+        l1mgr.write(p.out_addr, out_buf.data(), out_elems * sizeof(T));
+    }
+
     void run() {
         while (true) {
             DescriptorBody body = cfg_in.read();
             const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
             const PoolBody& p = body.pool;
 
-            const uint32_t s_h = pool_decode_stride(p.stride & 0x3);
-            const uint32_t s_w = pool_decode_stride((p.stride >> 2) & 0x3);
-            const uint32_t pT  = p.pad_tb & 7;
-            const uint32_t pL  = p.pad_lr & 7;
             const uint32_t k_h = (p.k_h == 255) ? uint32_t(p.in_h) : uint32_t(p.k_h);
             const uint32_t k_w = (p.k_w == 255) ? uint32_t(p.in_w) : uint32_t(p.k_w);
             const char*    mode = (p.mode == PM_MAX) ? "max"
                                 : (p.mode == PM_AVG) ? "avg" : "global";
             const bool fp = is_fp_dtype(last_dtype);
+            const bool int16 = (last_dtype == DT_INT16x4
+                             || last_dtype == DT_INT16x8
+                             || last_dtype == DT_INT16x16);
+            const uint64_t lanes = pool_lanes_for_dtype(last_dtype);
 
             std::cout << "[POOL] mode=" << mode
                       << "  dtype=" << (fp ? "fp" : "int")
@@ -374,7 +452,7 @@ SC_MODULE(PoolEngine) {
                 run_pool_fp(p);
                 // Cycle model: same per-output K_h*K_w lane occupancy as INT.
                 const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
-                const uint64_t per_lane  = (out_elems + 15) / 16;
+                const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
                 wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
                 const sc_core::sc_time t_end = sc_core::sc_time_stamp();
                 busy_time += t_end - t_begin;
@@ -384,51 +462,12 @@ SC_MODULE(PoolEngine) {
                 continue;
             }
 
-            std::vector<int8_t> in_buf (uint64_t(p.in_h)  * p.in_w  * p.in_c);
-            std::vector<int8_t> out_buf(uint64_t(p.out_h) * p.out_w * p.out_c);
-            l1mgr.read(p.in_addr, in_buf.data(), in_buf.size());
-
-            for (uint32_t oh = 0; oh < p.out_h; ++oh)
-            for (uint32_t ow = 0; ow < p.out_w; ++ow)
-            for (uint32_t c  = 0; c  < p.out_c; ++c) {
-                if (p.mode == PM_MAX) {
-                    int32_t best = -128;
-                    for (uint32_t kh = 0; kh < k_h; ++kh)
-                    for (uint32_t kw = 0; kw < k_w; ++kw) {
-                        int ih = int(oh)*int(s_h) + int(kh) - int(pT);
-                        int iw = int(ow)*int(s_w) + int(kw) - int(pL);
-                        if (ih < 0 || ih >= int(p.in_h)) continue;
-                        if (iw < 0 || iw >= int(p.in_w)) continue;
-                        int32_t v = in_buf[(ih * p.in_w + iw) * p.in_c + c];
-                        if (v > best) best = v;
-                    }
-                    out_buf[(oh * p.out_w + ow) * p.out_c + c] = int8_t(best);
-                } else {                            // AVG (or GLOBAL via avg)
-                    int32_t s = 0; uint32_t n = 0;
-                    for (uint32_t kh = 0; kh < k_h; ++kh)
-                    for (uint32_t kw = 0; kw < k_w; ++kw) {
-                        int ih = int(oh)*int(s_h) + int(kh) - int(pT);
-                        int iw = int(ow)*int(s_w) + int(kw) - int(pL);
-                        if (ih < 0 || ih >= int(p.in_h)) continue;
-                        if (iw < 0 || iw >= int(p.in_w)) continue;
-                        s += in_buf[(ih * p.in_w + iw) * p.in_c + c]; ++n;
-                    }
-                    uint32_t div = p.count_include_pad ? (k_h * k_w)
-                                                       : (n ? n : 1);
-                    int32_t q = (s >= 0)
-                              ?  ( s + int32_t(div) / 2) / int32_t(div)
-                              : -((-s + int32_t(div) / 2) / int32_t(div));
-                    if (q >  127) q =  127;
-                    if (q < -128) q = -128;
-                    out_buf[(oh * p.out_w + ow) * p.out_c + c] = int8_t(q);
-                }
-            }
-
-            l1mgr.write(p.out_addr, out_buf.data(), out_buf.size());
+            if (int16) run_pool_int<int16_t>(p);
+            else       run_pool_int<int8_t>(p);
             // v2.2 compute only (memory accounted in L1Mesh).
-            // per-output-element work = K_h × K_w compares pipelined / 16 lanes.
+            // per-output-element work = K_h × K_w compares pipelined / lanes.
             const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
-            const uint64_t per_lane  = (out_elems + 15) / 16;
+            const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
             wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             busy_time += t_end - t_begin;
