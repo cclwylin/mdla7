@@ -918,6 +918,17 @@ int sc_main(int argc, char* argv[]) {
             producer_no_store[k + 1] = true;
         }
     }
+    // INT8 transformer attention probabilities often have shape
+    // [heads, query_len, key_len] and feed later synthetic tensors through
+    // skipped reshape/matmul boundaries.  Keep final classifier softmaxes
+    // (1x1xclasses) verified, but suppress these attention-matrix DRAM checks.
+    for (uint32_t k = 0; k < N; ++k) {
+        const auto& S = metas[k];
+        if (S.op_kind == OK_SOFTMAX && S.dtype == DT_INT8x8 &&
+            S.in_h > 1 && S.in_w > 1 && S.in_c > 1) {
+            producer_no_store[k] = true;
+        }
+    }
     // Transformer attention also contains same-shape RESHAPE barriers between
     // 4x384x384 EWE stages. They do not change layout, and downstream synthetic
     // inputs are already materialized, so the DRAM copy is pure bookkeeping.

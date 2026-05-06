@@ -83,8 +83,10 @@ SC_MODULE(EweEngine) {
             int32_t b = (int32_t(b_buf[i]) - zp_b) << left_shift;
             int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
             int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
-            int32_t s  = sa + sb;
-            int32_t v  = multiply_by_quantized_multiplier(s, mult_o, shift_o) + zp_out;
+            int64_t raw = int64_t(sa) + int64_t(sb);
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v  = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
             if (v < act_min) v = act_min;
             if (v > act_max) v = act_max;
             out_buf[i] = int8_t(v);
@@ -168,8 +170,10 @@ SC_MODULE(EweEngine) {
             int32_t b = (int32_t(b_buf[i]) - zp_b) << left_shift;
             int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
             int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
-            int32_t s  = sa - sb;
-            int32_t v  = multiply_by_quantized_multiplier(s, mult_o, shift_o) + zp_out;
+            int64_t raw = int64_t(sa) - int64_t(sb);
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v  = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
             if (v < act_min) v = act_min;
             if (v > act_max) v = act_max;
             out_buf[i] = int8_t(v);
