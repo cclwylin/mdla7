@@ -15,17 +15,17 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
                             ▼        ▼        ▼        ▼         ▼
                         CONV Eng  Requant   EWE Eng  POOL Eng   TNPS Eng
                             │        │        │        │         │
-                            └──────────────  L1_Manager  ────────┘
-                                          │           │
-                                 L1Mesh 2M SRAM     UDMA
+                         ACT/WGT direct │  └── non-CONV via L1_Manager ──┘
+                                        ▼              │
+                                 L1Mesh 3M SRAM      UDMA
                                                       │
                                                    4G DRAM
 ```
 
 - **Host 控制流**：RISC-V 把 NN graph 編成 descriptor stream（含 dependency tag），送進 Command Engine。
 - **NPU 內控制流**：Command Engine 含 **dependency tracker**，依 tag 狀態 dispatch task 給各 Engine（透過 `W` 1T 介面）。Engine 完成後上報 done tag。
-- **資料流**：DRAM (LPDDR5X-10667) ⇄ UDMA ⇄ L1_Manager ⇄ {L1Mesh SRAM, 5 Engines}。
-- 5 條 compute pipeline 共用一顆 L1_Manager 作為 on-chip 記憶體仲裁中心。
+- **資料流**：DRAM (LPDDR5X-10667) ⇄ UDMA ⇄ L1_Manager ⇄ non-CONV engines / L1Mesh；CONV ACT/WGT read 直接接 L1Mesh。
+- CONV ACT/WGT direct path bypass L1_Manager；L1_Manager 作為 Requant / EWE / POOL / TNPS / UDMA 的 on-chip 記憶體仲裁中心。
 
 ---
 
@@ -40,8 +40,8 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 | Compute | **EWE Engine** | — | Element-Wise（add / mul / activation, ReLU 系），**64 elem/cyc** |
 | Compute | **POOL Engine** | — | Max / Avg pooling `[TBD]` |
 | Compute | **TNPS Engine** | — | Tensor 軸重排 / transpose（permute、dim swap、NHWC↔NCHW、attention Q/K/V 重排）；data-movement only，不做 MAC `[TBD]` |
-| Mem ctrl | **L1_Manager** | 中央仲裁 | 5 Engine + UDMA + L1Mesh SRAM 之間的 traffic arbiter |
-| On-chip mem | **L1Mesh SRAM** | **2 MB @ 1.3 GHz** | 工作 buffer（activation / weight tile） |
+| Mem ctrl | **L1_Manager** | non-CONV 中央仲裁 | Requant / EWE / POOL / TNPS + UDMA + L1Mesh SRAM 之間的 traffic arbiter；CONV ACT/WGT read bypass |
+| On-chip mem | **L1Mesh SRAM** | **3 MB @ 1.3 GHz** | 4x4 banked SRAM NoC 工作 buffer（activation / weight tile） |
 | DMA | **UDMA** | 5 op modes | DRAM ↔ on-chip 搬運；含 LINEAR / STRIDED_2D / INDEXED_GATHER / SCATTER_CONCAT / STRIDED_SLICE（見 §3A.9） |
 | Off-chip | **DRAM (LPDDR5X-10667)** | **4 GB** | host shared / model weight / activation tensor；JEDEC LPDDR5X，10.667 Gbps/pin，dual-channel x32 → 85.3 GB/s peak |
 
@@ -59,20 +59,30 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 → 同一條 link 的「總頻寬 = 條數 × 128 bits/cycle」。下表的數字都是「條數」。
 
-### 3.1 各 Engine ↔ L1_Manager（藍線 = AXI 128b × N）
+### 3.1 各 Engine memory interface（藍線 = AXI 128b × N）
 
-| Engine | AXI_R (ACT) | AXI_R (WGT) | AXI_R | AXI_W | 該 Engine 對 L1_Manager 的 peak BW @ 1.9 GHz |
+| Engine | AXI_R (ACT) | AXI_R (WGT) | AXI_R | AXI_W | Peak BW @ 1.9 GHz |
 |---|---|---|---|---|---|
-| CONV | **32** | **32** | — | — | R: 64 × 16B = **1024 B/cyc** = 1.024 TB/s；**無 AXI_W** |
+| CONV → L1Mesh direct | **32** | **32** | — | — | R: 64 × 16B = **1024 B/cyc** = 1.024 TB/s；**無 AXI_W** |
 | Requant | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | EWE | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | POOL | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | **TNPS** | — | — | **8** | **8** | R: **128 B/cyc**；W: **128 B/cyc**（讀寫對稱：每個 element 一進一出） |
 
-- CONV 對 L1_Manager **只有讀**（32 組 ACT + 32 組 WGT，全部都是 AXI_R）。
+- CONV ACT/WGT read **直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT + 32 組 WGT，全部都是 AXI_R）。
 - CONV 的輸出（INT32 partial sum）**不直接寫回 L1**；推測有專用 chain 路徑串到 Requant Engine（路徑形式 `[TBD]`，見 §6.2）。
 - Requant / EWE / POOL / TNPS：保留 AXI_R + AXI_W，partial sum / output / 重排後 tensor 透過 L1_Manager 仲裁進出 L1Mesh。
 - TNPS 純做 data movement（讀 → 重新 index → 寫），不參與 MAC；R/W 條數設成對稱（8+8）反映 1:1 流量；BW 設成 EWE/POOL 的一半，因為 transpose 多半發生在 attention 相關的 small-tensor reshape，不是 throughput-critical 路徑。
+
+L1_Manager 入口有 arbiter，但 CONV ACT/WGT read 不進 L1_Manager。
+CONV read 以 direct L1Mesh path 取得最高服務優先權，避免 compute cluster starvation。
+L1_Manager 入口 priority 目前定義為：
+
+1. Requant writeback / parameter read。
+2. EWE / POOL / TNPS。
+3. UDMA background load/store。
+
+CONV direct read 與 L1_Manager traffic 最後都受 L1Mesh 後端 banked SRAM service 限制。
 
 ### 3.2 L1_Manager 邊界（藍線）
 
@@ -80,6 +90,86 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 |---|---|---|
 | L1Mesh SRAM | `AXI_R` 雙向各一組 | 16 + 16 @ **1.3 GHz SRAM clock**（peak 等效 core-cycle BW 乘 1.3/1.9） |
 | UDMA | `AXI_R` + `AXI_W` | 16 + 16 |
+
+### 3.2b L1Mesh 3MB 4x4 NoC SRAM organization
+
+L1Mesh 採 4x4 banked SRAM NoC。每個 mesh tile 擁有一個 SRAM bank：
+
+```
+      B0  - B1  - B2  - B3
+      |     |     |     |
+      B4  - B5  - B6  - B7
+      |     |     |     |
+      B8  - B9  - B10 - B11
+      |     |     |     |
+      B12 - B13 - B14 - B15
+```
+
+SRAM macro 與容量：
+
+| Item | Value |
+|---|---:|
+| Macro shape | `768 x 16B` |
+| Macro capacity | `12 KB` |
+| Total capacity | `3 MB` |
+| Total macro count | `256` |
+| Bank count | `16` |
+| Macros per bank | `16` |
+| Bank capacity | `192 KB` |
+| Stripe / beat | `16 B` |
+
+Address mapping：
+
+```
+byte_addr[3:0]  = byte offset inside 16B beat
+bank_id         = (byte_addr >> 4) & 0xF
+bank_line       = byte_addr >> 8
+macro_id        = bank_line / 768      // 0..15 inside selected bank
+row_addr        = bank_line % 768      // 0..767
+```
+
+Ingress paths：
+
+| Ingress | Role | Goes through L1_Manager? |
+|---|---|---|
+| Left edge 4R/4W | CONV ACT_R primary ingress | No, direct to L1Mesh |
+| Top edge 4R/4W | CONV WGT_R primary ingress | No, direct to L1Mesh |
+| Right edge 4R/4W | L1Manager_R ingress for non-CONV / UDMA reads | Yes |
+| Bottom edge 4R/4W | L1Manager_W ingress for non-CONV / UDMA writes | Yes |
+
+The 4x4 mesh exposes 4 R/W edge ports per side:
+
+```
+top edge    : 4R + 4W  -> WGT_R ingress
+right edge  : 4R + 4W  -> L1Manager_R ingress
+bottom edge : 4R + 4W  -> L1Manager_W ingress
+left edge   : 4R + 4W  -> ACT_R ingress
+aggregate   : 16R + 16W edge injection/ejection
+```
+
+These edge ports reduce NoC injection hot spots and give each traffic class a
+clean physical side of the mesh. They do **not** multiply SRAM bank service
+bandwidth by four.
+
+Per-bank service target：
+
+```
+read slot priority:
+  1. CONV ACT_R
+  2. CONV WGT_R
+  3. L1Manager_R
+
+write slot:
+  L1Manager_W
+```
+
+CONV ACT/WGT frontend is intentionally wider than the 16-bank SRAM backend.
+The direct path bypasses L1_Manager arbitration, but it does not bypass bank
+conflicts or per-bank read service limits. With 16 banks and one 16B read beat
+per bank per SRAM cycle, raw L1Mesh read peak remains `256 B/SRAM-cycle`;
+write peak is also `256 B/SRAM-cycle` if read/write are independent.
+The 16R/16W edge ports are therefore NoC ingress/ejection capacity, while the
+per-bank SRAM ports remain the hard backend bandwidth limiter.
 
 ### 3.3 UDMA ↔ DRAM（白線 = 1T 模型假設）
 
@@ -172,7 +262,7 @@ CONV array 是 **bit-decomposable**：固定矽面積、可依 operand 精度重
 
 ### 3A.3 BW vs Compute 平衡（CONV）
 
-CONV 對 L1_Manager 的 R 介面（**只有讀，沒有寫**）：
+CONV 對 L1Mesh 的 direct R 介面（**ACT/WGT read 不經 L1_Manager，沒有 AXI_W**）：
 
 | 來源 | 條數 | bytes/cycle @ 128b | bytes/sec @ 1.9 GHz |
 |---|---|---|---|
@@ -658,8 +748,8 @@ reserved
 
 | Range | 對應 |
 |---|---|
-| `0x0000_0000 .. 0x001F_FFFF` | L1Mesh 2 MB |
-| `0x0020_0000 .. 0x0FFF_FFFF` | reserved（CSR / future） |
+| `0x0000_0000 .. 0x002F_FFFF` | L1Mesh 3 MB |
+| `0x0030_0000 .. 0x0FFF_FFFF` | reserved（CSR / future） |
 | `0x1000_0000 .. 0xFFFF_FFFF` | DRAM 4 GB（high half） |
 
 ### Delivery 機制
@@ -767,7 +857,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 1. **Command Engine** 收到 NN graph layer，發 config 給：
    - UDMA：把這層的 weight / activation tile 從 DRAM 拉到 L1Mesh SRAM。
    - CONV / Requant / EWE / POOL：依 layer 類別啟動。
-2. **CONV Engine** 從 L1_Manager 讀 ACT + WGT，做 MAC，把 partial sum 送到 shared Requant / pack datapath。
+2. **CONV Engine** 直接從 L1Mesh 讀 ACT + WGT，做 MAC，把 partial sum 送到 shared Requant / pack datapath。
 3. **Requant Engine / shared quantize-pack resource** 讀 INT32 partial sum 或 EWE value，做 scale/shift/clamp，512 lanes，寫 INT8 / INT16 / FP 結果回 L1Mesh。
 4. **EWE Engine**：殘差連接 / activation function，可共用 Requant / pack resource 做 output quantize / clamp。
 5. **POOL Engine**：spatial downsample。
@@ -788,7 +878,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 |---|---|---|
 | Host (RISC-V) | `sc_module Host` | v0：descriptor stream 產生器 stub（讀測試 input → 推 descriptor）；v1+：可換成 RISC-V ISS（如 Spike / etiss / RVV-capable model） |
 | Command Engine | `sc_module CommandEngine` | target（對 Host）+ initiator（對 Engine config socket） |
-| CONV / Requant / EWE / POOL | `sc_module XxxEngine` | initiator（對 L1_Manager）+ target（對 Command Engine config） |
+| CONV | `sc_module ConvEngine` | direct L1Mesh AXI_R initiator + target（對 Command Engine config） |
+| Requant / EWE / POOL | `sc_module XxxEngine` | initiator（對 L1_Manager）+ target（對 Command Engine config） |
 | L1_Manager | `sc_module L1Manager` | multi-port target / arbiter |
 | L1Mesh SRAM | `sc_module L1Mesh` | target（plain memory） |
 | UDMA | `sc_module UDMA` | initiator 雙向；內部含 5 個 op-mode handler（v0 只實作 LINEAR + STRIDED_2D；GATHER/CONCAT/SLICE 留 v1） |
@@ -798,9 +889,10 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 - **Host → Command Engine（白線, 1T descriptor）**：v0 用 `sc_fifo<descriptor_t>`，host 把 descriptor `write()` 進去，CmdEngine 用 `read()` 取出。v1 改成 `simple_initiator_socket`（AXI-Lite stub）後可掛 RISC-V ISS。
 - **Command Engine → Engine config（白線, 1T payload）**：用 `sc_signal<descriptor_t>` 或自定 `sc_fifo<>`(depth=1)，1 cycle latch 即可，**不需要 TLM socket**。
-- **Engine ↔ L1_Manager（藍線, AXI 128b × N）**：`tlm_utils::simple_initiator_socket` / `simple_target_socket`，AXI-like payload；N 條並列在 v0 可先合併成「N×16B / cycle」單條 socket，等 contention 模型上線再展開。
+- **CONV ↔ L1Mesh direct（藍線, AXI 128b × N）**：ACT/WGT read 不經 L1_Manager。
+- **Non-CONV Engine ↔ L1_Manager（藍線, AXI 128b × N）**：`tlm_utils::simple_initiator_socket` / `simple_target_socket`，AXI-like payload；N 條並列在 v0 可先合併成「N×16B / cycle」單條 socket，等 contention 模型上線再展開。
 - **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 16> chain;` 連 CONV partial sums，每 lane depth=2；timing 上 Requant 是 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
-- **L1_Manager 內部 arbiter**：用 `sc_event_queue` 或 round-robin 排程 `[TBD]`。
+- **L1_Manager 內部 arbiter**：Non-CONV Engine / UDMA → L1_Manager 入口 arbitration；CONV ACT/WGT read 是 direct L1Mesh path，不進此 arbiter。其他 engine / UDMA 依固定 priority 或 aging policy 排程 `[TBD]`。
 - **DRAM latency**：用 `wait()` 模 fixed latency，第一版不模 DDR controller。
 
 ### 5.3 Cycle accuracy
@@ -816,8 +908,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
   - 1.9 GHz 換算：wall time = cycle 數 / 1.9 GHz ≈ cycle 數 × 0.526 ns
   - **SystemC 介面**：CONV Engine config descriptor 必須帶 `dtype` + `output_channel_group_id` (per cluster) 欄位，模型查表決定 cycle 數
 - **v2**：L1_Manager arbitration + bandwidth contention
-  - 80 條 R + 8 條 W 對 L1Mesh 的 16 條 R 收斂時的 stall 模型
-  - 4 個 Engine 同時想存取 L1Mesh 的衝突
+  - CONV ACT/WGT direct L1Mesh read 與 L1_Manager traffic 的後端 SRAM service contention
+  - Non-CONV Engine / UDMA 同時想存取 L1Mesh 時，對 16R/16W 後端 service 的收斂 stall 模型
 - **v3**：DRAM controller（page hit/miss、refresh）`[TBD]`，視 UDMA 是否成 bottleneck 再決定要不要做。
 
 ---
@@ -834,7 +926,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 ### 6.2 CONV Engine
 - [x] ~~PE array 形狀~~ → **65,536 base 4×4 cell，組成 16 cluster**（見 §3A.4）
-- [x] ~~CONV ↔ L1_Manager 介面~~ → **只有 32 AXI_R (ACT) + 32 AXI_R (WGT)，無 AXI_W**
+- [x] ~~CONV ↔ L1_Manager 介面~~ → **CONV ACT/WGT AXI_R 直接接 L1Mesh，不經 L1_Manager；32 AXI_R (ACT) + 32 AXI_R (WGT)，無 AXI_W**
 - [x] ~~支援的 datatype~~ → **Hybrid INT + Hybrid FP**（見 §3A.2）
 - [x] ~~CONV → Requant 的 chain 路徑~~ → **16 條 INT32 per-cluster lane，1T 同步**（見 §3A.5）
 - [x] ~~"ring" 拓樸 / 4 ring 工作切分軸~~ → **改成 16 cluster + reduce tree，無 ring**；output channel 切分跨 cluster（每 cluster 對應 16 個 output channel group）
@@ -857,7 +949,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~POOL 模式~~ → **max / avg / global**；avg 帶 `count_include_pad` flag；無 dilation；見 §3A.7
 
 ### 6.4 Memory
-- [ ] L1Mesh 2M SRAM 的 bank 切法、port 數
+- [x] ~~L1Mesh SRAM 的 bank 切法、port 數~~ → **3MB, 4x4 NoC, 16 banks, 256 x 768x16B macros, 4R/4W edge ports per side, CONV ACT/WGT direct ingress**
 - [x] ~~DRAM 規格~~ → **LPDDR5X-10667**（JEDEC LPDDR5X，10.667 Gbps/pin）
 - [x] ~~channel 數 / bus width~~ → **dual-channel x32**，peak BW **85.3 GB/s**（@ 1.9 GHz core ≈ 44.9 B/cyc → 模型用 48 B/cyc）
 - [ ] L1_Manager 的 arbitration policy
@@ -865,7 +957,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 ### 6.5 Command / Programming model
 - [x] ~~Command 格式~~ → **64 byte fixed descriptor，16+48 layout**（見 §3A.10）
 - [x] ~~host ↔ Command Engine 介面~~ → **DRAM ring buffer + MMIO doorbell**（見 §3A.10）
-- [x] ~~Memory map~~ → **Unified 32-bit addr space**：L1Mesh 0x0000_0000–0x001F_FFFF；DRAM 0x1000_0000–0xFFFF_FFFF（見 §3A.10）
+- [x] ~~Memory map~~ → **Unified 32-bit addr space**：L1Mesh 0x0000_0000–0x002F_FFFF；DRAM 0x1000_0000–0xFFFF_FFFF（見 §3A.10）
 - [ ] CSR 4 KB AXI-Lite slave 的詳細 register map（tail_ptr / head_ptr / status / IRQ_clear 各 register offset）
 - [ ] Ring buffer head/tail wrap-around / overflow policy
 
@@ -893,7 +985,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 | 控制 | Command Engine | Scalar Core / VLIW | TPU 用 VLIW，MDLA7 似為 descriptor |
 | 主算 | CONV Engine | MXU (128×128 systolic) | MDLA7 PE 規模 `[TBD]` |
 | 後處理 | Requant + EWE + POOL | Vector Unit (VPU) | TPU 把這些合在 VPU，MDLA7 拆成 3 個 |
-| L1 | 2 MB L1Mesh | VMEM / CMEM | 容量同等級 |
+| L1 | 3 MB L1Mesh | VMEM / CMEM | 4x4 NoC banked scratchpad |
 | DMA | UDMA | HBM controller | MDLA7 用 DRAM 而非 HBM |
 
 ---

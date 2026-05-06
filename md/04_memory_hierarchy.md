@@ -24,14 +24,16 @@ Compute Engines
         v
 L1Manager
         |
-        +--> L1Mesh SRAM  0x00000000 - 0x001FFFFF
+        +--> L1Mesh SRAM  0x00000000 - 0x002FFFFF
         |
         +--> DRAM         0x10000000 - 0xFFFFFFFF
 
 UDMA 也透過 L1Manager 搬資料
 ```
 
-所有 engine 都不直接碰 `L1Mesh` 或 `Dram`，而是透過 [`L1Manager`](../systemc/include/mdla7/memory.h)。這讓 simulator 的 memory latency 入口集中：
+CONV ACT/WGT read 是 direct L1Mesh path；其他 engine / UDMA 透過
+[`L1Manager`](../systemc/include/mdla7/memory.h)。這讓大部分 memory latency
+入口集中，同時保留 CONV read 的最高服務優先權：
 
 ```cpp
 l1mgr.read(addr, dst, n);
@@ -82,7 +84,7 @@ constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;
 
 | Range | 大小 / 意義 |
 |---|---|
-| `0x00000000` 到 `0x001FFFFF` | L1Mesh，2 MB on-chip SRAM |
+| `0x00000000` 到 `0x002FFFFF` | L1Mesh，3 MB on-chip SRAM |
 | `0x10000000` 到 `0xFFFFFFFF` | DRAM address space |
 | 其他 range | illegal，`L1Manager` 會報錯 |
 
@@ -103,9 +105,23 @@ inline bool addr_in_dram(uint32_t a) { return a >= DRAM_BASE; }
 
 ---
 
-## 4.4 L1Manager：thin router，不是完整 arbiter
+## 4.4 L1Manager：Non-CONV 入口 arbiter + memory router
 
-`L1Manager` 目前是一個 thin pass-through router：
+硬體 spec 上，CONV ACT/WGT AXI_R **直接接 L1Mesh，不經過 L1Manager**。
+這條 direct path 讓 CONV read 取得最高服務優先權，避免 CONV compute
+cluster starvation。
+
+`L1Manager` 是 non-CONV engine / UDMA 進入 L1Mesh 的仲裁點。
+
+L1Manager 入口 priority 目前定義為：
+
+| Priority | Traffic |
+|---:|---|
+| 1 | Requant writeback / parameter read |
+| 2 | EWE / POOL / TNPS |
+| 3 | UDMA background load/store |
+
+目前 SystemC 實作仍是簡化的一階模型，`L1Manager` code path 接近 pass-through router：
 
 ```cpp
 void read(uint32_t addr, void* dst, uint32_t n) {
@@ -122,35 +138,57 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 | address decode | implemented |
 | route to L1Mesh / DRAM | implemented |
 | out-of-range error | implemented |
-| multi-master arbitration | simplified |
-| QoS / priority | not modelled |
+| Non-CONV entrance arbitration | spec defined; simulator simplified |
+| QoS / priority | CONV ACT/WGT read bypasses L1Manager via direct L1Mesh path |
 | cache coherency | not relevant，這裡是 scratchpad |
 
-換句話說，它不是一個完整硬體 interconnect model。真正的 latency 主要在 L1Mesh / DRAM 裡 imposing wait。
+換句話說，HW spec 有 CONV direct path + L1Manager non-CONV arbitration；
+目前 simulator 還不是完整 port-accurate interconnect model。真正的 latency
+主要在 L1Mesh / DRAM 裡 imposing wait。
 
 這個設計對 simulator 有好處：
 
-- engine code 不需要知道某個 address 在 L1 還是 DRAM。
+- non-CONV engine code 不需要知道某個 address 在 L1 還是 DRAM。
 - UDMA mode 可以用同一套 `read()` / `write()`。
-- future 如果要加 arbitration，可以集中在 `L1Manager`。
+- future 如果要加完整 priority contention，可以集中在 `L1Manager`。
 
 ---
 
 ## 4.5 L1Mesh 的基本 spec
 
-L1Mesh 是 2 MB SRAM scratchpad。
+L1Mesh 是 3 MB SRAM scratchpad，採 4x4 banked NoC。CONV ACT/WGT read
+直接接 L1Mesh，不經過 L1Manager；L1Manager 負責 non-CONV engine / UDMA
+traffic。
 
 目前 model：
 
 | 參數 | 值 |
 |---|---:|
-| 容量 | 2 MB |
+| 容量 | 3 MB |
 | bank 數 | 16 |
+| NoC topology | 4x4 mesh |
+| SRAM macro | 768 x 16B = 12 KB |
+| macro 總數 | 256 |
+| 每 bank macro | 16 |
+| 每 bank 容量 | 192 KB |
 | stripe | 16 bytes |
 | per-bank bandwidth | 16 B/cycle |
 | sequential peak | 16 banks × 16 B/cycle = 256 B/cycle |
 | SRAM clock | 1.3 GHz |
 | core clock axis | 1.9 GHz |
+
+NoC edge ports：
+
+| Edge | Ports | Primary traffic |
+|---|---:|---|
+| left | 4R + 4W | CONV ACT_R direct ingress |
+| top | 4R + 4W | CONV WGT_R direct ingress |
+| right | 4R + 4W | L1Manager_R |
+| bottom | 4R + 4W | L1Manager_W |
+
+四邊合計是 16R + 16W edge injection/ejection。這是在降低 NoC 邊界 hot spot，
+不是把 SRAM backend bandwidth 乘四；真正的 per-bank service 仍是每 bank
+每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
 
 source 裡的 constants：
 
@@ -180,6 +218,26 @@ address 0x0100 - 0x010F -> bank 0
 ```
 
 連續大塊資料可以分散到 16 banks，理想 peak 就是 256 B/cycle。
+
+Bank 內 macro mapping：
+
+```text
+byte_addr[3:0] = byte offset inside 16B beat
+bank_id        = (byte_addr >> 4) & 0xF
+bank_line      = byte_addr >> 8
+macro_id       = bank_line / 768
+row_addr       = bank_line % 768
+```
+
+每個 bank 的 read priority：
+
+```text
+1. CONV ACT_R
+2. CONV WGT_R
+3. L1Manager_R
+```
+
+write slot 由 `L1Manager_W` 使用。
 
 ---
 
@@ -849,7 +907,7 @@ memory hierarchy 的效能不是單看 L1 / DRAM bandwidth，還要看 Command E
 
 ## 4.23 L1 capacity 與 tiling
 
-L1Mesh 只有 2 MB。大模型 layer 不可能把所有 input、weight、output 都同時放進 L1。
+L1Mesh 只有 3 MB。大模型 layer 不可能把所有 input、weight、output 都同時放進 L1。
 
 所以 compiler / scheduler 需要 tiling：
 
@@ -1211,7 +1269,7 @@ tiling 決定 L1 是否裝得下與能否 overlap
 
 你要特別記住：
 
-1. L1Mesh 是 2 MB、16 banks、16-byte stripe，sequential peak 約 256 B/cycle。
+1. L1Mesh 是 3 MB、4x4 NoC、16 banks、16-byte stripe，sequential peak 約 256 B/cycle。
 2. DRAM 是 48 B/cycle，含 row miss 與 refresh，通常是大模型瓶頸之一。
 3. UDMA 的功能正確仰賴 address、length、stride、wait tag 全部正確。
 4. Scratchpad 不會自動保護資料，compiler / scheduler 必須管理 lifetime。

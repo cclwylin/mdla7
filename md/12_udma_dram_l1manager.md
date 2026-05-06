@@ -5,7 +5,8 @@
 本章你會學到什麼：
 
 - 第 4 章 memory spec 如何落到 SystemC module design。
-- `L1Manager` 為什麼是所有 engine memory access 的入口。
+- CONV ACT/WGT read 為什麼 direct 接 L1Mesh。
+- `L1Manager` 為什麼是 non-CONV engine / UDMA memory access 的入口。
 - UDMA descriptor 如何變成 memory copy / transform。
 - DRAM / L1 timing 在 module 裡如何 impose。
 - profile 裡的 UDMA read/write lane 從哪裡來。
@@ -34,7 +35,21 @@ l1mgr.write(addr, src, bytes);
 
 ## 12.2 L1Manager design
 
-`L1Manager` 是 thin router：
+硬體 spec 上，CONV ACT/WGT AXI_R 直接接 L1Mesh，不經過 L1Manager。
+這條 direct path 讓 CONV read 取得最高服務優先權，目標是讓 CONV cluster
+不被 EWE / POOL / UDMA background traffic 餓住。
+
+`L1Manager` 是 non-CONV engine / UDMA 到 L1Mesh 的入口 arbiter。
+
+L1Manager 入口 priority 目前定義為：
+
+| Priority | Traffic |
+|---:|---|
+| 1 | Requant writeback / parameter read |
+| 2 | EWE / POOL / TNPS |
+| 3 | UDMA background load/store |
+
+目前 SystemC implementation 還是簡化 router：
 
 ```cpp
 if addr_in_l1mesh(addr):
@@ -45,20 +60,46 @@ else:
     SC_REPORT_ERROR
 ```
 
-目前沒有完整 arbitration。這是刻意簡化，因為現階段重點是：
+也就是說，HW spec 已定義 CONV direct read path 與 L1Manager
+non-CONV 入口 priority；SystemC 尚未做完整 port-accurate arbitration。
+這是刻意簡化，因為現階段重點是：
 
 - functional correctness
 - first-order bandwidth / latency
 - descriptor scheduling
 - tiling effects
 
-未來可在 L1Manager 擴充 master arbitration。
+未來可在 L1Manager / L1Mesh service model 擴充 CONV direct path 與
+non-CONV traffic 的 contention。
 
 ---
 
 ## 12.3 L1Mesh storage
 
-L1Mesh 用：
+L1Mesh 是 3 MB 4x4 banked SRAM NoC：
+
+| Item | Value |
+|---|---:|
+| banks | 16 |
+| macro | 768 x 16B = 12 KB |
+| macros per bank | 16 |
+| bank capacity | 192 KB |
+| total macros | 256 |
+| total capacity | 3 MB |
+
+NoC edge ports 採四邊分流：
+
+| Edge | Ports | Primary traffic |
+|---|---:|---|
+| left | 4R + 4W | CONV ACT_R direct ingress |
+| top | 4R + 4W | CONV WGT_R direct ingress |
+| right | 4R + 4W | L1Manager_R |
+| bottom | 4R + 4W | L1Manager_W |
+
+這些 edge ports 是 NoC injection/ejection capacity；每個 bank 的 SRAM
+backend service 仍是每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
+
+目前 SystemC functional storage 仍用：
 
 ```cpp
 std::vector<uint8_t> mem;
@@ -94,6 +135,16 @@ write_bank_finish_[16]
 這代表 read/read 和 write/write 同 bank 會 serialize，不同 bank 可 overlap。
 
 注意目前 read/write 分開，對同 bank simultaneous read/write 較樂觀。這是 model simplification。
+
+硬體 spec 的 per-bank read priority 是：
+
+```text
+1. CONV ACT_R
+2. CONV WGT_R
+3. L1Manager_R
+```
+
+write slot 由 L1Manager_W 使用。
 
 ---
 

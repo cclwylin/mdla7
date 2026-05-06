@@ -921,7 +921,7 @@ Host
 | POOL Engine | max / average pooling |
 | TNPS Engine | tensor transpose / reshape 類 data movement，spec 有規劃，simulator 目前重點仍在其他 engines |
 | L1Manager | on-chip memory arbitration |
-| L1Mesh | 2 MB SRAM 工作區 |
+| L1Mesh | 3 MB 4x4 NoC SRAM 工作區 |
 | UDMA | DRAM 和 L1 之間的 DMA |
 | DRAM | LPDDR5X-style off-chip memory model |
 
@@ -1172,9 +1172,9 @@ MDLA7 有兩層記憶體：
 | 層 | 容量 / 性質 | 用途 |
 |---|---|---|
 | DRAM | spec 是 4 GB LPDDR5X；simulator 依模型動態配置 | 放 model weights、inputs、outputs、intermediate tensors |
-| L1Mesh SRAM | 2 MB on-chip SRAM | 放目前 tile 的 input、weight、output、params |
+| L1Mesh SRAM | 3 MB 4x4 NoC on-chip SRAM | 放目前 tile 的 input、weight、output、params |
 
-2 MB L1 聽起來不少，但對大模型很快就不夠。例如：
+3 MB L1 聽起來不少，但對大模型很快就不夠。例如：
 
 ```text
 1024 x 1024 x 16 x 2 bytes = 32 MB
@@ -1190,7 +1190,7 @@ MDLA7 有兩層記憶體：
 | OC tiling | 切 output channels，降低 weight slice / output tile |
 | microblock | 在 EWE / streaming path 中切更小 block，增加 overlap |
 
-這也是為什麼 `test_model.cpp` 很多 code 都在算 L1 address、tile size、是否 fit 2 MB。
+這也是為什麼 `test_model.cpp` 很多 code 都在算 L1 address、tile size、是否 fit 3 MB。
 
 ---
 
@@ -1274,7 +1274,7 @@ MAC_count * lhs_bits * rhs_bits = constant bit-mult per cycle
 | Descriptor 64 bytes | implemented |
 | Command Engine wait / signal tag | implemented |
 | CONV -> Requant 16-lane chain | implemented conceptually |
-| L1 2 MB budget | implemented |
+| L1 3 MB budget | implemented |
 | DRAM dynamic sizing | implemented in simulator，spec 上仍是 4 GB |
 | TNPS Engine | spec has block，simulator 重點仍不在完整 TNPS |
 | real RISC-V host | currently host stub |
@@ -1375,7 +1375,7 @@ sim time: 4,394,946 cycles @ 1.9 GHz
 | Command Engine 做 compute | Command Engine 只 dispatch，不做 tensor math |
 | CONV output 直接寫 L1 | CONV 先推 chain，Requant 才寫 L1 |
 | UDMA 是 compute engine | UDMA 是 data movement engine |
-| 2 MB L1 可以放大 tensor | 大圖像 activation 常常數十 MB，一定要 tile |
+| 3 MB L1 可以放大 tensor | 大圖像 activation 常常數十 MB，一定要 tile |
 | TOPS 決定模型速度 | 真正速度常被 memory / scheduling 限制 |
 | Spec 的每個 block 都完整實作 | 有些是 proposal / TBD，有些是 simulator approximation |
 
@@ -2147,7 +2147,7 @@ UDMA descriptor 最常見的 debug 問題是 address space：
 
 | address range | 意義 |
 |---|---|
-| `0x00000000` 到 `0x001FFFFF` | L1Mesh 2 MB |
+| `0x00000000` 到 `0x002FFFFF` | L1Mesh 3 MB |
 | `0x10000000` 以上 | DRAM |
 
 如果 direction 是 DRAM 到 L1，通常期待：
@@ -2491,7 +2491,7 @@ Compute Engines
         v
 L1Manager
         |
-        +--> L1Mesh SRAM  0x00000000 - 0x001FFFFF
+        +--> L1Mesh SRAM  0x00000000 - 0x002FFFFF
         |
         +--> DRAM         0x10000000 - 0xFFFFFFFF
 
@@ -2549,7 +2549,7 @@ constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;
 
 | Range | 大小 / 意義 |
 |---|---|
-| `0x00000000` 到 `0x001FFFFF` | L1Mesh，2 MB on-chip SRAM |
+| `0x00000000` 到 `0x002FFFFF` | L1Mesh，3 MB on-chip SRAM |
 | `0x10000000` 到 `0xFFFFFFFF` | DRAM address space |
 | 其他 range | illegal，`L1Manager` 會報錯 |
 
@@ -2605,19 +2605,39 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 
 ## 4.5 L1Mesh 的基本 spec
 
-L1Mesh 是 2 MB SRAM scratchpad。
+L1Mesh 是 3 MB SRAM scratchpad，採 4x4 banked NoC。CONV ACT/WGT read
+直接接 L1Mesh，不經過 L1Manager；L1Manager 負責 non-CONV engine / UDMA
+traffic。
 
 目前 model：
 
 | 參數 | 值 |
 |---|---:|
-| 容量 | 2 MB |
+| 容量 | 3 MB |
 | bank 數 | 16 |
+| NoC topology | 4x4 mesh |
+| SRAM macro | 768 x 16B = 12 KB |
+| macro 總數 | 256 |
+| 每 bank macro | 16 |
+| 每 bank 容量 | 192 KB |
 | stripe | 16 bytes |
 | per-bank bandwidth | 16 B/cycle |
 | sequential peak | 16 banks × 16 B/cycle = 256 B/cycle |
 | SRAM clock | 1.3 GHz |
 | core clock axis | 1.9 GHz |
+
+NoC edge ports：
+
+| Edge | Ports | Primary traffic |
+|---|---:|---|
+| left | 4R + 4W | CONV ACT_R direct ingress |
+| top | 4R + 4W | CONV WGT_R direct ingress |
+| right | 4R + 4W | L1Manager_R |
+| bottom | 4R + 4W | L1Manager_W |
+
+四邊合計是 16R + 16W edge injection/ejection。這是在降低 NoC 邊界 hot spot，
+不是把 SRAM backend bandwidth 乘四；真正的 per-bank service 仍是每 bank
+每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
 
 source 裡的 constants：
 
@@ -2647,6 +2667,26 @@ address 0x0100 - 0x010F -> bank 0
 ```
 
 連續大塊資料可以分散到 16 banks，理想 peak 就是 256 B/cycle。
+
+Bank 內 macro mapping：
+
+```text
+byte_addr[3:0] = byte offset inside 16B beat
+bank_id        = (byte_addr >> 4) & 0xF
+bank_line      = byte_addr >> 8
+macro_id       = bank_line / 768
+row_addr       = bank_line % 768
+```
+
+每個 bank 的 read priority：
+
+```text
+1. CONV ACT_R
+2. CONV WGT_R
+3. L1Manager_R
+```
+
+write slot 由 `L1Manager_W` 使用。
 
 ---
 
@@ -3316,7 +3356,7 @@ memory hierarchy 的效能不是單看 L1 / DRAM bandwidth，還要看 Command E
 
 ## 4.23 L1 capacity 與 tiling
 
-L1Mesh 只有 2 MB。大模型 layer 不可能把所有 input、weight、output 都同時放進 L1。
+L1Mesh 只有 3 MB。大模型 layer 不可能把所有 input、weight、output 都同時放進 L1。
 
 所以 compiler / scheduler 需要 tiling：
 
@@ -3678,7 +3718,7 @@ tiling 決定 L1 是否裝得下與能否 overlap
 
 你要特別記住：
 
-1. L1Mesh 是 2 MB、16 banks、16-byte stripe，sequential peak 約 256 B/cycle。
+1. L1Mesh 是 3 MB、4x4 NoC、16 banks、16-byte stripe，sequential peak 約 256 B/cycle。
 2. DRAM 是 48 B/cycle，含 row miss 與 refresh，通常是大模型瓶頸之一。
 3. UDMA 的功能正確仰賴 address、length、stride、wait tag 全部正確。
 4. Scratchpad 不會自動保護資料，compiler / scheduler 必須管理 lifetime。
@@ -7841,7 +7881,7 @@ Debug 時先判斷 op 是 compute 還是 layout，再追 input producer、params
 
 本章你會學到什麼：
 
-- 為什麼 2 MB L1 需要 tiling。
+- 為什麼 3 MB L1 需要 tiling。
 - OH tiling、OC tiling、ping-pong allocation 的基本策略。
 - L1-resident handoff 如何減少 DRAM traffic。
 - pending store 是什麼，為什麼不能亂 drop。
@@ -7852,7 +7892,7 @@ Debug 時先判斷 op 是 compute 還是 layout，再追 input producer、params
 
 ## 14.1 為什麼需要 tiling
 
-L1Mesh 只有 2 MB。一個 layer 可能需要：
+L1Mesh 只有 3 MB。一個 layer 可能需要：
 
 ```text
 input tile
@@ -8028,7 +8068,7 @@ reset on chain break
 目的：
 
 ```text
-讓 live input 和 new output 避開，降低 2 MB L1 壓力。
+讓 live input 和 new output 避開，降低 3 MB L1 壓力。
 ```
 
 ---
@@ -9985,7 +10025,7 @@ Tile fuse 是 layer-level。Microblock fuse 是更細的 tile / block-level over
 ADD / MUL / SUB
 ```
 
-一顆大 tensor 如果放不進 2 MB L1，就要切 microblock：
+一顆大 tensor 如果放不進 3 MB L1，就要切 microblock：
 
 ```text
 load A tile 0
@@ -10449,4 +10489,3 @@ ACT compression 省 DRAM activation read bandwidth。
 
 
 \newpage
-
