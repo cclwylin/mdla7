@@ -128,9 +128,9 @@ batch/output/<stem>.mesh.html
 
 ## Hotspot Slices
 
-Hotspot `.tflite` slices are under `model/Hotspot/` (ignored by git through the
-top-level `model/` rule). Current slices include transformer-like repeated
-blocks such as:
+Hotspot `.tflite` slices are under `model/Hotspot/` and are intentionally
+tracked in git as small regression/debug micro-patterns. The rest of `model/*`
+stays ignored. Current slices include transformer-like repeated blocks such as:
 
 ```text
 vit_b16_quant_L94_L119.tflite

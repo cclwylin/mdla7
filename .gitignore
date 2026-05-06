@@ -3,7 +3,10 @@
 ._*
 
 # Test models — too large for git; download separately per setup.sh / handoff.md
-model/
+# Keep Hotspot slices because they are small regression/debug micro-patterns.
+model/*
+!model/Hotspot/
+!model/Hotspot/*.tflite
 
 # Compile artefacts
 systemc/build/
