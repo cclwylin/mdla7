@@ -405,3 +405,122 @@ make test                         # 6×6×4 → 6×6×8 hand-rolled conv test
 3. For multi-dtype: priority on INT8×4 (2× throughput claim in spec) vs FP16/BFP16 (transformer support)?
 4. How "real" does the host need to be? Stub is fine for current testing; RISC-V ISS is significant scope.
 5. Is the asymmetric uint8 legacy path (item §6.1) worth the engineering, or should we declare "modern int8 only" and let legacy uint8 models fall through? (The 61-model collection has only a handful of legacy uint8 models; mobilenet_v1 stem is one of them.)
+
+---
+
+## 11. Current MDLA7 scheduler work — 2026-05-05
+
+Latest working tree is focused on **Tile Command + Microblock Wavefront Scheduler** for MDLA7 profiling/performance.
+
+Changed files:
+
+- `systemc/include/mdla7/descriptor.h`
+- `systemc/include/mdla7/command_engine.h`
+- `systemc/src/test_model.cpp`
+
+### Descriptor / command-engine metadata
+
+- `DescriptorHeader` now carries stream metadata:
+  - `microblock_id`
+  - `stream_slot`
+  - `stream_meta_flags`
+- Added stream flags:
+  - `DF_STREAM`
+  - `DF_STREAM_TAIL`
+  - `SMF_LOAD_A`
+  - `SMF_LOAD_B`
+  - `SMF_COMPUTE`
+  - `SMF_STORE`
+  - `SMF_FINAL_TILE`
+- `CommandEngine` priority selection was fixed for large stream priorities:
+  - old `best_prio = 999` could deadlock once priorities became `base * 4096 + microblock_id`
+  - now uses `std::numeric_limits<int>::max()`
+- Stream issue priority is now operation-aware:
+  - EWE first
+  - UDMA read after EWE
+  - CONV / REQUANT / POOL compute after reads
+  - UDMA write later
+- Tail-wait logic now allows compute ops with `SMF_COMPUTE`, not hardcoded layer ids.
+
+### Microblock wavefront paths
+
+`test_model.cpp` now has microblock helpers:
+
+- `TileCommand`
+- `Microblock`
+- `mark_stream()`
+- `MicroblockWavefrontResult`
+
+The tiled binary EWE path now emits UDMA/EWE/store descriptors with microblock metadata.
+
+The fused `CONV -> D2S -> ADD` path also uses the same metadata, so D2S/ADD compute descriptors, loads, and stores are visible to the scheduler as stream work.
+
+### YOLO L34 fix
+
+User issue: YOLO L34 could not overlap `DRAM_R` and `EWE`.
+
+Root cause:
+
+- L34 was a fused single-tile binary EWE layer.
+- The old single-tile fused EWE path emitted one large UDMA read followed by one large EWE.
+- Because it was not split into microblocks, there was no chance for `UDMA_R(tile+1)` to overlap `EWE(tile)`.
+
+Fix:
+
+- Added a block-wavefront path for fused single-tile binary EWE layers when:
+  - fused from previous layer
+  - input has more than one row
+  - input size is at least 64 KB
+  - per-row size is known
+- Splits the layer by rows into roughly 64 KB microblocks.
+- Keeps input-A in the previous layer's contiguous L1 output.
+- Uses two ping-pong input-B buffers inside the existing L1 weight allocation.
+- Loads EWE params once.
+- For each microblock:
+  - UDMA reads B block into ping-pong slot
+  - EWE consumes previous L1 A block + current B slot
+  - EWE writes contiguous output to `L1_OUT + offset`
+  - slot reuse waits on the prior EWE tag for that slot
+- Output remains contiguous in L1, so downstream layer fusion remains valid.
+
+For `yolo_v8_quant` L34 specifically:
+
+- L34 is now shown as `tiles=7x1`
+- Layer cycles dropped from about 25k cycles to about 15k cycles
+- Overall model improved from about `2.424 ms` to `2.313 ms`
+
+Verification run:
+
+```bash
+cd systemc
+python3 run_model.py yolo_v8_quant
+```
+
+Result:
+
+```text
+148/148 layers PASS, 0 FAIL
+sim time: 4394946 cycles @ 1.9 GHz (= 2.313 ms)
+DRAM total r/w: 89.52 / 17.25 MB
+SRAM total r/w: 133.30 / 141.77 MB
+```
+
+Also verified after D2S/ADD scheduler changes:
+
+```bash
+cd systemc
+python3 run_model.py vsr_quant
+```
+
+Result:
+
+```text
+9/9 PASS
+sim time: 3018628 cycles @ 1.9 GHz (= 1.589 ms)
+```
+
+### Current caveats / next things to check
+
+- Current block-wavefront path applies to fused binary EWE layers >= 64 KB, not only YOLO L34. This also affects other YOLO EWE layers such as L19/L21/L22/L24 when they match the criteria.
+- Need run broader `run_mdla6_pattern.py` regression before committing if the next step is a git commit.
+- The changed files are not yet committed at the time of this handoff.

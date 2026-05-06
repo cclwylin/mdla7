@@ -10,6 +10,8 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <array>
+#include <algorithm>
 #include <cstring>
 #include "mdla7/system.h"
 #include "mdla7/fp_utils.h"
@@ -348,7 +350,8 @@ int sc_main(int argc, char* argv[]) {
     auto make_store_barrier = [&](uint32_t src_addr, uint32_t dst_addr,
                                   uint8_t signal_tag, uint8_t wait_tag) -> Descriptor {
         Descriptor d = make_udma(src_addr, dst_addr, 1, /*dir*/ 1, signal_tag, wait_tag);
-        d.hdr.flags |= 0x10 | 0x20;  // stream tail: allow safe later prefetches to bypass.
+        d.hdr.flags |= DF_STREAM | DF_STREAM_TAIL;  // stream tail: allow safe later prefetches to bypass.
+        d.hdr.stream_meta_flags = SMF_STORE | SMF_FINAL_TILE;
         return d;
     };
     auto ranges_overlap = [](uint32_t a, uint32_t asz, uint32_t b, uint32_t bsz) -> bool {
@@ -365,6 +368,138 @@ int sc_main(int argc, char* argv[]) {
 
     std::vector<Descriptor> program;
     program.reserve(8 * N);
+
+    struct TileCommand {
+        enum Kind : uint8_t {
+            BINARY_EWE = 0,
+            CONV_D2S_EWE = 1,
+        };
+        Kind kind = BINARY_EWE;
+        uint32_t layer_idx = 0;
+        uint32_t layer_end = 0;
+        LayerMeta layer{};
+        uint32_t params_l1 = 0;
+        uint32_t tile_elems = 0;
+        uint32_t tile_rows = 0;
+        uint32_t elem_size = 1;
+        bool h_tiled = false;
+        bool suppress_store = false;
+        std::array<uint32_t, 2> in_a_l1{};
+        std::array<uint32_t, 2> in_b_l1{};
+        std::array<uint32_t, 2> out_l1{};
+    };
+
+    struct Microblock {
+        uint16_t id = 0;
+        uint8_t slot = 0;
+        uint64_t elem_off = 0;
+        uint32_t rows = 0;
+        uint32_t elems = 0;
+        uint32_t bytes = 0;
+    };
+
+    auto mark_stream = [](Descriptor& d, uint32_t layer_idx,
+                          const Microblock& mb, uint8_t meta_flags) {
+        d.hdr.flags |= DF_STREAM;
+        d.hdr.layer_id = uint16_t(layer_idx);
+        d.hdr.stream_slot = mb.slot;
+        d.hdr.microblock_id = mb.id;
+        d.hdr.stream_meta_flags = meta_flags;
+    };
+
+    struct MicroblockWavefrontResult {
+        uint8_t done_tag = 0;
+        uint64_t dram_r = 0, dram_w = 0, sram_r = 0, sram_w = 0;
+        bool streamed = false;
+    };
+
+    auto emit_binary_ewe_wavefront = [&](const TileCommand& tc) -> MicroblockWavefrontResult {
+        MicroblockWavefrontResult r{};
+        uint8_t slot_free_tag[2] = {0, 0};
+        uint64_t elem_done = 0;
+        uint16_t mb_id = 0;
+        const uint64_t total_elems = uint64_t(tc.layer.in_h) * tc.layer.in_w * tc.layer.in_c;
+        const uint32_t row_elems = uint32_t(tc.layer.in_w) * tc.layer.in_c;
+
+        while (elem_done < total_elems) {
+            Microblock mb{};
+            mb.id = mb_id;
+            mb.slot = uint8_t(mb_id & 1u);
+            mb.elem_off = elem_done;
+            if (tc.h_tiled) {
+                const uint32_t row_done = uint32_t(elem_done / row_elems);
+                mb.rows = std::min<uint32_t>(tc.tile_rows, tc.layer.in_h - row_done);
+                mb.elems = mb.rows * row_elems;
+            } else {
+                mb.elems = std::min<uint32_t>(tc.tile_elems, uint32_t(total_elems - elem_done));
+                mb.rows = 1;
+            }
+            mb.bytes = mb.elems * tc.elem_size;
+            const uint32_t dram_off = uint32_t(mb.elem_off * tc.elem_size);
+            const uint8_t a_tag = alloc_tag();
+            const uint8_t b_tag = alloc_tag();
+            const uint8_t e_tag = alloc_tag();
+            const uint8_t s_tag = alloc_tag();
+            const bool final_mb = (elem_done + mb.elems >= total_elems);
+
+            Descriptor a = make_udma(uint32_t(tc.layer.dram_in + dram_off),
+                                     tc.in_a_l1[mb.slot], mb.bytes,
+                                     /*dir*/ 0, a_tag, slot_free_tag[mb.slot]);
+            mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(a);
+
+            Descriptor b = make_udma(uint32_t(tc.layer.dram_wgt + dram_off),
+                                     tc.in_b_l1[mb.slot], mb.bytes,
+                                     /*dir*/ 0, b_tag, slot_free_tag[mb.slot]);
+            mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(b);
+
+            r.dram_r += 2 * uint64_t(mb.bytes);
+            r.sram_w += 2 * uint64_t(mb.bytes);
+
+            LayerMeta tile_L = tc.layer;
+            if (tc.h_tiled) {
+                tile_L.in_h = uint16_t(mb.rows);
+                tile_L.out_h = uint16_t(mb.rows);
+            } else {
+                tile_L.in_h = 1;
+                tile_L.in_w = 1;
+                tile_L.in_c = uint16_t(mb.elems);
+                tile_L.out_h = 1;
+                tile_L.out_w = 1;
+                tile_L.out_c = uint16_t(mb.elems);
+            }
+            Descriptor e = make_ewe_add(tile_L,
+                                        tc.in_a_l1[mb.slot],
+                                        tc.in_b_l1[mb.slot],
+                                        tc.out_l1[mb.slot],
+                                        tc.params_l1, b_tag, a_tag, e_tag);
+            mark_stream(e, tc.layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(e);
+            r.sram_r += 3 * uint64_t(mb.bytes); // two inputs + output read by following store/checkpoint.
+            r.sram_w += uint64_t(mb.bytes);
+
+            if (tc.suppress_store) {
+                r.streamed = true;
+                r.done_tag = e_tag;
+                slot_free_tag[mb.slot] = e_tag;
+            } else {
+                Descriptor s = make_udma(tc.out_l1[mb.slot],
+                                         uint32_t(tc.layer.dram_out + dram_off),
+                                         mb.bytes,
+                                         /*dir*/ 1, s_tag, e_tag);
+                mark_stream(s, tc.layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(s);
+                r.dram_w += mb.bytes;
+                r.done_tag = s_tag;
+                slot_free_tag[mb.slot] = s_tag;
+            }
+
+            elem_done += mb.elems;
+            ++mb_id;
+        }
+        return r;
+    };
 
     // v7.1 (post-rolling-tags): tag_fire_time can't tell us per-layer done
     // anymore (tag values cycle 1..255 and get overwritten). UDMA serializes
@@ -740,15 +875,31 @@ int sc_main(int argc, char* argv[]) {
             std::vector<size_t> last_udma(N, 0), last_req(N, 0);
             std::vector<uint8_t> slot_done(STREAM_SLOTS, 0);
             uint8_t prev_store = 0;
-            auto emit_stream = [&](Descriptor d, bool urgent = false) {
-                d.hdr.flags |= 0x10;   // allow CommandEngine lookahead bypass
-                if (urgent) d.hdr.flags |= 0x20;
+            TileCommand stream_tc{};
+            stream_tc.kind = TileCommand::CONV_D2S_EWE;
+            stream_tc.layer_idx = i;
+            stream_tc.layer_end = stream_to_d2s_add ? end + 2 : end;
+            stream_tc.tile_rows = tile_oh;
+            stream_tc.elem_size = elem;
+            auto emit_stream = [&](Descriptor d, const Microblock& mb,
+                                   uint32_t layer_idx, uint8_t meta_flags,
+                                   bool urgent = false) {
+                mark_stream(d, layer_idx, mb, meta_flags);
+                if (urgent) d.hdr.flags |= DF_STREAM_TAIL;
                 program.push_back(d);
             };
 
             for (uint32_t y = 0; y < H; y += tile_oh) {
                 const uint32_t y_hi = std::min<uint32_t>(H, y + tile_oh);
-                const uint32_t slot = (y / tile_oh) % STREAM_SLOTS;
+                const uint32_t tile_idx = y / stream_tc.tile_rows;
+                Microblock mb{};
+                mb.id = uint16_t(tile_idx);
+                mb.slot = uint8_t(tile_idx % STREAM_SLOTS);
+                mb.rows = y_hi - y;
+                mb.elems = mb.rows * W * last.out_c;
+                mb.bytes = mb.elems * stream_tc.elem_size;
+                const bool final_mb = (y_hi >= H);
+                const uint32_t slot = mb.slot;
                 const uint32_t slot_base = slot * slot_bytes;
                 const uint32_t BUF0 = slot_base;
                 const uint32_t BUF1 = align64(uint32_t(BUF0 + buf_bytes));
@@ -783,7 +934,8 @@ int sc_main(int argc, char* argv[]) {
                         const uint32_t dram_in_off = in_lo * A.in_w * A.in_c * elem;
                         const uint8_t in_tag = alloc_tag();
                         emit_stream(make_udma(A.dram_in + dram_in_off, input_addr,
-                                              in_bytes, /*dir*/ 0, in_tag, wait_tag));
+                                              in_bytes, /*dir*/ 0, in_tag, wait_tag),
+                                    mb, k, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                         acc[k].dram_r += in_bytes;
                         acc[k].sram_w += in_bytes;
                         ++udma_count_so_far;
@@ -796,13 +948,15 @@ int sc_main(int argc, char* argv[]) {
                     const uint8_t req_tag = alloc_tag();
                     emit_stream(make_udma(A.dram_wgt + uint32_t(pure_wgt),
                                           L1_PARAMS_STREAM, uint32_t(params_blob),
-                                          /*dir*/ 0, params_tag, wait_tag));
+                                          /*dir*/ 0, params_tag, wait_tag),
+                                mb, k, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
                     acc[k].dram_r += params_blob;
                     acc[k].sram_w += params_blob;
                     ++udma_count_so_far;
                     last_udma[k] = udma_count_so_far;
                     emit_stream(make_udma(A.dram_wgt, L1_WGT_STREAM, uint32_t(pure_wgt),
-                                          /*dir*/ 0, wgt_tag, wait_tag));
+                                          /*dir*/ 0, wgt_tag, wait_tag),
+                                mb, k, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
                     acc[k].dram_r += pure_wgt;
                     acc[k].sram_w += pure_wgt;
                     ++udma_count_so_far;
@@ -810,7 +964,6 @@ int sc_main(int argc, char* argv[]) {
 
                     Descriptor cd = make_desc(OC_CONV, uint8_t(A.dtype),
                                               /*signal*/ 0, wgt_tag, wait_tag);
-                    cd.hdr.layer_id = uint16_t(k - i);
                     auto& cb = cd.body.conv;
                     cb.in_addr  = input_addr;
                     cb.wgt_addr = L1_WGT_STREAM;
@@ -828,12 +981,11 @@ int sc_main(int argc, char* argv[]) {
                     cb.group = A.group ? A.group : 1;
                     cb.cluster_mask = 0xFFFF;
                     cb.in_pad_value = A.zp_in_eff;
-                    emit_stream(cd);
+                    emit_stream(cd, mb, k, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
                     acc[k].sram_r += pure_wgt + in_bytes;
 
                     Descriptor rd = make_desc(OC_REQUANT, uint8_t(A.dtype),
                                               /*signal*/ req_tag, params_tag, 0);
-                    rd.hdr.layer_id = uint16_t(k - i);
                     auto& rb = rd.body.requant;
                     rb.in_addr = 0;
                     rb.out_addr = output_addr;
@@ -849,7 +1001,7 @@ int sc_main(int argc, char* argv[]) {
                     rb.oh_start = uint16_t(out_lo);
                     rb.corr_addr = corr_size ? uint32_t(L1_PARAMS_STREAM + scale_lut_size) : 0u;
                     rb.corr_per_oc = 0;
-                    emit_stream(rd);
+                    emit_stream(rd, mb, k, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
                     acc[k].sram_r += scale_lut_size;
                     acc[k].sram_w += out_bytes;
                     ++requant_count_so_far;
@@ -859,7 +1011,8 @@ int sc_main(int argc, char* argv[]) {
                         const uint8_t st_tag = alloc_tag();
                         const uint32_t dram_out_off = y * A.out_w * A.out_c * elem;
                         emit_stream(make_udma(output_addr, A.dram_out + dram_out_off,
-                                              out_bytes, /*dir*/ 1, st_tag, req_tag));
+                                              out_bytes, /*dir*/ 1, st_tag, req_tag),
+                                    mb, k, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
                         acc[k].sram_r += out_bytes;
                         acc[k].dram_w += out_bytes;
                         ++udma_count_so_far;
@@ -888,6 +1041,7 @@ int sc_main(int argc, char* argv[]) {
                         emit_stream(make_udma_d2s(output_addr, input_addr,
                                                   uint16_t(out_rows), A.out_w, A.out_c,
                                                   block, uint8_t(elem), d2s_tag, req_tag),
+                                    mb, end + 1, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0),
                                     true);
                         acc[end + 1].sram_r += out_bytes;
                         acc[end + 1].sram_w += add_tile_bytes;
@@ -899,6 +1053,7 @@ int sc_main(int argc, char* argv[]) {
                         emit_stream(make_udma(B.dram_wgt + B.wgt_size - 48,
                                               L1_PARAMS_STREAM, 48,
                                               /*dir*/ 0, add_params_tag, d2s_tag),
+                                    mb, end + 2, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0),
                                     true);
                         acc[end + 2].dram_r += 48;
                         acc[end + 2].sram_w += 48;
@@ -908,6 +1063,7 @@ int sc_main(int argc, char* argv[]) {
                         emit_stream(make_udma(uint32_t(B.dram_wgt + add_dram_off),
                                               L1_WGT_STREAM, add_tile_bytes,
                                               /*dir*/ 0, add_b_tag, add_params_tag),
+                                    mb, end + 2, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0),
                                     true);
                         acc[end + 2].dram_r += add_tile_bytes;
                         acc[end + 2].sram_w += add_tile_bytes;
@@ -920,15 +1076,17 @@ int sc_main(int argc, char* argv[]) {
                         Descriptor ed = make_ewe_add(tile_B, input_addr, L1_WGT_STREAM,
                                                      output_addr, L1_PARAMS_STREAM,
                                                      add_b_tag, d2s_tag, add_req_tag);
-                        ed.hdr.layer_id = 255;
-                        emit_stream(ed, true);
+                        emit_stream(ed, mb, end + 2,
+                                    SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0),
+                                    true);
                         acc[end + 2].sram_r += 2 * uint64_t(add_tile_bytes);
                         acc[end + 2].sram_w += add_tile_bytes;
 
                         emit_stream(make_udma(output_addr,
                                               uint32_t(B.dram_out + add_dram_off),
                                               add_tile_bytes,
-                                              /*dir*/ 1, add_st_tag, add_req_tag));
+                                              /*dir*/ 1, add_st_tag, add_req_tag),
+                                    mb, end + 2, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
                         acc[end + 2].sram_r += add_tile_bytes;
                         acc[end + 2].dram_w += add_tile_bytes;
                         ++udma_count_so_far;
@@ -1927,56 +2085,28 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t L1_IN_A_t1 = align64(L1_OUT_t[0] + tile_bytes_max);
                     const uint32_t L1_IN_B_t1 = align64(L1_IN_A_t1 + tile_bytes_max);
                     const uint32_t L1_OUT_t1  = align64(L1_IN_B_t1 + tile_bytes_max);
-                    const uint32_t L1_IN_A_slot[2] = { L1_IN_A_t[0], L1_IN_A_t1 };
-                    const uint32_t L1_IN_B_slot[2] = { L1_IN_B_t[0], L1_IN_B_t1 };
-                    const uint32_t L1_OUT_slot[2]  = { L1_OUT_t[0],  L1_OUT_t1  };
-                    uint8_t slot_free_tag[2] = {0, 0};
-                    uint32_t oh_done = 0;
-                    uint32_t tile_idx = 0;
-                    while (oh_done < L.in_h) {
-                        const uint32_t slot = tile_idx & 1u;
-                        const uint32_t this_oh = std::min<uint32_t>(tile_oh, L.in_h - oh_done);
-                        const uint64_t dram_off = uint64_t(oh_done) * per_row;
-                        const uint64_t tile_bytes = uint64_t(this_oh) * per_row;
-                        const uint8_t a_tag = alloc_tag();
-                        const uint8_t b_tag = alloc_tag();
-                        const uint8_t r_tag = alloc_tag();
-                        const uint8_t s_tag = alloc_tag();
-                        program.push_back(make_udma(uint32_t(L.dram_in  + dram_off),
-                                                    L1_IN_A_slot[slot], uint32_t(tile_bytes),
-                                                    /*dir*/ 0, a_tag, slot_free_tag[slot]));
-                        program.push_back(make_udma(uint32_t(L.dram_wgt + dram_off),
-                                                    L1_IN_B_slot[slot], uint32_t(tile_bytes),
-                                                    /*dir*/ 0, b_tag));
-                        acc[i].dram_r += 2 * tile_bytes;
-                        acc[i].sram_w += 2 * tile_bytes;
-                        LayerMeta tile_L = L;
-                        tile_L.in_h = uint16_t(this_oh);
-                        tile_L.out_h = uint16_t(this_oh);
-                        program.push_back(make_ewe_add(tile_L,
-                                                       L1_IN_A_slot[slot],
-                                                       L1_IN_B_slot[slot],
-                                                       L1_OUT_slot[slot],
-                                                       L1_PARAMS_t, b_tag, a_tag, r_tag));
-                        acc[i].sram_r += 2 * tile_bytes;
-                        acc[i].sram_w += tile_bytes;
-                        acc[i].sram_r += tile_bytes;
-                        if (suppress_producer_store) {
-                            udma_w_skipped[i] = true;
-                            udma_w_streamed[i] = true;
-                            prev_st_tag = r_tag;
-                        } else {
-                            program.push_back(make_udma(L1_OUT_slot[slot],
-                                                        uint32_t(L.dram_out + dram_off),
-                                                        uint32_t(tile_bytes),
-                                                        /*dir*/ 1, s_tag, r_tag));
-                            acc[i].dram_w += tile_bytes;
-                            prev_st_tag = s_tag;
-                        }
-                        slot_free_tag[slot] = prev_st_tag;
-                        oh_done += this_oh;
-                        ++tile_idx;
+                    TileCommand tc{};
+                    tc.layer_idx = i;
+                    tc.layer = L;
+                    tc.params_l1 = L1_PARAMS_t;
+                    tc.tile_rows = tile_oh;
+                    tc.tile_elems = tile_oh * uint32_t(L.in_w) * L.in_c;
+                    tc.elem_size = elem_size;
+                    tc.h_tiled = true;
+                    tc.suppress_store = suppress_producer_store;
+                    tc.in_a_l1 = { L1_IN_A_t[0], L1_IN_A_t1 };
+                    tc.in_b_l1 = { L1_IN_B_t[0], L1_IN_B_t1 };
+                    tc.out_l1  = { L1_OUT_t[0],  L1_OUT_t1  };
+                    auto wr = emit_binary_ewe_wavefront(tc);
+                    acc[i].dram_r += wr.dram_r;
+                    acc[i].dram_w += wr.dram_w;
+                    acc[i].sram_r += wr.sram_r;
+                    acc[i].sram_w += wr.sram_w;
+                    if (wr.streamed) {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
                     }
+                    prev_st_tag = wr.done_tag;
                 } else {
                     const uint64_t max_tile_bytes_by_l1 = budget / 6;
                     uint64_t tile_elems = max_tile_bytes_by_l1 / elem_size;
@@ -2011,61 +2141,28 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t L1_IN_A_t1 = align64(L1_OUT_t0 + tile_bytes_max);
                     const uint32_t L1_IN_B_t1 = align64(L1_IN_A_t1 + tile_bytes_max);
                     const uint32_t L1_OUT_t1  = align64(L1_IN_B_t1 + tile_bytes_max);
-                    const uint32_t L1_IN_A_slot[2] = { L1_IN_A_t0, L1_IN_A_t1 };
-                    const uint32_t L1_IN_B_slot[2] = { L1_IN_B_t0, L1_IN_B_t1 };
-                    const uint32_t L1_OUT_slot[2]  = { L1_OUT_t0,  L1_OUT_t1  };
-                    uint8_t slot_free_tag[2] = {0, 0};
-                    const uint64_t total_elems = uint64_t(L.in_h) * L.in_w * L.in_c;
-                    uint64_t elem_done = 0;
-                    uint64_t tile_idx = 0;
-                    while (elem_done < total_elems) {
-                        const uint32_t slot = uint32_t(tile_idx & 1u);
-                        const uint64_t this_elems = std::min<uint64_t>(tile_elems, total_elems - elem_done);
-                        const uint64_t dram_off = elem_done * elem_size;
-                        const uint64_t tile_bytes = this_elems * elem_size;
-                        const uint8_t a_tag = alloc_tag();
-                        const uint8_t b_tag = alloc_tag();
-                        const uint8_t r_tag = alloc_tag();
-                        const uint8_t s_tag = alloc_tag();
-                        program.push_back(make_udma(uint32_t(L.dram_in  + dram_off),
-                                                    L1_IN_A_slot[slot], uint32_t(tile_bytes),
-                                                    /*dir*/ 0, a_tag, slot_free_tag[slot]));
-                        program.push_back(make_udma(uint32_t(L.dram_wgt + dram_off),
-                                                    L1_IN_B_slot[slot], uint32_t(tile_bytes),
-                                                    /*dir*/ 0, b_tag));
-                        acc[i].dram_r += 2 * tile_bytes;
-                        acc[i].sram_w += 2 * tile_bytes;
-                        LayerMeta tile_L = L;
-                        tile_L.in_h = 1;
-                        tile_L.in_w = 1;
-                        tile_L.in_c = uint16_t(this_elems);
-                        tile_L.out_h = 1;
-                        tile_L.out_w = 1;
-                        tile_L.out_c = uint16_t(this_elems);
-                        program.push_back(make_ewe_add(tile_L,
-                                                       L1_IN_A_slot[slot],
-                                                       L1_IN_B_slot[slot],
-                                                       L1_OUT_slot[slot],
-                                                       L1_PARAMS_t, b_tag, a_tag, r_tag));
-                        acc[i].sram_r += 2 * tile_bytes;
-                        acc[i].sram_w += tile_bytes;
-                        acc[i].sram_r += tile_bytes;
-                        if (suppress_producer_store) {
-                            udma_w_skipped[i] = true;
-                            udma_w_streamed[i] = true;
-                            prev_st_tag = r_tag;
-                        } else {
-                            program.push_back(make_udma(L1_OUT_slot[slot],
-                                                        uint32_t(L.dram_out + dram_off),
-                                                        uint32_t(tile_bytes),
-                                                        /*dir*/ 1, s_tag, r_tag));
-                            acc[i].dram_w += tile_bytes;
-                            prev_st_tag = s_tag;
-                        }
-                        slot_free_tag[slot] = prev_st_tag;
-                        elem_done += this_elems;
-                        ++tile_idx;
+                    TileCommand tc{};
+                    tc.layer_idx = i;
+                    tc.layer = L;
+                    tc.params_l1 = L1_PARAMS_t;
+                    tc.tile_elems = uint32_t(tile_elems);
+                    tc.tile_rows = 1;
+                    tc.elem_size = elem_size;
+                    tc.h_tiled = false;
+                    tc.suppress_store = suppress_producer_store;
+                    tc.in_a_l1 = { L1_IN_A_t0, L1_IN_A_t1 };
+                    tc.in_b_l1 = { L1_IN_B_t0, L1_IN_B_t1 };
+                    tc.out_l1  = { L1_OUT_t0,  L1_OUT_t1  };
+                    auto wr = emit_binary_ewe_wavefront(tc);
+                    acc[i].dram_r += wr.dram_r;
+                    acc[i].dram_w += wr.dram_w;
+                    acc[i].sram_r += wr.sram_r;
+                    acc[i].sram_w += wr.sram_w;
+                    if (wr.streamed) {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
                     }
+                    prev_st_tag = wr.done_tag;
                 }
                 if (suppress_producer_store && prev_st_tag) {
                     const uint8_t barrier_tag = alloc_tag();
@@ -2084,6 +2181,126 @@ int sc_main(int argc, char* argv[]) {
                 clear_prev_binary_ewe_live();
                 chain_alt = 0;
                 break;
+            }
+            const uint32_t elem_size_single = (L.dtype == DT_INT16x16
+                || L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8) ? 2u : 1u;
+            const uint32_t per_row_single = uint32_t(L.in_w) * L.in_c * elem_size_single;
+            const bool block_wavefront_single =
+                fused_this_layer && per_row_single > 0 && L.in_h > 1 && L.in_size >= 64 * 1024;
+            if (block_wavefront_single) {
+                const uint32_t params_l1 = L1_WGT;
+                const uint32_t b0 = align64(params_l1 + 48);
+                uint32_t tile_rows = std::max<uint32_t>(1, (64 * 1024) / per_row_single);
+                tile_rows = std::min<uint32_t>(tile_rows, L.in_h);
+                uint32_t tile_bytes_max = tile_rows * per_row_single;
+                auto b_slot_top = [&](uint32_t bytes) -> uint64_t {
+                    const uint32_t b1 = align64(b0 + bytes);
+                    return uint64_t(b1) + bytes;
+                };
+                while (tile_rows > 1 &&
+                       b_slot_top(tile_bytes_max) > uint64_t(L1_WGT) + L.wgt_size) {
+                    --tile_rows;
+                    tile_bytes_max = tile_rows * per_row_single;
+                }
+                if (b_slot_top(tile_bytes_max) <= uint64_t(L1_WGT) + L.wgt_size) {
+                    const uint32_t b1 = align64(b0 + tile_bytes_max);
+                    const uint32_t b_slot[2] = { b0, b1 };
+                    const uint8_t params_tag = alloc_tag();
+                    Descriptor pd = make_udma(L.dram_wgt + L.wgt_size - 48,
+                                              params_l1, 48,
+                                              /*dir*/ 0, params_tag, fuse_prev_done_tag);
+                    Microblock params_mb{};
+                    mark_stream(pd, i, params_mb, SMF_LOAD_B);
+                    program.push_back(pd);
+                    acc[i].dram_r += 48;
+                    acc[i].sram_w += 48;
+
+                    uint8_t slot_free_tag[2] = {0, 0};
+                    uint8_t prev_tag = params_tag;
+                    uint32_t row_done = 0;
+                    uint16_t mb_id = 0;
+                    while (row_done < L.in_h) {
+                        Microblock mb{};
+                        mb.id = mb_id;
+                        mb.slot = uint8_t(mb_id & 1u);
+                        mb.rows = std::min<uint32_t>(tile_rows, L.in_h - row_done);
+                        mb.elems = mb.rows * uint32_t(L.in_w) * L.in_c;
+                        mb.bytes = mb.elems * elem_size_single;
+                        mb.elem_off = uint64_t(row_done) * L.in_w * L.in_c;
+                        const uint32_t off = uint32_t(mb.elem_off * elem_size_single);
+                        const bool final_mb = (row_done + mb.rows >= L.in_h);
+                        const uint8_t b_tag = alloc_tag();
+                        const uint8_t e_tag = alloc_tag();
+                        Descriptor bd = make_udma(uint32_t(L.dram_wgt + off),
+                                                  b_slot[mb.slot], mb.bytes,
+                                                  /*dir*/ 0, b_tag,
+                                                  slot_free_tag[mb.slot] ? slot_free_tag[mb.slot] : params_tag);
+                        mark_stream(bd, i, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(bd);
+                        acc[i].dram_r += mb.bytes;
+                        acc[i].sram_w += mb.bytes;
+
+                        LayerMeta tile_L = L;
+                        tile_L.in_h = uint16_t(mb.rows);
+                        tile_L.out_h = uint16_t(mb.rows);
+                        Descriptor ed = make_ewe_add(tile_L,
+                                                     L1_IN + off,
+                                                     b_slot[mb.slot],
+                                                     L1_OUT + off,
+                                                     params_l1,
+                                                     b_tag, fuse_prev_done_tag, e_tag);
+                        mark_stream(ed, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(ed);
+                        acc[i].sram_r += 2 * uint64_t(mb.bytes);
+                        acc[i].sram_w += mb.bytes;
+                        slot_free_tag[mb.slot] = e_tag;
+                        prev_tag = e_tag;
+                        row_done += mb.rows;
+                        ++mb_id;
+                    }
+
+                    if (suppress_producer_store) {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
+                        const uint8_t barrier_tag = alloc_tag();
+                        program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, prev_tag));
+                        acc[i].sram_r += 1;
+                        acc[i].dram_w += 1;
+                        layer_done_tag[i] = barrier_tag;
+                        fuse_prev_done_tag = prev_tag;
+                    } else {
+                        const uint8_t st_tag = alloc_tag();
+                        Descriptor wd = make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                                  /*dir*/ 1, st_tag, prev_tag);
+                        pending.active    = true;
+                        pending.desc      = wd;
+                        pending.bytes     = L.ref_size;
+                        pending.layer_idx = i;
+                        layer_done_tag[i] = st_tag;
+                        fuse_prev_done_tag = prev_tag;
+                    }
+
+                    tiles_h_per_layer[i] = uint16_t((uint32_t(L.in_h) + tile_rows - 1) / tile_rows);
+                    tiles_oc_per_layer[i] = 1;
+                    fuse_prev_l1_out_addr   = L1_OUT;
+                    fuse_prev_l1_out_size   = L.ref_size;
+                    fuse_prev_out_h         = L.out_h;
+                    fuse_prev_out_w         = L.out_w;
+                    fuse_prev_out_c         = L.out_c;
+                    fuse_prev_dtype         = L.dtype;
+                    fuse_prev_single_tile   = true;
+                    fuse_prev_is_conv_class = true;
+                    fuse_prev_is_binary_ewe = true;
+                    fuse_prev_live_a_addr   = L1_IN;
+                    fuse_prev_live_a_size   = L.in_size;
+                    fuse_prev_live_b_addr   = L1_WGT;
+                    fuse_prev_live_b_size   = L.wgt_size;
+                    fuse_prev_live_o_addr   = L1_OUT;
+                    fuse_prev_live_o_size   = L.ref_size;
+                    if (fused_this_layer) chain_alt = fused_used_low ? 1 : 0;
+                    else                  chain_alt = 0;
+                    break;
+                }
             }
             auto wgt_prefetch_safe_at = [&](uint32_t addr) -> bool {
                 return fused_this_layer && fuse_prev_is_binary_ewe &&
@@ -2177,7 +2394,7 @@ int sc_main(int argc, char* argv[]) {
                                           prefetch_b_safe ? 0 :
                                           (fused_this_layer ? fuse_prev_done_tag : 0));
             if (prefetch_b_safe)
-                wgt_rd.hdr.flags |= 0x10;  // may bypass a waiting stream-tail barrier.
+                wgt_rd.hdr.flags |= DF_STREAM;  // may bypass a waiting stream-tail barrier.
             program.push_back(wgt_rd);
             acc[i].dram_r += L.wgt_size;
             acc[i].sram_w += L.wgt_size;
@@ -2248,6 +2465,16 @@ int sc_main(int argc, char* argv[]) {
             break;
         }
         case OK_CONCAT: {
+            auto emit_concat_barrier = [&]() {
+                const uint8_t prev_done = (i > 0) ? layer_done_tag[i - 1] : 0;
+                if (!prev_done) return;
+                const uint8_t barrier_tag = alloc_tag();
+                program.push_back(make_udma(0, L.dram_out, 1,
+                                            /*dir*/ 1, barrier_tag, prev_done));
+                acc[i].sram_r += 1;
+                acc[i].dram_w += 1;
+                layer_done_tag[i] = barrier_tag;
+            };
             if (conservative_mul_graph) {
                 // MUL-heavy graphs (YOLO/MobileNet-like) need the previous
                 // store as a scheduling barrier, but CONCAT itself is still a
@@ -2271,7 +2498,7 @@ int sc_main(int argc, char* argv[]) {
             }
             udma_w_skipped[i] = true;
             udma_w_streamed[i] = true;
-            layer_done_tag[i] = 0;
+            emit_concat_barrier();
             break;
         }
         default:

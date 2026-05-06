@@ -56,16 +56,37 @@ enum EweSubtype : uint8_t {
     ES_GELU       = 5,    // unary: x * Φ(x), tanh-approximation
 };
 
+// Descriptor flags.
+constexpr uint8_t DF_PREEMPT      = 0x01;
+constexpr uint8_t DF_CHAIN_SRC    = 0x02;
+constexpr uint8_t DF_CHAIN_SINK   = 0x04;
+constexpr uint8_t DF_TRACE        = 0x08;
+constexpr uint8_t DF_STREAM       = 0x10;  // participates in CommandEngine lookahead bypass.
+constexpr uint8_t DF_STREAM_TAIL  = 0x20;  // tail/barrier work; later safe prefetch may bypass.
+
+// Tile-command metadata for stream descriptors.  These bytes are advisory for
+// scheduling/trace only; engines still consume the 48-byte op body unchanged.
+enum StreamMetaFlags : uint8_t {
+    SMF_NONE       = 0,
+    SMF_LOAD_A     = 1 << 0,
+    SMF_LOAD_B     = 1 << 1,
+    SMF_COMPUTE    = 1 << 2,
+    SMF_STORE      = 1 << 3,
+    SMF_FINAL_TILE = 1 << 4,
+};
+
 // 16 bytes — common header.
 struct DescriptorHeader {
     uint8_t  op_class_subtype;   // [3:0]=op_class, [7:4]=op_subtype
-    uint8_t  flags;              // bit0 preempt, bit1 chain-src, bit2 chain-sink, bit3 trace
+    uint8_t  flags;              // DF_* bits above.
     uint8_t  dtype;              // DType enum
     uint8_t  signal_tag;         // 0 = no signal
     uint8_t  wait_count;         // 0..4
     uint8_t  wait_tags[4];
     uint16_t layer_id;
-    uint8_t  _reserved[4];
+    uint16_t microblock_id;      // TileCommand microblock id within layer/tile.
+    uint8_t  stream_slot;        // TileCommand slot/ping-pong id (trace/scheduler hint).
+    uint8_t  stream_meta_flags;  // SMF_* bits above.
 
     OpClass op_class()   const { return static_cast<OpClass>(op_class_subtype & 0xF); }
     uint8_t op_subtype() const { return (op_class_subtype >> 4) & 0xF; }

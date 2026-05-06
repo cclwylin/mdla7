@@ -7,6 +7,7 @@
 #include <systemc>
 #include <array>
 #include <deque>
+#include <limits>
 #include <iostream>
 #include <queue>
 #include "mdla7/descriptor.h"
@@ -56,19 +57,19 @@ SC_MODULE(CommandEngine) {
                 // completion of the same tag can arrive while the newer
                 // descriptor is merely sitting in pending. Reserve those at
                 // issue time instead.
-                if ((d.hdr.flags & 0x10) && d.hdr.signal_tag)
+                if ((d.hdr.flags & DF_STREAM) && d.hdr.signal_tag)
                     tag_done[d.hdr.signal_tag] = false;
                 pending.push_back(d);
             }
 
             auto best = pending.end();
-            int best_prio = 999;
+            int best_prio = std::numeric_limits<int>::max();
             bool tail_waiting = false;
             for (auto it = pending.begin(); it != pending.end(); ++it) {
                 // Only descriptors explicitly marked as stream-pipeline work
                 // may be bypassed. Normal descriptors keep in-order issue
                 // because many schedules reuse fixed L1 regions.
-                if (!(it->hdr.flags & 0x10)) {
+                if (!(it->hdr.flags & DF_STREAM)) {
                     if (it == pending.begin() && waits_ready(*it)) {
                         best = it;
                     }
@@ -99,8 +100,9 @@ SC_MODULE(CommandEngine) {
 
             if (pending.empty())
                 wait(desc_in.data_written_event());
-            else
+            else {
                 wait(desc_in.data_written_event() | tag_changed);
+            }
         }
     }
 
@@ -114,24 +116,28 @@ SC_MODULE(CommandEngine) {
 
     int stream_issue_priority(const Descriptor& d) const {
         if (stream_tail_priority(d)) return 0;
+        int base = 50;
         switch (d.hdr.op_class()) {
         case OC_EWE:
-            // Launch EWE as soon as its tile is ready, then let later tile
-            // CONV/REQUANT run underneath it.
-            return 1;
+            // Launch compute as soon as its microblock is ready. Later UDMA_R
+            // work can then issue while this engine is busy.
+            base = 10; break;
         case OC_UDMA:
-            // D2S and DRAM->L1 loads feed compute; final stores are lowest
-            // priority so they don't block the next tile's front-end work.
-            return (d.body.udma.direction == 0) ? 2 : 5;
-        case OC_CONV:    return 3;
-        case OC_REQUANT: return 4;
-        case OC_POOL:    return 4;
-        default:         return 5;
+            // DRAM->L1 loads feed compute; stores drain in the background.
+            base = (d.body.udma.direction == 0) ? 20 : 60;
+            break;
+        case OC_CONV:    base = 30; break;
+        case OC_REQUANT: base = 40; break;
+        case OC_POOL:    base = 40; break;
+        default:         base = 70; break;
         }
+        // Microblock wavefront tie-breaker: keep work roughly in tile order
+        // without letting an older store block younger loads/compute.
+        return base * 4096 + int(d.hdr.microblock_id);
     }
 
     bool stream_tail_priority(const Descriptor& d) const {
-        return (d.hdr.flags & 0x20) != 0;
+        return (d.hdr.flags & DF_STREAM_TAIL) != 0;
     }
 
     bool allowed_during_tail_wait(const Descriptor& d) const {
@@ -142,7 +148,7 @@ SC_MODULE(CommandEngine) {
         if (d.hdr.op_class() == OC_UDMA && d.body.udma.direction == 0)
             return true;
         if ((d.hdr.op_class() == OC_CONV || d.hdr.op_class() == OC_REQUANT)
-            && d.hdr.layer_id <= 2)
+            && (d.hdr.stream_meta_flags & SMF_COMPUTE))
             return true;
         return false;
     }
@@ -151,12 +157,18 @@ SC_MODULE(CommandEngine) {
         std::cout << "[CmdEng] dispatch op_class=" << int(d.hdr.op_class())
                   << " layer_id=" << d.hdr.layer_id
                   << " signal_tag=" << int(d.hdr.signal_tag)
-                  << " wait_count=" << int(d.hdr.wait_count) << "\n";
+                  << " wait_count=" << int(d.hdr.wait_count);
+        if (d.hdr.flags & DF_STREAM) {
+            std::cout << " slot=" << int(d.hdr.stream_slot)
+                      << " mb=" << d.hdr.microblock_id
+                      << " smeta=0x" << std::hex << int(d.hdr.stream_meta_flags) << std::dec;
+        }
+        std::cout << "\n";
 
         // Stream signal tags were marked pending when the descriptor entered
         // the lookahead window. Normal in-order descriptors are reserved here
         // to avoid corrupting tag state across 8-bit wrap.
-        if (!(d.hdr.flags & 0x10) && d.hdr.signal_tag)
+        if (!(d.hdr.flags & DF_STREAM) && d.hdr.signal_tag)
             tag_done[d.hdr.signal_tag] = false;
         // queue this task's signal_tag for the engine (FIFO pairing).
         pending_tags[d.hdr.op_class()].push(d.hdr.signal_tag);
