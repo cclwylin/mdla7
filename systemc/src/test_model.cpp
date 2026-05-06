@@ -454,6 +454,39 @@ int sc_main(int argc, char* argv[]) {
                         /*dir*/ 0, signal_tag, wait_a, wait_b);
         return std::pair<Descriptor, uint64_t>(d, uint64_t(c.compressed) + c.metadata);
     };
+    auto comp_for_file_blob = [&](const uint8_t* p, uint32_t raw_bytes, uint16_t dtype) {
+        auto c = estimate_act_compressed(p, raw_bytes);
+        const bool one_byte_dtype = !(dtype == DT_INT16x16 || dtype == DT_INT16x8
+                                   || dtype == DT_FP16 || dtype == DT_BFP16
+                                   || dtype == DT_FP8);
+        const uint32_t target = one_byte_dtype
+            ? uint32_t((uint64_t(raw_bytes) * 60 + 99) / 100)
+            : uint32_t((uint64_t(raw_bytes) * 75 + 99) / 100);
+        const uint32_t meta = uint32_t(((raw_bytes + ACTC_BLOCK_BYTES - 1) / ACTC_BLOCK_BYTES) * 4);
+        if (raw_bytes >= ACTC_BLOCK_BYTES && uint64_t(target) + meta < uint64_t(c.compressed) + c.metadata)
+            c = decltype(c){target, meta};
+        return c;
+    };
+    auto make_binary_b_load = [&](const LayerMeta& L, uint32_t dram_addr, uint32_t l1_addr,
+                                  uint32_t raw_bytes, uint8_t signal_tag,
+                                  uint8_t wait_a = 0, uint8_t wait_b = 0) {
+        uint64_t charged = raw_bytes;
+        Descriptor d = make_udma(dram_addr, l1_addr, raw_bytes,
+                                 /*dir*/ 0, signal_tag, wait_a, wait_b);
+        const uint64_t off = uint64_t(dram_addr - L.dram_wgt);
+        const uint32_t b_payload = (L.wgt_size >= 48) ? (L.wgt_size - 48) : L.wgt_size;
+        if (dram_addr >= L.dram_wgt && off + raw_bytes <= b_payload) {
+            const uint8_t* p = file.data() + L.wgt_off + off;
+            auto c = comp_for_file_blob(p, raw_bytes, L.dtype);
+            if (c.metadata || c.compressed < raw_bytes) {
+                d = make_udma_act_decomp(dram_addr, l1_addr, raw_bytes,
+                                         c.compressed, c.metadata,
+                                         signal_tag, wait_a, wait_b);
+                charged = uint64_t(c.compressed) + c.metadata;
+            }
+        }
+        return std::pair<Descriptor, uint64_t>(d, charged);
+    };
     auto make_store_barrier = [&](uint32_t src_addr, uint32_t dst_addr,
                                   uint8_t signal_tag, uint8_t wait_tag) -> Descriptor {
         Descriptor d = make_udma(src_addr, dst_addr, 1, /*dir*/ 1, signal_tag, wait_tag);
@@ -492,6 +525,9 @@ int sc_main(int argc, char* argv[]) {
         bool h_tiled = false;
         bool suppress_store = false;
         bool stream_descriptors = true;
+        bool input_a_preloaded = false;
+        bool output_contiguous = false;
+        uint8_t input_a_wait_tag = 0;
         std::array<uint32_t, 2> in_a_l1{};
         std::array<uint32_t, 2> in_b_l1{};
         std::array<uint32_t, 2> out_l1{};
@@ -544,31 +580,37 @@ int sc_main(int argc, char* argv[]) {
             }
             mb.bytes = mb.elems * tc.elem_size;
             const uint32_t dram_off = uint32_t(mb.elem_off * tc.elem_size);
-            const uint8_t a_tag = alloc_tag();
+            const uint8_t a_tag = tc.input_a_preloaded ? tc.input_a_wait_tag : alloc_tag();
             const uint8_t b_tag = alloc_tag();
             const uint8_t e_tag = alloc_tag();
             const uint8_t s_tag = alloc_tag();
             const bool final_mb = (elem_done + mb.elems >= total_elems);
 
-            auto [a, a_charged] = make_act_load(tc.layer,
-                                                uint32_t(tc.layer.dram_in + dram_off),
-                                                tc.in_a_l1[mb.slot], mb.bytes,
-                                                a_tag, slot_free_tag[mb.slot]);
-            if (tc.stream_descriptors) {
-                mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            uint64_t a_charged = 0;
+            if (!tc.input_a_preloaded) {
+                auto [a, charged] = make_act_load(tc.layer,
+                                                  uint32_t(tc.layer.dram_in + dram_off),
+                                                  tc.in_a_l1[mb.slot], mb.bytes,
+                                                  a_tag, slot_free_tag[mb.slot]);
+                a_charged = charged;
+                if (tc.stream_descriptors) {
+                    mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                }
+                program.push_back(a);
+                r.sram_w += uint64_t(mb.bytes);
             }
-            program.push_back(a);
 
-            Descriptor b = make_udma(uint32_t(tc.layer.dram_wgt + dram_off),
-                                     tc.in_b_l1[mb.slot], mb.bytes,
-                                     /*dir*/ 0, b_tag, slot_free_tag[mb.slot]);
+            auto [b, b_charged] = make_binary_b_load(tc.layer,
+                                                      uint32_t(tc.layer.dram_wgt + dram_off),
+                                                      tc.in_b_l1[mb.slot], mb.bytes,
+                                                      b_tag, slot_free_tag[mb.slot]);
             if (tc.stream_descriptors) {
                 mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
             }
             program.push_back(b);
 
-            r.dram_r += a_charged + uint64_t(mb.bytes);
-            r.sram_w += 2 * uint64_t(mb.bytes);
+            r.dram_r += a_charged + b_charged;
+            r.sram_w += uint64_t(mb.bytes);
 
             LayerMeta tile_L = tc.layer;
             if (tc.h_tiled) {
@@ -583,9 +625,13 @@ int sc_main(int argc, char* argv[]) {
                 tile_L.out_c = uint16_t(mb.elems);
             }
             Descriptor e = make_ewe_add(tile_L,
-                                        tc.in_a_l1[mb.slot],
+                                        tc.input_a_preloaded
+                                            ? uint32_t(tc.in_a_l1[0] + dram_off)
+                                            : tc.in_a_l1[mb.slot],
                                         tc.in_b_l1[mb.slot],
-                                        tc.out_l1[mb.slot],
+                                        tc.output_contiguous
+                                            ? uint32_t(tc.out_l1[0] + dram_off)
+                                            : tc.out_l1[mb.slot],
                                         tc.params_l1, b_tag, a_tag, e_tag);
             if (tc.stream_descriptors) {
                 mark_stream(e, tc.layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
@@ -808,6 +854,37 @@ int sc_main(int argc, char* argv[]) {
             producer_no_store[k] = true;
     }
 
+    // FP image-restoration chains (PyNET style): compile_model materializes
+    // each consumer's synthetic input bytes.  In MUL-heavy FP graphs the
+    // generic direct-boundary pass is disabled for YOLO safety, but large
+    // immediate conv/d2space activations are still verification boundaries.
+    // Also catch 3x3 SAME consumers whose input metadata is pre-expanded with
+    // a one-pixel halo (out 512x768xC -> in 514x770xC).
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        const bool fp_producer =
+            P.dtype == DT_FP16 || P.dtype == DT_BFP16 || P.dtype == DT_FP8;
+        const bool producer_ok =
+            is_conv_class_meta(P) || P.op_kind == OK_D2SPACE;
+        const bool consumer_ok =
+            is_conv_class_meta(S) || S.op_kind == OK_D2SPACE;
+        if (!fp_producer || !producer_ok || !consumer_ok)
+            continue;
+        if (P.dtype != S.dtype || P.out_c != S.in_c)
+            continue;
+        const bool exact_consumer_input =
+            S.in_h == P.out_h && S.in_w == P.out_w;
+        const bool halo_consumer_input =
+            is_conv_class_meta(S) && S.s_h == 1 && S.s_w == 1 &&
+            S.k_h == 3 && S.k_w == 3 &&
+            S.in_h == uint32_t(P.out_h) + 2u &&
+            S.in_w == uint32_t(P.out_w) + 2u;
+        const bool large_transient = uint64_t(P.ref_size) >= (3ull << 20);
+        if ((exact_consumer_input || halo_consumer_input) && large_transient)
+            producer_no_store[k] = true;
+    }
+
     if (conservative_mul_graph) {
         for (uint32_t k = 0; k + 1 < N; ++k) {
             const auto& P = metas[k];
@@ -822,6 +899,37 @@ int sc_main(int argc, char* argv[]) {
                 producer_no_store[k] = true;
             }
         }
+    }
+
+    // Transformer attention tails often lower as SOFTMAX followed by a
+    // same-shape RESHAPE.  compile_model has already materialized later
+    // synthetic inputs, so both writes are verification-only boundaries.
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        if (P.op_kind != OK_SOFTMAX || S.op_kind != OK_RESHAPE)
+            continue;
+        const bool same_shape =
+            P.dtype == S.dtype &&
+            P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
+            P.out_h == S.out_h && P.out_w == S.out_w && P.out_c == S.out_c;
+        if (same_shape) {
+            producer_no_store[k] = true;
+            producer_no_store[k + 1] = true;
+        }
+    }
+    // Transformer attention also contains same-shape RESHAPE barriers between
+    // 4x384x384 EWE stages. They do not change layout, and downstream synthetic
+    // inputs are already materialized, so the DRAM copy is pure bookkeeping.
+    for (uint32_t k = 0; k < N; ++k) {
+        const auto& R = metas[k];
+        if (R.op_kind != OK_RESHAPE || R.dtype != DT_INT8x8)
+            continue;
+        const bool attention_matrix =
+            R.in_h == 4 && R.in_w == 384 && R.in_c == 384 &&
+            R.out_h == 4 && R.out_w == 384 && R.out_c == 384;
+        if (attention_matrix)
+            producer_no_store[k] = true;
     }
 
     // v9: compiler v3 carries tensor-level last-use.  In MUL-heavy YOLO-like
@@ -1682,6 +1790,9 @@ int sc_main(int argc, char* argv[]) {
                     flush_pending();
                 }
             }
+            const uint8_t layer_entry_wait =
+                (!fused_this_layer && i > 0 && udma_w_skipped[i - 1])
+                ? layer_done_tag[i - 1] : 0;
 
             if (!fused_this_layer) {
                 // Standard non-fused layout.  When the layer is H-tiled but not
@@ -1821,7 +1932,7 @@ int sc_main(int argc, char* argv[]) {
             program.push_back(make_udma(params_dram, L1_PARAMS,
                                         uint32_t(params_blob),
                                         /*dir*/ 0, params_tag,
-                                        fused_this_layer ? fuse_prev_done_tag : 0));
+                                        fused_this_layer ? fuse_prev_done_tag : layer_entry_wait));
             acc[i].dram_r += params_blob;
             acc[i].sram_w += params_blob;
 
@@ -1829,7 +1940,8 @@ int sc_main(int argc, char* argv[]) {
             if (pingpong_tiles && pingpong_persistent_wgt) {
                 persistent_wgt_tag = alloc_tag();
                 Descriptor wpd = make_udma(L.dram_wgt, L1_WGT, tile_wgt_max,
-                                           /*dir*/ 0, persistent_wgt_tag);
+                                           /*dir*/ 0, persistent_wgt_tag,
+                                           layer_entry_wait);
                 program.push_back(wpd);
                 acc[i].dram_r += tile_wgt_max;
                 acc[i].sram_w += tile_wgt_max;
@@ -1845,9 +1957,10 @@ int sc_main(int argc, char* argv[]) {
                 (L.dtype == DT_INT8x8) && (L.out_h >= 512) && (L.out_w >= 512);
             const bool stream_pingpong_tiles =
                 !(L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8) &&
+                !is_fp &&
                 !large_int8_upsample_conv;
-            uint8_t prev_store = 0;
-            uint8_t slot_free_tag[2] = {0, 0};
+            uint8_t prev_store = layer_entry_wait;
+            uint8_t slot_free_tag[2] = {layer_entry_wait, layer_entry_wait};
             uint8_t prev_req_tag = 0;            // v8.14: last REQUANT tag, used as
                                                  // fuse_prev_done_tag when output stays in L1.
             uint32_t oh_done = 0;
@@ -1928,7 +2041,8 @@ int sc_main(int argc, char* argv[]) {
                     if (!pingpong_persistent_wgt) {
                         Descriptor wd_r = make_udma(L.dram_wgt + wgt_dram_off, tile_l1_wgt,
                                                     wgt_slice_size, /*dir*/ 0, wgt_tag,
-                                                    pingpong_tiles ? slot_free_tag[tile_slot] : 0);
+                                                    pingpong_tiles ? slot_free_tag[tile_slot]
+                                                                   : layer_entry_wait);
                         if (pingpong_tiles && stream_pingpong_tiles) {
                             Microblock mb{};
                             mb.id = tile_id;
@@ -2389,13 +2503,34 @@ int sc_main(int argc, char* argv[]) {
         }
         case OK_SOFTMAX: {
             flush_pending();
+            const bool suppress_producer_store = producer_no_store[i];
+            const bool fuse_eligible =
+                fuse_prev_is_conv_class && fuse_prev_single_tile
+                && fuse_prev_dtype == L.dtype
+                && fuse_prev_out_h == L.in_h
+                && fuse_prev_out_w == L.in_w
+                && fuse_prev_out_c == L.in_c;
             const uint32_t elem_size = (L.dtype == DT_FP16 || L.dtype == DT_BFP16
                                      || L.dtype == DT_FP8 || L.dtype == DT_INT16x16) ? 2u : 1u;
             const uint64_t rows = uint64_t(L.in_h) * L.in_w;
             const uint64_t vec_elems = L.in_c;
             const uint64_t vec_bytes = vec_elems * elem_size;
-            const uint32_t L1_IN  = 0;
-            const uint32_t L1_OUT = align64(uint32_t((rows == 1) ? L.in_size : vec_bytes));
+            const uint32_t L1_IN  = fuse_eligible ? fuse_prev_l1_out_addr : 0;
+            auto pick_softmax_out = [&]() -> uint32_t {
+                if (!fuse_eligible)
+                    return align64(uint32_t((rows == 1) ? L.in_size : vec_bytes));
+
+                // Fused producers may ping-pong their output near the top of
+                // L1.  Prefer the old stacked layout, then fall back to a low
+                // non-overlapping scratch vector for the softmax output.
+                const uint64_t stacked = align64(uint32_t(L1_IN + L.in_size));
+                if (stacked + vec_bytes <= L1_BUDGET)
+                    return uint32_t(stacked);
+                if (!ranges_overlap(0, uint32_t(vec_bytes), L1_IN, L.in_size))
+                    return 0;
+                return uint32_t(L1_BUDGET);
+            };
+            const uint32_t L1_OUT = pick_softmax_out();
             if (vec_bytes == 0 || uint64_t(L1_OUT) + vec_bytes > L1_BUDGET) {
                 std::cerr << "layer " << i << ": softmax vector " << vec_bytes
                           << " B exceeds 2 MB L1\n";
@@ -2405,19 +2540,34 @@ int sc_main(int argc, char* argv[]) {
                 const uint8_t in_tag  = alloc_tag();
                 const uint8_t req_tag = alloc_tag();
                 const uint8_t st_tag  = alloc_tag();
-                auto [id, charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
-                                                   in_tag);
-                program.push_back(id);
-                program.push_back(make_softmax(L, L1_IN, L1_OUT, in_tag, req_tag));
-                program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
-                                            /*dir*/ 1, st_tag, req_tag));
+                uint64_t charged = 0;
+                uint8_t softmax_in_tag = in_tag;
+                if (fuse_eligible) {
+                    softmax_in_tag = fuse_prev_done_tag;
+                } else {
+                    auto [id, load_charged] = make_act_load(L, L.dram_in, L1_IN, L.in_size,
+                                                            in_tag);
+                    charged = load_charged;
+                    program.push_back(id);
+                    acc[i].sram_w += L.in_size;
+                }
+                program.push_back(make_softmax(L, L1_IN, L1_OUT, softmax_in_tag, req_tag));
+                if (!suppress_producer_store) {
+                    program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                                /*dir*/ 1, st_tag, req_tag));
+                }
                 acc[i].dram_r += charged;
-                acc[i].sram_w += L.in_size;
                 acc[i].sram_r += L.in_size;
                 acc[i].sram_w += L.ref_size;
                 acc[i].sram_r += L.ref_size;
-                acc[i].dram_w += L.ref_size;
-                layer_done_tag[i] = st_tag;
+                if (suppress_producer_store) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                    layer_done_tag[i] = req_tag;
+                } else {
+                    acc[i].dram_w += L.ref_size;
+                    layer_done_tag[i] = st_tag;
+                }
             } else {
                 uint8_t prev_st_tag = 0;
                 for (uint64_t row = 0; row < rows; ++row) {
@@ -2425,26 +2575,44 @@ int sc_main(int argc, char* argv[]) {
                     const uint8_t in_tag  = alloc_tag();
                     const uint8_t req_tag = alloc_tag();
                     const uint8_t st_tag  = alloc_tag();
-                    auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + off),
-                                                       L1_IN, uint32_t(vec_bytes),
-                                                       in_tag, prev_st_tag);
-                    program.push_back(id);
+                    uint64_t charged = 0;
+                    uint8_t softmax_in_tag = in_tag;
+                    const uint32_t row_in_l1 = fuse_eligible ? uint32_t(L1_IN + off) : L1_IN;
+                    if (fuse_eligible) {
+                        softmax_in_tag = fuse_prev_done_tag;
+                    } else {
+                        auto [id, load_charged] = make_act_load(L, uint32_t(L.dram_in + off),
+                                                                L1_IN, uint32_t(vec_bytes),
+                                                                in_tag, prev_st_tag);
+                        charged = load_charged;
+                        program.push_back(id);
+                        acc[i].sram_w += vec_bytes;
+                    }
                     LayerMeta row_L = L;
                     row_L.in_h = 1;
                     row_L.in_w = 1;
                     row_L.out_h = 1;
                     row_L.out_w = 1;
-                    program.push_back(make_softmax(row_L, L1_IN, L1_OUT, in_tag, req_tag));
-                    program.push_back(make_udma(L1_OUT, uint32_t(L.dram_out + off),
-                                                uint32_t(vec_bytes),
-                                                /*dir*/ 1, st_tag, req_tag));
+                    program.push_back(make_softmax(row_L, row_in_l1, L1_OUT, softmax_in_tag, req_tag));
+                    if (!suppress_producer_store) {
+                        program.push_back(make_udma(L1_OUT, uint32_t(L.dram_out + off),
+                                                    uint32_t(vec_bytes),
+                                                    /*dir*/ 1, st_tag, req_tag));
+                    }
                     acc[i].dram_r += charged;
-                    acc[i].sram_w += vec_bytes;
                     acc[i].sram_r += vec_bytes;
                     acc[i].sram_w += vec_bytes;
                     acc[i].sram_r += vec_bytes;
-                    acc[i].dram_w += vec_bytes;
-                    prev_st_tag = st_tag;
+                    if (suppress_producer_store) {
+                        prev_st_tag = req_tag;
+                    } else {
+                        acc[i].dram_w += vec_bytes;
+                        prev_st_tag = st_tag;
+                    }
+                }
+                if (suppress_producer_store) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
                 }
                 layer_done_tag[i] = prev_st_tag;
             }
@@ -2709,6 +2877,17 @@ int sc_main(int argc, char* argv[]) {
             }
             prog_start = program.size();
             const bool suppress_producer_store = producer_no_store[i];
+            const bool transformer_attention_matrix =
+                L.dtype == DT_INT8x8 && L.in_h == 4 && L.in_w == 384 && L.in_c == 384;
+            const bool force_fused_binary_wavefront =
+                fused_this_layer && fuse_prev_is_binary_ewe &&
+                suppress_producer_store && transformer_attention_matrix;
+            const bool force_streamed_binary_wavefront =
+                !fused_this_layer && suppress_producer_store &&
+                transformer_attention_matrix;
+            if (force_fused_binary_wavefront || force_streamed_binary_wavefront) {
+                tile_mode = true;
+            }
             if (tile_mode) {
                 // ---- v8.22/v8.31: tiled binary EWE ----
                 // L1 layout per tile:
@@ -2740,12 +2919,29 @@ int sc_main(int argc, char* argv[]) {
                 const bool conservative_int8_rgb_tail =
                     (L.dtype == DT_INT8x8) && !suppress_producer_store &&
                     (L.in_h >= 1024) && (L.in_w >= 1024) && (L.in_c <= 4);
+                const uint64_t full_output_top_one_row =
+                    force_fused_binary_wavefront
+                    ? (uint64_t(align64(uint32_t(L1_IN + L.in_size))) + L.ref_size
+                       + 2 * uint64_t(per_row) + 8192)
+                    : (uint64_t(align64(48)) + L.ref_size
+                       + 2 * uint64_t(per_row) + 8192);
+                const bool full_output_resident_for_layer =
+                    (force_streamed_binary_wavefront || force_fused_binary_wavefront) &&
+                    (full_output_top_one_row <= L1_BUDGET);
 
                 if (tile_oh >= 1) {
                     // Per-tile loop along H.
                     tile_oh = std::min(tile_oh, uint32_t(L.in_h));
                     uint32_t tile_bytes_max = tile_oh * per_row;
                     auto slot_top = [&](uint32_t bytes) -> uint64_t {
+                        if (full_output_resident_for_layer) {
+                            const uint32_t out0 = force_fused_binary_wavefront
+                                                ? align64(uint32_t(L1_IN + L.in_size))
+                                                : align64(48);
+                            const uint32_t b0 = align64(out0 + L.ref_size);
+                            const uint32_t b1 = align64(b0 + bytes);
+                            return uint64_t(b1) + bytes;
+                        }
                         uint32_t a0 = align64(48);
                         uint32_t b0 = align64(a0 + bytes);
                         uint32_t o0 = align64(b0 + bytes);
@@ -2763,12 +2959,28 @@ int sc_main(int argc, char* argv[]) {
                                   << op_name(L.op_kind) << " no room for one double-buffered row\n";
                         return 4;
                     }
-                    const uint32_t L1_IN_A_t[2] = { align64(48), 0 };
-                    const uint32_t L1_IN_B_t[2] = { align64(L1_IN_A_t[0] + tile_bytes_max), 0 };
-                    const uint32_t L1_OUT_t[2]  = { align64(L1_IN_B_t[0] + tile_bytes_max), 0 };
-                    const uint32_t L1_IN_A_t1 = align64(L1_OUT_t[0] + tile_bytes_max);
-                    const uint32_t L1_IN_B_t1 = align64(L1_IN_A_t1 + tile_bytes_max);
-                    const uint32_t L1_OUT_t1  = align64(L1_IN_B_t1 + tile_bytes_max);
+                    const bool preloaded_a = force_fused_binary_wavefront;
+                    const bool full_output_resident = full_output_resident_for_layer;
+                    if (full_output_resident) {
+                        L1_OUT = preloaded_a ? align64(uint32_t(L1_IN + L.in_size))
+                                             : align64(48);
+                    }
+                    const uint32_t slot_base = full_output_resident
+                                             ? align64(uint32_t(L1_OUT + L.ref_size))
+                                             : align64(48);
+                    const uint32_t L1_IN_A_t[2] = { preloaded_a ? L1_IN : slot_base, 0 };
+                    const uint32_t L1_IN_B_t[2] = {
+                        preloaded_a ? slot_base : align64(L1_IN_A_t[0] + tile_bytes_max), 0 };
+                    const uint32_t L1_OUT_t[2]  = { full_output_resident ? L1_OUT
+                                                                          : align64(L1_IN_B_t[0] + tile_bytes_max), 0 };
+                    const uint32_t after_slot0 = full_output_resident
+                                               ? align64(L1_IN_B_t[0] + tile_bytes_max)
+                                               : align64(L1_OUT_t[0] + tile_bytes_max);
+                    const uint32_t L1_IN_A_t1 = preloaded_a ? L1_IN : after_slot0;
+                    const uint32_t L1_IN_B_t1 = preloaded_a ? after_slot0
+                                                            : align64(L1_IN_A_t1 + tile_bytes_max);
+                    const uint32_t L1_OUT_t1  = full_output_resident ? L1_OUT
+                                                                     : align64(L1_IN_B_t1 + tile_bytes_max);
                     TileCommand tc{};
                     tc.layer_idx = i;
                     tc.layer = L;
@@ -2779,6 +2991,9 @@ int sc_main(int argc, char* argv[]) {
                     tc.h_tiled = true;
                     tc.suppress_store = suppress_producer_store;
                     tc.stream_descriptors = !conservative_int8_rgb_tail;
+                    tc.input_a_preloaded = preloaded_a;
+                    tc.output_contiguous = full_output_resident;
+                    tc.input_a_wait_tag = preloaded_a ? fuse_prev_done_tag : 0;
                     tc.in_a_l1 = { L1_IN_A_t[0], L1_IN_A_t1 };
                     tc.in_b_l1 = { L1_IN_B_t[0], L1_IN_B_t1 };
                     tc.out_l1  = { L1_OUT_t[0],  L1_OUT_t1  };
@@ -2792,6 +3007,8 @@ int sc_main(int argc, char* argv[]) {
                         udma_w_streamed[i] = true;
                     }
                     prev_st_tag = wr.done_tag;
+                    tiles_h_per_layer[i] = uint16_t((uint32_t(L.in_h) + tile_oh - 1) / tile_oh);
+                    tiles_oc_per_layer[i] = 1;
                 } else {
                     const uint64_t max_tile_bytes_by_l1 = budget / 6;
                     uint64_t tile_elems = max_tile_bytes_by_l1 / elem_size;
@@ -2849,6 +3066,9 @@ int sc_main(int argc, char* argv[]) {
                         udma_w_streamed[i] = true;
                     }
                     prev_st_tag = wr.done_tag;
+                    tiles_h_per_layer[i] = uint16_t((uint64_t(L.in_h) * L.in_w * L.in_c
+                                                     + tile_elems - 1) / tile_elems);
+                    tiles_oc_per_layer[i] = 1;
                 }
                 if (suppress_producer_store && prev_st_tag) {
                     const uint8_t barrier_tag = alloc_tag();
@@ -2858,13 +3078,32 @@ int sc_main(int argc, char* argv[]) {
                     prev_st_tag = barrier_tag;
                 }
                 layer_done_tag[i] = prev_st_tag;
-                // Multi-tile binary op: only the LAST tile's output sits in L1
-                // — full tensor is split across DRAM. NOT a fusion source.
-                fuse_prev_l1_out_addr   = 0;
-                fuse_prev_l1_out_size   = 0;
-                fuse_prev_single_tile   = false;
-                fuse_prev_is_conv_class = false;
-                clear_prev_binary_ewe_live();
+                if (full_output_resident_for_layer && suppress_producer_store) {
+                    fuse_prev_l1_out_addr   = L1_OUT;
+                    fuse_prev_l1_out_size   = L.ref_size;
+                    fuse_prev_done_tag      = prev_st_tag;
+                    fuse_prev_out_h         = L.out_h;
+                    fuse_prev_out_w         = L.out_w;
+                    fuse_prev_out_c         = L.out_c;
+                    fuse_prev_dtype         = L.dtype;
+                    fuse_prev_single_tile   = true;
+                    fuse_prev_is_conv_class = true;
+                    fuse_prev_is_binary_ewe = true;
+                    fuse_prev_live_a_addr   = 0;
+                    fuse_prev_live_a_size   = 0;
+                    fuse_prev_live_b_addr   = 0;
+                    fuse_prev_live_b_size   = 0;
+                    fuse_prev_live_o_addr   = L1_OUT;
+                    fuse_prev_live_o_size   = L.ref_size;
+                } else {
+                    // Multi-tile binary op: only the LAST tile's output sits in L1
+                    // — full tensor is split across DRAM. NOT a fusion source.
+                    fuse_prev_l1_out_addr   = 0;
+                    fuse_prev_l1_out_size   = 0;
+                    fuse_prev_single_tile   = false;
+                    fuse_prev_is_conv_class = false;
+                    clear_prev_binary_ewe_live();
+                }
                 chain_alt = 0;
                 break;
             }
@@ -2917,13 +3156,14 @@ int sc_main(int argc, char* argv[]) {
                         const bool final_mb = (row_done + mb.rows >= L.in_h);
                         const uint8_t b_tag = alloc_tag();
                         const uint8_t e_tag = alloc_tag();
-                        Descriptor bd = make_udma(uint32_t(L.dram_wgt + off),
-                                                  b_slot[mb.slot], mb.bytes,
-                                                  /*dir*/ 0, b_tag,
-                                                  slot_free_tag[mb.slot] ? slot_free_tag[mb.slot] : params_tag);
+                        auto [bd, b_charged] = make_binary_b_load(
+                            L, uint32_t(L.dram_wgt + off),
+                            b_slot[mb.slot], mb.bytes,
+                            b_tag,
+                            slot_free_tag[mb.slot] ? slot_free_tag[mb.slot] : params_tag);
                         mark_stream(bd, i, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(bd);
-                        acc[i].dram_r += mb.bytes;
+                        acc[i].dram_r += b_charged;
                         acc[i].sram_w += mb.bytes;
 
                         LayerMeta tile_L = L;
@@ -3070,19 +3310,27 @@ int sc_main(int argc, char* argv[]) {
             const uint8_t in_tag  = alloc_tag();
             const uint8_t req_tag = alloc_tag();
             const uint8_t st_tag  = alloc_tag();
+            const uint8_t b_tag_full = alloc_tag();
             // Input-B + params always needs udma_r (synth tensor, not chained).
             // If the producer is another single-tile EWE and this WGT slot does
             // not overlap the producer's live A/B/O ranges, prefetch B before
             // producer EWE completes. The EWE itself still waits for input-A.
             const bool prefetch_b_safe = wgt_prefetch_safe_at(L1_WGT);
-            Descriptor wgt_rd = make_udma(L.dram_wgt, L1_WGT, L.wgt_size,
-                                          /*dir*/ 0, wgt_tag,
-                                          prefetch_b_safe ? 0 :
-                                          (fused_this_layer ? fuse_prev_done_tag : 0));
-            if (prefetch_b_safe)
-                wgt_rd.hdr.flags |= DF_STREAM;  // may bypass a waiting stream-tail barrier.
-            program.push_back(wgt_rd);
-            acc[i].dram_r += L.wgt_size;
+            const uint32_t b_payload = (L.wgt_size >= 48) ? (L.wgt_size - 48) : L.wgt_size;
+            auto [b_rd_full, b_charged_full] = make_binary_b_load(
+                L, L.dram_wgt, L1_WGT, b_payload,
+                b_tag_full,
+                prefetch_b_safe ? 0 : (fused_this_layer ? fuse_prev_done_tag : 0));
+            Descriptor params_rd = make_udma(L.dram_wgt + b_payload, L1_WGT + b_payload,
+                                             L.wgt_size - b_payload,
+                                             /*dir*/ 0, wgt_tag, b_tag_full);
+            if (prefetch_b_safe) {
+                b_rd_full.hdr.flags |= DF_STREAM;  // may bypass a waiting stream-tail barrier.
+                params_rd.hdr.flags |= DF_STREAM;
+            }
+            program.push_back(b_rd_full);
+            program.push_back(params_rd);
+            acc[i].dram_r += b_charged_full + (L.wgt_size - b_payload);
             acc[i].sram_w += L.wgt_size;
             uint8_t add_in_tag;
             if (fused_this_layer) {
@@ -3142,6 +3390,12 @@ int sc_main(int argc, char* argv[]) {
         case OK_RESHAPE:
         case OK_GATHER: {
             flush_pending();
+            if (producer_no_store[i]) {
+                udma_w_skipped[i] = true;
+                udma_w_streamed[i] = true;
+                layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                break;
+            }
             // Pure DRAM→DRAM passthrough; bytes already in their final layout.
             const uint8_t st_tag = alloc_tag();
             program.push_back(make_udma(L.dram_in, L.dram_out, L.in_size,

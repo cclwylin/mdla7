@@ -287,7 +287,10 @@ SC_MODULE(EweEngine) {
                 // v2.2 compute cycles only (memory time already accrued inside
                 // L1Mesh/Dram via the read/write calls above).
                 //   3-pass schedule: exp / reduce_sum / div, pipelined lanes.
-                const uint64_t per_pass = (elems + lanes - 1) / lanes;
+                // v9.2: transformer tuning doubles the dedicated softmax lanes
+                // while keeping binary EWE lane count unchanged.
+                const uint64_t softmax_lanes = lanes * 2;
+                const uint64_t per_pass = (elems + softmax_lanes - 1) / softmax_lanes;
                 wait(3 * per_pass, sc_core::SC_NS);
             }
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();

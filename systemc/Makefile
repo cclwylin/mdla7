@@ -63,18 +63,23 @@ LDFLAGS  := -L $(SYSTEMC_LIB) -lsystemc -Wl,-rpath,$(SYSTEMC_LIB)
 
 BUILD   := build
 HEADERS := $(wildcard include/mdla7/*.h)
+HOST_STAMP := $(BUILD)/.host-$(UNAME_S)-$(UNAME_M)
 
 # Each .cpp under src/ becomes its own binary.
 BINS := $(patsubst src/%.cpp,$(BUILD)/%,$(wildcard src/*.cpp))
 
 all: $(BINS)
 
-$(BUILD)/%: src/%.cpp $(HEADERS) | $(BUILD)
+$(BUILD)/%: src/%.cpp $(HEADERS) $(HOST_STAMP) | $(BUILD)
 	@echo "[build] $@   ($(UNAME_S)/$(UNAME_M))"
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 $(BUILD):
 	mkdir -p $@
+
+$(HOST_STAMP): | $(BUILD)
+	@rm -f $(BUILD)/.host-*
+	@touch $@
 
 run: $(BUILD)/main
 	$(BUILD)/main

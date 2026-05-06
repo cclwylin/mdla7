@@ -18,6 +18,18 @@ SYSTEMC = HERE.parent
 OUT_DIR = SYSTEMC / "output"
 HTML_OUT = SYSTEMC / "model_profile.html"
 REGRESSION_CSV = OUT_DIR / "mdla6_pattern_regression.csv"
+TRANSFORMER_PATTERNS = {
+    "gpt2_quant",
+    "llama2_quant",
+    "mobilebert_quant",
+    "vit_b16_quant",
+    "swin_float",
+    "swin_quant",
+    "mobilevit_v2_float",
+    "mobilevit_v2_quant",
+    "sam_float",
+    "sam_quant",
+}
 
 
 def normalise_pattern(pat: str) -> str:
@@ -92,6 +104,7 @@ def collect_rows() -> list[dict[str, object]]:
         rows.append({
             "pattern": pat,
             "stem": stem,
+            "type": "Transformer" if stem in TRANSFORMER_PATTERNS else "",
             "link": f"output/{html.name}",
             "cx": cx,
             "our_ms": our_ms,
@@ -134,6 +147,11 @@ table {{ width:100%; border-collapse:collapse; background:var(--panel);
         border:1px solid var(--line); }}
 th,td {{ padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }}
 th {{ background:var(--head); position:sticky; top:0; z-index:1; }}
+th.pattern {{ width:32%; min-width:260px; }}
+th .sort-btn {{ display:inline-flex; align-items:center; gap:4px; border:0; background:transparent;
+                padding:0; color:inherit; font:inherit; font-weight:600; cursor:pointer; }}
+th .sort-btn:hover {{ color:var(--link); text-decoration:underline; }}
+th .sort-mark {{ display:inline-block; min-width:1.1em; color:var(--muted); font-size:12px; }}
 td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 a {{ color:var(--link); text-decoration:none; }}
 a:hover {{ text-decoration:underline; }}
@@ -150,7 +168,14 @@ tr:hover td {{ background:#f4f7fb; }}
 </div>
 <table>
   <thead>
-    <tr><th>pattern</th><th>link</th><th class="num">cx</th><th class="num">our_ms</th><th class="num">myms/cx</th></tr>
+    <tr>
+      <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+    </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
@@ -158,6 +183,7 @@ tr:hover td {{ background:#f4f7fb; }}
 <script>
 const EMBEDDED_ROWS = {rows_json};
 let rows = EMBEDDED_ROWS.slice();
+let sortState = {{ key: "ratio", dir: "desc", default: true }};
 
 function fmtMs(v) {{
   if (v === null || v === undefined || v === "") return "";
@@ -177,6 +203,25 @@ function fmtRatio(r) {{
   return n === null ? "" : n.toFixed(2);
 }}
 function sortRows(xs) {{
+  if (!sortState.default) {{
+    const key = sortState.key;
+    const dir = sortState.dir === "asc" ? 1 : -1;
+    xs.sort((a,b) => {{
+      const av = sortValue(a, key), bv = sortValue(b, key);
+      let cmp = 0;
+      if (key === "cx" || key === "our_ms" || key === "ratio") {{
+        const an = numOrNull(av), bn = numOrNull(bv);
+        if (an !== null && bn !== null) cmp = an - bn;
+        else if (an !== null && bn === null) cmp = -1;
+        else if (an === null && bn !== null) cmp = 1;
+      }} else {{
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, {{ numeric: true }});
+      }}
+      if (cmp === 0) cmp = String(a.pattern).localeCompare(String(b.pattern), undefined, {{ numeric: true }});
+      return cmp * dir;
+    }});
+    return xs;
+  }}
   xs.sort((a,b) => {{
     const ar = ratioOf(a), br = ratioOf(b);
     if (ar !== null && br !== null && ar !== br) return br - ar;
@@ -186,15 +231,42 @@ function sortRows(xs) {{
   }});
   return xs;
 }}
+function sortValue(r, key) {{
+  if (key === "ratio") return ratioOf(r);
+  if (key === "our_ms") return r.our_ms;
+  if (key === "cx") return r.cx;
+  if (key === "stem") return r.stem || r.pattern;
+  if (key === "type") return r.type || "";
+  return r.pattern;
+}}
+function numOrNull(v) {{
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}}
+function updateSortButtons() {{
+  document.querySelectorAll(".sort-btn").forEach(btn => {{
+    const mark = btn.querySelector(".sort-mark");
+    if (!mark) return;
+    if (!sortState.default && btn.dataset.sortKey === sortState.key)
+      mark.textContent = sortState.dir === "asc" ? "^" : "v";
+    else if (sortState.default && btn.dataset.sortKey === "ratio")
+      mark.textContent = "v";
+    else
+      mark.textContent = "";
+  }});
+}}
 function render() {{
   const q = document.getElementById("filter").value.trim().toLowerCase();
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {{
-    if (q && !String(r.pattern).toLowerCase().includes(q)) continue;
+    const allText = `${{r.pattern}} ${{r.stem || ""}} ${{r.type || ""}} ${{r.cx || ""}} ${{fmtMs(r.our_ms)}} ${{fmtRatio(r)}}`.toLowerCase();
+    if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${{esc(r.pattern)}}</td>` +
       `<td><a href="${{escAttr(r.link)}}">${{esc(r.stem || r.pattern)}}</a></td>` +
+      `<td>${{esc(r.type || "")}}</td>` +
       `<td class="num">${{esc(r.cx || "")}}</td>` +
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
       `<td class="num">${{esc(fmtRatio(r))}}</td>`;
@@ -202,6 +274,7 @@ function render() {{
   }}
   document.getElementById("status").textContent =
     `${{body.children.length}} / ${{rows.length}} profiles`;
+  updateSortButtons();
 }}
 function esc(s) {{
   return String(s ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
@@ -254,6 +327,7 @@ async function refreshFromOutput() {{
       next.push({{
         pattern: (cx[stem] && cx[stem].pattern) || stem,
         stem, link: `output/${{name}}`,
+        type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
         ratio: null
@@ -266,8 +340,25 @@ async function refreshFromOutput() {{
     render();
   }}
 }}
+function transformerType(stem) {{
+  const transformer = new Set([
+    "gpt2_quant", "llama2_quant", "mobilebert_quant", "vit_b16_quant",
+    "swin_float", "swin_quant", "mobilevit_v2_float", "mobilevit_v2_quant",
+    "sam_float", "sam_quant"
+  ]);
+  return transformer.has(stem) ? "Transformer" : "";
+}}
 document.getElementById("refresh").addEventListener("click", refreshFromOutput);
 document.getElementById("filter").addEventListener("input", render);
+document.querySelectorAll(".sort-btn").forEach(btn => {{
+  btn.addEventListener("click", () => {{
+    const key = btn.dataset.sortKey;
+    if (sortState.default || sortState.key !== key) sortState = {{ key, dir: "asc", default: false }};
+    else if (sortState.dir === "asc") sortState = {{ key, dir: "desc", default: false }};
+    else sortState = {{ key: "ratio", dir: "desc", default: true }};
+    render();
+  }});
+}});
 render();
 refreshFromOutput();
 </script>

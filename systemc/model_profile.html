@@ -23,6 +23,11 @@ table { width:100%; border-collapse:collapse; background:var(--panel);
         border:1px solid var(--line); }
 th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }
 th { background:var(--head); position:sticky; top:0; z-index:1; }
+th.pattern { width:32%; min-width:260px; }
+th .sort-btn { display:inline-flex; align-items:center; gap:4px; border:0; background:transparent;
+                padding:0; color:inherit; font:inherit; font-weight:600; cursor:pointer; }
+th .sort-btn:hover { color:var(--link); text-decoration:underline; }
+th .sort-mark { display:inline-block; min-width:1.1em; color:var(--muted); font-size:12px; }
 td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 a { color:var(--link); text-decoration:none; }
 a:hover { text-decoration:underline; }
@@ -39,14 +44,22 @@ tr:hover td { background:#f4f7fb; }
 </div>
 <table>
   <thead>
-    <tr><th>pattern</th><th>link</th><th class="num">cx</th><th class="num">our_ms</th><th class="num">myms/cx</th></tr>
+    <tr>
+      <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+    </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"mobilebert_quant.cut","stem":"mobilebert_quant","link":"output/mobilebert_quant.html","cx":"1.2","our_ms":5.517,"ratio":4.5975},{"pattern":"sd_diffusion_quant","stem":"sd_diffusion_quant","link":"output/sd_diffusion_quant.html","cx":"1.61","our_ms":6.705,"ratio":4.1645962732919255},{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":2.441,"ratio":4.001639344262295},{"pattern":"xlsr_quant","stem":"xlsr_quant","link":"output/xlsr_quant.html","cx":"0.33","our_ms":1.142,"ratio":3.46060606060606},{"pattern":"mobilevit_v2_float","stem":"mobilevit_v2_float","link":"output/mobilevit_v2_float.html","cx":"2.16","our_ms":7.143,"ratio":3.306944444444444},{"pattern":"efficientnet_b4_quant","stem":"efficientnet_b4_quant","link":"output/efficientnet_b4_quant.html","cx":"0.96","our_ms":3.166,"ratio":3.2979166666666666},{"pattern":"efficientnet_b4_float","stem":"efficientnet_b4_float","link":"output/efficientnet_b4_float.html","cx":"2.16","our_ms":6.876,"ratio":3.183333333333333},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.832,"ratio":3.0533333333333337},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.754,"ratio":3.016},{"pattern":"unet_quant","stem":"unet_quant","link":"output/unet_quant.html","cx":"1.84","our_ms":5.5,"ratio":2.9891304347826084},{"pattern":"imdn_quant","stem":"imdn_quant","link":"output/imdn_quant.html","cx":"2.46","our_ms":7.258,"ratio":2.950406504065041},{"pattern":"srgan_quant","stem":"srgan_quant","link":"output/srgan_quant.html","cx":"3.4","our_ms":9.915,"ratio":2.916176470588235},{"pattern":"deeplab_v3_plus_float","stem":"deeplab_v3_plus_float","link":"output/deeplab_v3_plus_float.html","cx":"4.87","our_ms":13.491,"ratio":2.7702258726899385},{"pattern":"sam_float.cut","stem":"sam_float","link":"output/sam_float.html","cx":"3.49","our_ms":9.39,"ratio":2.69054441260745},{"pattern":"dped_int16","stem":"dped_int16","link":"output/dped_int16.html","cx":"5.42","our_ms":14.443,"ratio":2.664760147601476},{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","link":"output/deeplab_v3_plus_quant.html","cx":"1.86","our_ms":4.753,"ratio":2.5553763440860213},{"pattern":"srgan_float","stem":"srgan_float","link":"output/srgan_float.html","cx":"9.31","our_ms":23.406,"ratio":2.5140708915145002},{"pattern":"imdn_float","stem":"imdn_float","link":"output/imdn_float.html","cx":"5.58","our_ms":13.509,"ratio":2.420967741935484},{"pattern":"esrgan_float","stem":"esrgan_float","link":"output/esrgan_float.html","cx":"2.22","our_ms":5.255,"ratio":2.367117117117117},{"pattern":"esrgan_quant","stem":"esrgan_quant","link":"output/esrgan_quant.html","cx":"0.97","our_ms":2.286,"ratio":2.356701030927835},{"pattern":"unet_float","stem":"unet_float","link":"output/unet_float.html","cx":"4.81","our_ms":11.334,"ratio":2.3563409563409565},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.546,"ratio":2.3424242424242423},{"pattern":"xlsr_float","stem":"xlsr_float","link":"output/xlsr_float.html","cx":"1.14","our_ms":2.566,"ratio":2.2508771929824563},{"pattern":"vsr_quant","stem":"vsr_quant","link":"output/vsr_quant.html","cx":"0.77","our_ms":1.715,"ratio":2.2272727272727275},{"pattern":"swin_float","stem":"swin_float","link":"output/swin_float.html","cx":"1.68","our_ms":3.599,"ratio":2.142261904761905},{"pattern":"midas_v3_float","stem":"midas_v3_float","link":"output/midas_v3_float.html","cx":"1.54","our_ms":3.263,"ratio":2.1188311688311687},{"pattern":"vit_b16_quant","stem":"vit_b16_quant","link":"output/vit_b16_quant.html","cx":"4.83","our_ms":10.087,"ratio":2.088405797101449},{"pattern":"yolo_v8_float","stem":"yolo_v8_float","link":"output/yolo_v8_float.html","cx":"2.16","our_ms":4.446,"ratio":2.058333333333333},{"pattern":"unet_int16","stem":"unet_int16","link":"output/unet_int16.html","cx":"3.39","our_ms":6.944,"ratio":2.0483775811209437},{"pattern":"gpt2_quant.cut","stem":"gpt2_quant","link":"output/gpt2_quant.html","cx":"1.44","our_ms":2.884,"ratio":2.0027777777777778},{"pattern":"pynet_v2_float","stem":"pynet_v2_float","link":"output/pynet_v2_float.html","cx":"14.38","our_ms":28.677,"ratio":1.9942280945757995},{"pattern":"vsr_float","stem":"vsr_float","link":"output/vsr_float.html","cx":"2.37","our_ms":4.66,"ratio":1.9662447257383966},{"pattern":"mv3_depth_float","stem":"mv3_depth_float","link":"output/mv3_depth_float.html","cx":"1.59","our_ms":2.929,"ratio":1.842138364779874},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":1.083,"ratio":1.805},{"pattern":"sd_encoder_quant","stem":"sd_encoder_quant","link":"output/sd_encoder_quant.html","cx":"3.22","our_ms":5.727,"ratio":1.7785714285714285},{"pattern":"llama2_quant.cut","stem":"llama2_quant","link":"output/llama2_quant.html","cx":"0.71","our_ms":1.237,"ratio":1.7422535211267607},{"pattern":"sd_decoder_quant","stem":"sd_decoder_quant","link":"output/sd_decoder_quant.html","cx":"6.53","our_ms":11.21,"ratio":1.7166921898928025},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":0.962,"ratio":1.5516129032258064},{"pattern":"pynet_v2_quant","stem":"pynet_v2_quant","link":"output/pynet_v2_quant.html","cx":"9.2","our_ms":14.134,"ratio":1.5363043478260872},{"pattern":"inception_v3_float","stem":"inception_v3_float","link":"output/inception_v3_float.html","cx":"1.56","our_ms":2.188,"ratio":1.4025641025641027},{"pattern":"microisp_float","stem":"microisp_float","link":"output/microisp_float.html","cx":"8.39","our_ms":11.301,"ratio":1.3469606674612633},{"pattern":"esrgan__int16","stem":"esrgan_int16","link":"output/esrgan_int16.html","cx":"3.05","our_ms":4.027,"ratio":1.3203278688524591},{"pattern":"sam_quant.cut","stem":"sam_quant","link":"output/sam_quant.html","cx":"2.03","our_ms":2.598,"ratio":1.2798029556650248},{"pattern":"swin_quant","stem":"swin_quant","link":"output/swin_quant.html","cx":"1.0","our_ms":1.24,"ratio":1.24},{"pattern":"mobilenet_v3_b4_float","stem":"mobilenet_v3_b4_float","link":"output/mobilenet_v3_b4_float.html","cx":"2.13","our_ms":2.441,"ratio":1.1460093896713615},{"pattern":"dped_quant","stem":"dped_quant","link":"output/dped_quant.html","cx":"23.27","our_ms":26.121,"ratio":1.1225182638590459},{"pattern":"microisp_quant","stem":"microisp_quant","link":"output/microisp_quant.html","cx":"5.42","our_ms":5.862,"ratio":1.081549815498155},{"pattern":"mobilenet_v3_b4_quant","stem":"mobilenet_v3_b4_quant","link":"output/mobilenet_v3_b4_quant.html","cx":"0.77","our_ms":0.754,"ratio":0.9792207792207792},{"pattern":"resnet_float","stem":"resnet_float","link":"output/resnet_float.html","cx":"0.02","our_ms":0.014,"ratio":0.7},{"pattern":"microisp_int16","stem":"microisp_int16","link":"output/microisp_int16.html","cx":"7.11","our_ms":4.898,"ratio":0.6888888888888888},{"pattern":"resnet_quant","stem":"resnet_quant","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.007,"ratio":0.35}];
+const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","type":"","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":2.576,"ratio":4.222950819672131},{"pattern":"sd_diffusion_quant","stem":"sd_diffusion_quant","type":"","link":"output/sd_diffusion_quant.html","cx":"1.61","our_ms":6.705,"ratio":4.1645962732919255},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"0.33","our_ms":1.142,"ratio":3.46060606060606},{"pattern":"efficientnet_b4_float","stem":"efficientnet_b4_float","type":"","link":"output/efficientnet_b4_float.html","cx":"2.16","our_ms":7.259,"ratio":3.3606481481481483},{"pattern":"efficientnet_b4_quant","stem":"efficientnet_b4_quant","type":"","link":"output/efficientnet_b4_quant.html","cx":"0.96","our_ms":3.166,"ratio":3.2979166666666666},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","type":"","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.839,"ratio":3.065},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.742,"ratio":2.968},{"pattern":"srgan_quant","stem":"srgan_quant","type":"","link":"output/srgan_quant.html","cx":"3.4","our_ms":9.822,"ratio":2.8888235294117646},{"pattern":"vit_b16_quant","stem":"vit_b16_quant","type":"Transformer","link":"output/vit_b16_quant.html","cx":"4.83","our_ms":13.907,"ratio":2.879296066252588},{"pattern":"mobilevit_v2_float","stem":"mobilevit_v2_float","type":"Transformer","link":"output/mobilevit_v2_float.html","cx":"2.16","our_ms":6.143,"ratio":2.843981481481481},{"pattern":"sam_float.cut","stem":"sam_float","type":"Transformer","link":"output/sam_float.html","cx":"3.49","our_ms":9.206,"ratio":2.6378223495702002},{"pattern":"srgan_float","stem":"srgan_float","type":"","link":"output/srgan_float.html","cx":"9.31","our_ms":22.866,"ratio":2.4560687432867883},{"pattern":"esrgan_quant","stem":"esrgan_quant","type":"","link":"output/esrgan_quant.html","cx":"0.97","our_ms":2.286,"ratio":2.356701030927835},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","type":"","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.546,"ratio":2.3424242424242423},{"pattern":"esrgan_float","stem":"esrgan_float","type":"","link":"output/esrgan_float.html","cx":"2.22","our_ms":5.125,"ratio":2.308558558558558},{"pattern":"xlsr_float","stem":"xlsr_float","type":"","link":"output/xlsr_float.html","cx":"1.14","our_ms":2.566,"ratio":2.2508771929824563},{"pattern":"vsr_quant","stem":"vsr_quant","type":"","link":"output/vsr_quant.html","cx":"0.77","our_ms":1.715,"ratio":2.2272727272727275},{"pattern":"yolo_v8_float","stem":"yolo_v8_float","type":"","link":"output/yolo_v8_float.html","cx":"2.16","our_ms":4.719,"ratio":2.1847222222222222},{"pattern":"swin_float","stem":"swin_float","type":"Transformer","link":"output/swin_float.html","cx":"1.68","our_ms":3.642,"ratio":2.1678571428571427},{"pattern":"midas_v3_float","stem":"midas_v3_float","type":"","link":"output/midas_v3_float.html","cx":"1.54","our_ms":3.288,"ratio":2.135064935064935},{"pattern":"mobilebert_quant.cut","stem":"mobilebert_quant","type":"Transformer","link":"output/mobilebert_quant.html","cx":"1.2","our_ms":2.548,"ratio":2.1233333333333335},{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","type":"","link":"output/deeplab_v3_plus_quant.html","cx":"1.86","our_ms":3.943,"ratio":2.1198924731182793},{"pattern":"deeplab_v3_plus_float","stem":"deeplab_v3_plus_float","type":"","link":"output/deeplab_v3_plus_float.html","cx":"4.87","our_ms":10.089,"ratio":2.0716632443531826},{"pattern":"unet_int16","stem":"unet_int16","type":"","link":"output/unet_int16.html","cx":"3.39","our_ms":6.944,"ratio":2.0483775811209437},{"pattern":"mv3_depth_float","stem":"mv3_depth_float","type":"","link":"output/mv3_depth_float.html","cx":"1.59","our_ms":3.194,"ratio":2.0088050314465407},{"pattern":"gpt2_quant.cut","stem":"gpt2_quant","type":"Transformer","link":"output/gpt2_quant.html","cx":"1.44","our_ms":2.884,"ratio":2.0027777777777778},{"pattern":"vsr_float","stem":"vsr_float","type":"","link":"output/vsr_float.html","cx":"2.37","our_ms":4.66,"ratio":1.9662447257383966},{"pattern":"dped_int16","stem":"dped_int16","type":"","link":"output/dped_int16.html","cx":"5.42","our_ms":10.61,"ratio":1.9575645756457565},{"pattern":"unet_float","stem":"unet_float","type":"","link":"output/unet_float.html","cx":"4.81","our_ms":8.983,"ratio":1.8675675675675678},{"pattern":"unet_quant","stem":"unet_quant","type":"","link":"output/unet_quant.html","cx":"1.84","our_ms":3.358,"ratio":1.825},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":1.091,"ratio":1.8183333333333334},{"pattern":"sd_encoder_quant","stem":"sd_encoder_quant","type":"","link":"output/sd_encoder_quant.html","cx":"3.22","our_ms":5.662,"ratio":1.7583850931677016},{"pattern":"llama2_quant.cut","stem":"llama2_quant","type":"Transformer","link":"output/llama2_quant.html","cx":"0.71","our_ms":1.237,"ratio":1.7422535211267607},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","type":"","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":1.0,"ratio":1.6129032258064517},{"pattern":"sd_decoder_quant","stem":"sd_decoder_quant","type":"","link":"output/sd_decoder_quant.html","cx":"6.53","our_ms":10.22,"ratio":1.5650842266462481},{"pattern":"pynet_v2_float","stem":"pynet_v2_float","type":"","link":"output/pynet_v2_float.html","cx":"14.38","our_ms":22.208,"ratio":1.544367176634214},{"pattern":"imdn_float","stem":"imdn_float","type":"","link":"output/imdn_float.html","cx":"5.58","our_ms":8.6,"ratio":1.5412186379928314},{"pattern":"inception_v3_float","stem":"inception_v3_float","type":"","link":"output/inception_v3_float.html","cx":"1.56","our_ms":2.241,"ratio":1.4365384615384615},{"pattern":"imdn_quant","stem":"imdn_quant","type":"","link":"output/imdn_quant.html","cx":"2.46","our_ms":3.324,"ratio":1.3512195121951218},{"pattern":"esrgan__int16","stem":"esrgan_int16","type":"","link":"output/esrgan_int16.html","cx":"3.05","our_ms":4.031,"ratio":1.3216393442622951},{"pattern":"sam_quant.cut","stem":"sam_quant","type":"Transformer","link":"output/sam_quant.html","cx":"2.03","our_ms":2.598,"ratio":1.2798029556650248},{"pattern":"swin_quant","stem":"swin_quant","type":"Transformer","link":"output/swin_quant.html","cx":"1.0","our_ms":1.24,"ratio":1.24},{"pattern":"mobilenet_v3_b4_float","stem":"mobilenet_v3_b4_float","type":"","link":"output/mobilenet_v3_b4_float.html","cx":"2.13","our_ms":2.576,"ratio":1.2093896713615024},{"pattern":"pynet_v2_quant","stem":"pynet_v2_quant","type":"","link":"output/pynet_v2_quant.html","cx":"9.2","our_ms":10.55,"ratio":1.1467391304347827},{"pattern":"dped_quant","stem":"dped_quant","type":"","link":"output/dped_quant.html","cx":"23.27","our_ms":24.035,"ratio":1.0328749462827675},{"pattern":"microisp_quant","stem":"microisp_quant","type":"","link":"output/microisp_quant.html","cx":"5.42","our_ms":5.375,"ratio":0.9916974169741698},{"pattern":"mobilenet_v3_b4_quant","stem":"mobilenet_v3_b4_quant","type":"","link":"output/mobilenet_v3_b4_quant.html","cx":"0.77","our_ms":0.743,"ratio":0.9649350649350649},{"pattern":"microisp_float","stem":"microisp_float","type":"","link":"output/microisp_float.html","cx":"8.39","our_ms":7.723,"ratio":0.9205005959475565},{"pattern":"resnet_float","stem":"resnet_float","type":"","link":"output/resnet_float.html","cx":"0.02","our_ms":0.014,"ratio":0.7},{"pattern":"microisp_int16","stem":"microisp_int16","type":"","link":"output/microisp_int16.html","cx":"7.11","our_ms":3.743,"ratio":0.5264416315049226},{"pattern":"resnet_quant","stem":"resnet_quant","type":"","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.007,"ratio":0.35},{"pattern":"ad01_fp32","stem":"ad01_fp32","type":"","link":"output/ad01_fp32.html","cx":"","our_ms":0.009877894736842105,"ratio":null},{"pattern":"kws_ref_model_float32","stem":"kws_ref_model_float32","type":"","link":"output/kws_ref_model_float32.html","cx":"","our_ms":0.0023831578947368422,"ratio":null},{"pattern":"pretrainedResnet_large_float","stem":"pretrainedResnet_large_float","type":"","link":"output/pretrainedResnet_large_float.html","cx":"","our_ms":0.028173684210526316,"ratio":null},{"pattern":"vww_96_float","stem":"vww_96_float","type":"","link":"output/vww_96_float.html","cx":"","our_ms":0.012624736842105263,"ratio":null}];
 let rows = EMBEDDED_ROWS.slice();
+let sortState = { key: "ratio", dir: "desc", default: true };
 
 function fmtMs(v) {
   if (v === null || v === undefined || v === "") return "";
@@ -66,6 +79,25 @@ function fmtRatio(r) {
   return n === null ? "" : n.toFixed(2);
 }
 function sortRows(xs) {
+  if (!sortState.default) {
+    const key = sortState.key;
+    const dir = sortState.dir === "asc" ? 1 : -1;
+    xs.sort((a,b) => {
+      const av = sortValue(a, key), bv = sortValue(b, key);
+      let cmp = 0;
+      if (key === "cx" || key === "our_ms" || key === "ratio") {
+        const an = numOrNull(av), bn = numOrNull(bv);
+        if (an !== null && bn !== null) cmp = an - bn;
+        else if (an !== null && bn === null) cmp = -1;
+        else if (an === null && bn !== null) cmp = 1;
+      } else {
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
+      }
+      if (cmp === 0) cmp = String(a.pattern).localeCompare(String(b.pattern), undefined, { numeric: true });
+      return cmp * dir;
+    });
+    return xs;
+  }
   xs.sort((a,b) => {
     const ar = ratioOf(a), br = ratioOf(b);
     if (ar !== null && br !== null && ar !== br) return br - ar;
@@ -75,15 +107,42 @@ function sortRows(xs) {
   });
   return xs;
 }
+function sortValue(r, key) {
+  if (key === "ratio") return ratioOf(r);
+  if (key === "our_ms") return r.our_ms;
+  if (key === "cx") return r.cx;
+  if (key === "stem") return r.stem || r.pattern;
+  if (key === "type") return r.type || "";
+  return r.pattern;
+}
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function updateSortButtons() {
+  document.querySelectorAll(".sort-btn").forEach(btn => {
+    const mark = btn.querySelector(".sort-mark");
+    if (!mark) return;
+    if (!sortState.default && btn.dataset.sortKey === sortState.key)
+      mark.textContent = sortState.dir === "asc" ? "^" : "v";
+    else if (sortState.default && btn.dataset.sortKey === "ratio")
+      mark.textContent = "v";
+    else
+      mark.textContent = "";
+  });
+}
 function render() {
   const q = document.getElementById("filter").value.trim().toLowerCase();
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {
-    if (q && !String(r.pattern).toLowerCase().includes(q)) continue;
+    const allText = `${r.pattern} ${r.stem || ""} ${r.type || ""} ${r.cx || ""} ${fmtMs(r.our_ms)} ${fmtRatio(r)}`.toLowerCase();
+    if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(r.pattern)}</td>` +
       `<td><a href="${escAttr(r.link)}">${esc(r.stem || r.pattern)}</a></td>` +
+      `<td>${esc(r.type || "")}</td>` +
       `<td class="num">${esc(r.cx || "")}</td>` +
       `<td class="num">${esc(fmtMs(r.our_ms))}</td>` +
       `<td class="num">${esc(fmtRatio(r))}</td>`;
@@ -91,6 +150,7 @@ function render() {
   }
   document.getElementById("status").textContent =
     `${body.children.length} / ${rows.length} profiles`;
+  updateSortButtons();
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
@@ -143,6 +203,7 @@ async function refreshFromOutput() {
       next.push({
         pattern: (cx[stem] && cx[stem].pattern) || stem,
         stem, link: `output/${name}`,
+        type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
         ratio: null
@@ -155,8 +216,25 @@ async function refreshFromOutput() {
     render();
   }
 }
+function transformerType(stem) {
+  const transformer = new Set([
+    "gpt2_quant", "llama2_quant", "mobilebert_quant", "vit_b16_quant",
+    "swin_float", "swin_quant", "mobilevit_v2_float", "mobilevit_v2_quant",
+    "sam_float", "sam_quant"
+  ]);
+  return transformer.has(stem) ? "Transformer" : "";
+}
 document.getElementById("refresh").addEventListener("click", refreshFromOutput);
 document.getElementById("filter").addEventListener("input", render);
+document.querySelectorAll(".sort-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const key = btn.dataset.sortKey;
+    if (sortState.default || sortState.key !== key) sortState = { key, dir: "asc", default: false };
+    else if (sortState.dir === "asc") sortState = { key, dir: "desc", default: false };
+    else sortState = { key: "ratio", dir: "desc", default: true };
+    render();
+  });
+});
 render();
 refreshFromOutput();
 </script>

@@ -48,6 +48,7 @@ SC_MODULE(Udma) {
     sc_core::sc_time busy_time_write{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks_read;
     std::vector<std::pair<uint64_t, uint64_t>> tasks_write;
+    static constexpr uint32_t UDMA_READ_OUTSTANDING = 2;
 
     SC_HAS_PROCESS(Udma);
     Udma(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -98,12 +99,21 @@ SC_MODULE(Udma) {
         wait(16, sc_core::SC_NS);
     }
 
+    uint32_t effective_read_bytes(uint32_t bytes) const {
+        return (bytes + UDMA_READ_OUTSTANDING - 1) / UDMA_READ_OUTSTANDING;
+    }
+
     void do_linear(const UdmaBody& u) {
         std::cout << "[UDMA] LINEAR_COPY  src=0x" << std::hex << u.src_addr
                   << "  dst=0x" << u.dst_addr
                   << "  len=" << std::dec << u.length << " B\n";
         std::vector<uint8_t> buf(u.length);
-        l1mgr.read (u.src_addr, buf.data(), u.length);
+        if (u.direction == 0 && addr_in_dram(u.src_addr)) {
+            l1mgr.read_compressed(u.src_addr, buf.data(), u.length,
+                                  effective_read_bytes(u.length));
+        } else {
+            l1mgr.read(u.src_addr, buf.data(), u.length);
+        }
         l1mgr.write(u.dst_addr, buf.data(), u.length);
         wait_bytes(u.length);
     }
@@ -235,7 +245,7 @@ SC_MODULE(Udma) {
         // Functional memory remains raw so existing references still verify.
         // Timing charges only compressed payload + metadata for the DRAM read.
         l1mgr.read_compressed(u.src_addr, buf.data(), raw_bytes,
-                              comp_bytes + meta_bytes);
+                              effective_read_bytes(comp_bytes + meta_bytes));
         wait_act_codec(raw_bytes);
         l1mgr.write(u.dst_addr, buf.data(), raw_bytes);
         wait_bytes(comp_bytes + meta_bytes);
