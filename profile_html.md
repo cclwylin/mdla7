@@ -283,9 +283,13 @@ Purpose:
 | `cx` | MDLA6 baseline CX value. Present only in `profile_mdla6_pattern.html`. |
 | `our_ms` | MDLA7 measured time in milliseconds. This is not cycles. |
 | `conflict_ms` | MDLA7 time with per-bank SRAM port conflict timing. |
-| `mesh_ms` | MDLA7 time with mesh router/link timing. |
+| `mesh_ms` | MDLA7 time with per-bank SRAM port conflict plus mesh router/link timing. |
 | `conflict/fast` | `conflict_ms / our_ms`. |
 | `mesh/fast` | `mesh_ms / our_ms`. |
+
+`mesh` includes the SRAM bank/port conflict model from `conflict`; it then adds
+edge ingress, router/link arbitration, and SRAM macro-port arbitration. Use
+`mesh/conflict` when you want to isolate the extra NoC overhead.
 
 Only `profile_mdla6_pattern.html` shows `cx` and `myms/cx`. Hotspot, ETHZ, and
 MLPerf indexes intentionally hide CX columns because those corpora do not have

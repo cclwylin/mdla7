@@ -98,6 +98,15 @@ All other profile indexes hide `cx` fields and default to sorting by `mesh/fast`
 --l1-timing=mesh
 ```
 
+Mode relationship:
+
+```text
+mesh = port-conflict SRAM bank timing + NoC edge/router/link timing
+```
+
+So `mesh/conflict` isolates the extra NoC overhead, while `conflict/fast`
+isolates the SRAM bank/port conflict overhead.
+
 Aliases still exist:
 
 ```text

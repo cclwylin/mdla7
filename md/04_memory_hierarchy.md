@@ -504,6 +504,15 @@ Simulator 提供三種 L1 timing mode：
 | port conflict | `--l1-timing=conflict` | 逐 bank finish-array 模型，read/read 和 write/write 同 bank 會 serialize，適合架構分析。 |
 | mesh conflict | `--l1-timing=mesh` | 在 bank port conflict 之外，加入 4x4 mesh edge ingress、XY router/link arbitration，再進 SRAM macro port，適合找 NoC hotspot。 |
 
+明確地說，`mesh` 不是取代 `conflict`，而是：
+
+```text
+mesh = SRAM bank/port conflict + NoC edge/router/link conflict
+```
+
+因此 `conflict/fast` 看 SRAM bank/port overhead，`mesh/conflict` 看額外 NoC
+overhead，`mesh/fast` 則是兩者合併後的總 overhead。
+
 `batch/run_model.py` 可用 `--l1-timing` 單跑其中一種模式。`batch/run_mdla6_pattern.py`、
 `batch/run_hotspot.py`、`batch/run_ethz_v5.py`、`batch/run_ethz_v6.py`、
 `batch/run_mlperf.py` 則預設一次跑 fast / conflict / mesh 三種模式，方便同一份 HTML
