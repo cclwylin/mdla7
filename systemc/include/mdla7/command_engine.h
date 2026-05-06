@@ -46,7 +46,7 @@ SC_MODULE(CommandEngine) {
 
     void dispatch() {
         std::deque<Descriptor> pending;
-        constexpr size_t LOOKAHEAD_LIMIT = 64;   // stay well below 8-bit tag wrap distance
+        constexpr size_t LOOKAHEAD_LIMIT = 16;   // stay well below 8-bit tag wrap distance
         while (true) {
             while (desc_in.num_available() > 0 && pending.size() < LOOKAHEAD_LIMIT) {
                 Descriptor d = desc_in.read();

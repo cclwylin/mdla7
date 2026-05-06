@@ -491,6 +491,7 @@ int sc_main(int argc, char* argv[]) {
         uint32_t elem_size = 1;
         bool h_tiled = false;
         bool suppress_store = false;
+        bool stream_descriptors = true;
         std::array<uint32_t, 2> in_a_l1{};
         std::array<uint32_t, 2> in_b_l1{};
         std::array<uint32_t, 2> out_l1{};
@@ -553,13 +554,17 @@ int sc_main(int argc, char* argv[]) {
                                                 uint32_t(tc.layer.dram_in + dram_off),
                                                 tc.in_a_l1[mb.slot], mb.bytes,
                                                 a_tag, slot_free_tag[mb.slot]);
-            mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            if (tc.stream_descriptors) {
+                mark_stream(a, tc.layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            }
             program.push_back(a);
 
             Descriptor b = make_udma(uint32_t(tc.layer.dram_wgt + dram_off),
                                      tc.in_b_l1[mb.slot], mb.bytes,
                                      /*dir*/ 0, b_tag, slot_free_tag[mb.slot]);
-            mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+            if (tc.stream_descriptors) {
+                mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+            }
             program.push_back(b);
 
             r.dram_r += a_charged + uint64_t(mb.bytes);
@@ -582,7 +587,9 @@ int sc_main(int argc, char* argv[]) {
                                         tc.in_b_l1[mb.slot],
                                         tc.out_l1[mb.slot],
                                         tc.params_l1, b_tag, a_tag, e_tag);
-            mark_stream(e, tc.layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            if (tc.stream_descriptors) {
+                mark_stream(e, tc.layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            }
             program.push_back(e);
             r.sram_r += 3 * uint64_t(mb.bytes); // two inputs + output read by following store/checkpoint.
             r.sram_w += uint64_t(mb.bytes);
@@ -596,7 +603,9 @@ int sc_main(int argc, char* argv[]) {
                                          uint32_t(tc.layer.dram_out + dram_off),
                                          mb.bytes,
                                          /*dir*/ 1, s_tag, e_tag);
-                mark_stream(s, tc.layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                if (tc.stream_descriptors) {
+                    mark_stream(s, tc.layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                }
                 program.push_back(s);
                 r.dram_w += mb.bytes;
                 r.done_tag = s_tag;
@@ -799,6 +808,22 @@ int sc_main(int argc, char* argv[]) {
             producer_no_store[k] = true;
     }
 
+    if (conservative_mul_graph) {
+        for (uint32_t k = 0; k + 1 < N; ++k) {
+            const auto& P = metas[k];
+            const auto& S = metas[k + 1];
+            const bool large_same_shape_add_boundary =
+                is_conv_class_meta(P) &&
+                (S.op_kind == OK_ADD || S.op_kind == OK_SUB) &&
+                P.dtype == S.dtype &&
+                P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
+                P.out_h >= 256 && P.out_w >= 256;
+            if (large_same_shape_add_boundary) {
+                producer_no_store[k] = true;
+            }
+        }
+    }
+
     // v9: compiler v3 carries tensor-level last-use.  In MUL-heavy YOLO-like
     // graphs, binary EWE outputs whose real TFLite tensor has downstream
     // consumers are intermediate verification boundaries; keep the original
@@ -826,6 +851,26 @@ int sc_main(int argc, char* argv[]) {
             if ((binary_ewe && has_later_consumer) ||
                 (non_binary_suppressible && G.consumer_count > 0 && ends_at_logical_concat))
                 producer_no_store[k] = true;
+        }
+    }
+
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        const bool int8_rgb_tail_consumer =
+            (S.dtype == DT_INT8x8) && is_binary_meta(S) &&
+            (S.in_h >= 1024) && (S.in_w >= 1024) && (S.in_c <= 4);
+        if (int8_rgb_tail_consumer && (is_binary_meta(P) || is_conv_class_meta(P))) {
+            producer_no_store[k] = false;
+        }
+        const bool int8_large_upsample_tail =
+            (P.dtype == DT_INT8x8) && (S.dtype == DT_INT8x8) &&
+            ((S.op_kind == OK_D2SPACE && S.out_h >= 512 && S.out_w >= 512) ||
+             (P.op_kind == OK_D2SPACE && P.out_h >= 512 && P.out_w >= 512) ||
+             ((P.op_kind == OK_AVG_POOL || P.op_kind == OK_MAX_POOL) &&
+              P.out_h >= 512 && P.out_w >= 512));
+        if (int8_large_upsample_tail) {
+            producer_no_store[k] = false;
         }
     }
 
@@ -1796,6 +1841,11 @@ int sc_main(int argc, char* argv[]) {
             // push it inline (multi-tile, no fusion source).
             const bool single_tile_layer = (tile_oh == L.out_h) && (tile_oc == L.out_c);
             const bool suppress_producer_store = producer_no_store[i];
+            const bool large_int8_upsample_conv =
+                (L.dtype == DT_INT8x8) && (L.out_h >= 512) && (L.out_w >= 512);
+            const bool stream_pingpong_tiles =
+                !(L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8) &&
+                !large_int8_upsample_conv;
             uint8_t prev_store = 0;
             uint8_t slot_free_tag[2] = {0, 0};
             uint8_t prev_req_tag = 0;            // v8.14: last REQUANT tag, used as
@@ -1847,7 +1897,7 @@ int sc_main(int argc, char* argv[]) {
                     auto [id, charged] = make_act_load(L, L.dram_in + dram_in_off,
                                                        tile_l1_in, tile_in_size,
                                                        in_tag, wait_slot, 0);
-                    if (pingpong_tiles) {
+                    if (pingpong_tiles && stream_pingpong_tiles) {
                         Microblock mb{};
                         mb.id = tile_id;
                         mb.slot = tile_slot;
@@ -1879,7 +1929,7 @@ int sc_main(int argc, char* argv[]) {
                         Descriptor wd_r = make_udma(L.dram_wgt + wgt_dram_off, tile_l1_wgt,
                                                     wgt_slice_size, /*dir*/ 0, wgt_tag,
                                                     pingpong_tiles ? slot_free_tag[tile_slot] : 0);
-                        if (pingpong_tiles) {
+                        if (pingpong_tiles && stream_pingpong_tiles) {
                             Microblock mb{};
                             mb.id = tile_id;
                             mb.slot = tile_slot;
@@ -1907,7 +1957,7 @@ int sc_main(int argc, char* argv[]) {
                     cb.group  = L.group ? L.group : 1;
                     cb.cluster_mask = 0xFFFF;
                     cb.in_pad_value = L.zp_in_eff;            // v7: TFLite-correct boundary
-                    if (pingpong_tiles) {
+                    if (pingpong_tiles && stream_pingpong_tiles) {
                         Microblock mb{};
                         mb.id = tile_id;
                         mb.slot = tile_slot;
@@ -1940,7 +1990,7 @@ int sc_main(int argc, char* argv[]) {
                                    ? uint32_t(L1_PARAMS + scale_lut_size)
                                    : 0u;
                     rb.corr_per_oc = uint8_t(have_corr && is_dw ? 1 : 0);
-                    if (pingpong_tiles) {
+                    if (pingpong_tiles && stream_pingpong_tiles) {
                         Microblock mb{};
                         mb.id = tile_id;
                         mb.slot = tile_slot;
@@ -1973,7 +2023,7 @@ int sc_main(int argc, char* argv[]) {
                         Descriptor wd = make_udma(tile_l1_out, uint32_t(out_dram_base),
                                                   uint32_t(this_out_bytes),
                                                   /*dir*/ 1, store_tag, req_tag, 0);
-                        if (pingpong_tiles) {
+                        if (pingpong_tiles && stream_pingpong_tiles) {
                             Microblock mb{};
                             mb.id = tile_id;
                             mb.slot = tile_slot;
@@ -2004,7 +2054,7 @@ int sc_main(int argc, char* argv[]) {
                         sb.src_stride = this_oc  * out_elem;
                         sb.dst_stride = L.out_c  * out_elem;
                         sb.num_chunks = uint16_t(this_oh * L.out_w);
-                        if (pingpong_tiles) {
+                        if (pingpong_tiles && stream_pingpong_tiles) {
                             Microblock mb{};
                             mb.id = tile_id;
                             mb.slot = tile_slot;
@@ -2687,6 +2737,9 @@ int sc_main(int argc, char* argv[]) {
                 acc[i].dram_r += 48;
                 acc[i].sram_w += 48;
                 uint8_t prev_st_tag = 0;
+                const bool conservative_int8_rgb_tail =
+                    (L.dtype == DT_INT8x8) && !suppress_producer_store &&
+                    (L.in_h >= 1024) && (L.in_w >= 1024) && (L.in_c <= 4);
 
                 if (tile_oh >= 1) {
                     // Per-tile loop along H.
@@ -2725,6 +2778,7 @@ int sc_main(int argc, char* argv[]) {
                     tc.elem_size = elem_size;
                     tc.h_tiled = true;
                     tc.suppress_store = suppress_producer_store;
+                    tc.stream_descriptors = !conservative_int8_rgb_tail;
                     tc.in_a_l1 = { L1_IN_A_t[0], L1_IN_A_t1 };
                     tc.in_b_l1 = { L1_IN_B_t[0], L1_IN_B_t1 };
                     tc.out_l1  = { L1_OUT_t[0],  L1_OUT_t1  };
@@ -2781,6 +2835,7 @@ int sc_main(int argc, char* argv[]) {
                     tc.elem_size = elem_size;
                     tc.h_tiled = false;
                     tc.suppress_store = suppress_producer_store;
+                    tc.stream_descriptors = !conservative_int8_rgb_tail;
                     tc.in_a_l1 = { L1_IN_A_t0, L1_IN_A_t1 };
                     tc.in_b_l1 = { L1_IN_B_t0, L1_IN_B_t1 };
                     tc.out_l1  = { L1_OUT_t0,  L1_OUT_t1  };
