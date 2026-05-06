@@ -8,6 +8,18 @@
 This file is intentionally short. Finished task logs were removed; use git
 history for old checkpoints.
 
+## Next Priority
+
+First thing next: investigate L1Mesh mesh / NoC overhead.
+
+From the current Hotspot profile, `conflict/fast` is almost flat
+(`~1.00-1.04x`), while `mesh/conflict` is much larger (`~1.6-1.9x`). That means
+the dominant Hotspot penalty is not SRAM bank-port conflict; it is the mesh
+approximation's edge ingress / router output / directed link / local output
+queueing. Treat `profile_hotspot.html` as the starting debug page, sorted by
+`mesh/fast`, and focus first on why transformer-like repeated slices create NoC
+hotspots.
+
 ## Current Layout
 
 `systemc/` now holds simulator/backend code:
