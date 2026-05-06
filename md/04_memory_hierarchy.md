@@ -239,6 +239,16 @@ row_addr       = bank_line % 768
 
 write slot 由 `L1Manager_W` 使用。
 
+Simulator 提供兩種 L1 timing mode：
+
+| Mode | CLI | 用途 |
+|---|---|---|
+| fast estimate | `--l1-timing=fast` | 預設。用 aggregate bandwidth 估算，不逐 bank 計算 port conflict，適合 regression sweep。 |
+| port conflict | `--l1-timing=conflict` | 逐 bank finish-array 模型，read/read 和 write/write 同 bank 會 serialize，適合架構分析。 |
+
+`run_model.py`、`run_ethz_v5.py`、`run_ethz_v6.py`、`run_mlperf.py` 都可轉傳
+`--l1-timing`。
+
 ---
 
 ## 4.6 L1 bank latency 怎麼算

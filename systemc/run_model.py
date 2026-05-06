@@ -15,6 +15,7 @@ Usage:
   ./run_model.py --list                # list bundled models
   ./run_model.py --all                 # try every INT8 model
   ./run_model.py --layer N             # legacy: run only one CONV layer
+  ./run_model.py <pattern> --l1-timing conflict
 """
 
 from __future__ import annotations
@@ -272,12 +273,12 @@ def extract(model: Path, layer: int = 0, verbose: bool = True) -> tuple[bool, st
     return (True, "")
 
 
-def simulate(verbose: bool = True) -> tuple[bool, float, str]:
+def simulate(verbose: bool = True, l1_timing: str = "fast") -> tuple[bool, float, str]:
     if verbose:
         print("[step 3/3] simulate on Mdla7System")
     t0 = time.time()
     r = subprocess.run(
-        [str(TEST_BIN), str(BLOB_PATH)],
+        [str(TEST_BIN), str(BLOB_PATH), f"--l1-timing={l1_timing}"],
         capture_output=True, text=True,
     )
     elapsed = time.time() - t0
@@ -291,7 +292,7 @@ def simulate(verbose: bool = True) -> tuple[bool, float, str]:
     return (r.returncode == 0 and "PASS" in out, elapsed, last)
 
 
-def run_one(model: Path, layer: int = 0) -> bool:
+def run_one(model: Path, layer: int = 0, l1_timing: str = "fast") -> bool:
     if layer == 0:
         print(f"\n========  {model.relative_to(REPO_ROOT)}  ========")
     if not model.exists():
@@ -301,14 +302,14 @@ def run_one(model: Path, layer: int = 0) -> bool:
     if not ok:
         print(f"  layer {layer}: SKIP  (extract failed: {err})")
         return False
-    ok, elapsed, last = simulate()
+    ok, elapsed, last = simulate(l1_timing=l1_timing)
     status = "PASS" if ok else "FAIL"
     if layer == 0:
         print(f"  → {status}   sim wall={elapsed:.2f}s   ({last})")
     return ok
 
 
-def compile_and_run(model: Path) -> bool:
+def compile_and_run(model: Path, l1_timing: str = "fast") -> bool:
     """Default flow: compile entire model → one program.bin → one sc_start.
 
     Exercises the real Host → CommandEngine → CONV/UDMA dispatch chain.
@@ -355,7 +356,7 @@ def compile_and_run(model: Path) -> bool:
     emit(f"[step 3/3] simulate Mdla7System")
     t0 = time.time()
     r = subprocess.run(
-        [str(MODEL_BIN), str(prog_path), "--quiet"],
+        [str(MODEL_BIN), str(prog_path), "--quiet", f"--l1-timing={l1_timing}"],
         capture_output=True, text=True,
     )
     elapsed = time.time() - t0
@@ -1480,7 +1481,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     return paths["html"]
 
 
-def run_all_layers(model: Path) -> bool:
+def run_all_layers(model: Path, l1_timing: str = "fast") -> bool:
     """Run every CONV_2D layer in the model independently and aggregate."""
     print(f"\n========  {model.relative_to(REPO_ROOT)}  (all CONV_2D layers)  ========")
     if not model.exists():
@@ -1499,7 +1500,7 @@ def run_all_layers(model: Path) -> bool:
             print(f"   layer {i:>2d}: SKIP  ({err})")
             skip_n += 1
             continue
-        sim_ok, t, last = simulate(verbose=False)
+        sim_ok, t, last = simulate(verbose=False, l1_timing=l1_timing)
         total_t += t
         # one-line per layer
         meta = _peek_blob_meta(BLOB_PATH) or "?"
@@ -1549,6 +1550,9 @@ def main():
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="Keep .bin and .profile.json intermediates "
                          "(default: deleted on successful run; .csv/.png/.html stay)")
+    ap.add_argument("--l1-timing", choices=("fast", "conflict"), default="fast",
+                    help="L1Mesh timing mode: fast aggregate estimate (default) "
+                         "or per-bank SRAM port conflict model")
     args = ap.parse_args()
     global _keep_intermediate
     _keep_intermediate = bool(args.keep_intermediate)
@@ -1568,7 +1572,7 @@ def main():
                         if not m.name.startswith("._"))
         ok_count, fail_count = 0, 0
         for m in models:
-            if run_one(m):
+            if run_one(m, l1_timing=args.l1_timing):
                 ok_count += 1
             else:
                 fail_count += 1
@@ -1584,11 +1588,11 @@ def main():
     # the user asked for: tflite → host → cmdeng → engines, bit-true + cycles).
     # --layer N reverts to the legacy single-layer path.
     if args.layer:
-        ok = run_one(target, layer=args.layer)
+        ok = run_one(target, layer=args.layer, l1_timing=args.l1_timing)
     elif args.all_layers:
-        ok = run_all_layers(target)              # legacy: N independent sims
+        ok = run_all_layers(target, l1_timing=args.l1_timing)  # legacy: N independent sims
     else:
-        ok = compile_and_run(target)
+        ok = compile_and_run(target, l1_timing=args.l1_timing)
     sys.exit(0 if ok else 1)
 
 

@@ -40,8 +40,8 @@ def normalise_pattern(pat: str) -> str:
     return s
 
 
-def load_metrics() -> dict[str, tuple[str, str, str]]:
-    out: dict[str, tuple[str, str, str]] = {}
+def load_metrics() -> dict[str, tuple[str, str, str, str]]:
+    out: dict[str, tuple[str, str, str, str]] = {}
     for path in (SYSTEMC / "mdla6_ethz_v6_sorted.csv", REGRESSION_CSV):
         if not path.exists():
             continue
@@ -51,9 +51,11 @@ def load_metrics() -> dict[str, tuple[str, str, str]]:
                 pat = (row.get("pattern") or row.get("Pattern") or "").strip()
                 cx = (row.get("mdla6_cx") or row.get("CX") or "").strip()
                 ms = (row.get("mdla7_ms") or "").strip()
+                conflict_ms = (row.get("mdla7_conflict_ms") or
+                               row.get("conflict_ms") or "").strip()
                 if not pat:
                     continue
-                out[normalise_pattern(pat)] = (pat, cx, ms)
+                out[normalise_pattern(pat)] = (pat, cx, ms, conflict_ms)
     return out
 
 
@@ -92,15 +94,26 @@ def collect_rows() -> list[dict[str, object]]:
         stem = html.stem
         if stem.startswith("model_profile") or stem.startswith("._"):
             continue
-        pat, cx, csv_ms = metrics.get(stem, (stem, "", ""))
+        if stem.endswith(".fast") or stem.endswith(".conflict"):
+            continue
+        pat, cx, csv_ms, csv_conflict_ms = metrics.get(stem, (stem, "", "", ""))
         our_ms = load_our_ms(stem, csv_ms)
+        conflict_ms = None
+        if csv_conflict_ms:
+            try:
+                conflict_ms = float(csv_conflict_ms)
+            except ValueError:
+                pass
         ratio = None
+        conflict_ratio = None
         try:
             cx_f = float(cx)
             if cx_f > 0 and our_ms is not None:
                 ratio = our_ms / cx_f
         except ValueError:
             pass
+        if our_ms and our_ms > 0 and conflict_ms is not None:
+            conflict_ratio = conflict_ms / our_ms
         rows.append({
             "pattern": pat,
             "stem": stem,
@@ -108,7 +121,9 @@ def collect_rows() -> list[dict[str, object]]:
             "link": f"output/{html.name}",
             "cx": cx,
             "our_ms": our_ms,
+            "conflict_ms": conflict_ms,
             "ratio": ratio,
+            "conflict_ratio": conflict_ratio,
         })
     def key(row: dict[str, object]):
         ratio = row.get("ratio")
@@ -174,7 +189,9 @@ tr:hover td {{ background:#f4f7fb; }}
       <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
@@ -202,6 +219,18 @@ function fmtRatio(r) {{
   const n = ratioOf(r);
   return n === null ? "" : n.toFixed(2);
 }}
+function conflictRatioOf(r) {{
+  if (r.conflict_ratio !== null && r.conflict_ratio !== undefined && r.conflict_ratio !== "") {{
+    const n = Number(r.conflict_ratio);
+    if (Number.isFinite(n)) return n;
+  }}
+  const conflict = Number(r.conflict_ms), fast = Number(r.our_ms);
+  return Number.isFinite(conflict) && Number.isFinite(fast) && fast > 0 ? conflict / fast : null;
+}}
+function fmtConflictRatio(r) {{
+  const n = conflictRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}}
 function sortRows(xs) {{
   if (!sortState.default) {{
     const key = sortState.key;
@@ -209,7 +238,8 @@ function sortRows(xs) {{
     xs.sort((a,b) => {{
       const av = sortValue(a, key), bv = sortValue(b, key);
       let cmp = 0;
-      if (key === "cx" || key === "our_ms" || key === "ratio") {{
+      if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
+          key === "ratio" || key === "conflict_ratio") {{
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -233,7 +263,9 @@ function sortRows(xs) {{
 }}
 function sortValue(r, key) {{
   if (key === "ratio") return ratioOf(r);
+  if (key === "conflict_ratio") return conflictRatioOf(r);
   if (key === "our_ms") return r.our_ms;
+  if (key === "conflict_ms") return r.conflict_ms;
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
   if (key === "type") return r.type || "";
@@ -261,7 +293,7 @@ function render() {{
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {{
-    const allText = `${{r.pattern}} ${{r.stem || ""}} ${{r.type || ""}} ${{r.cx || ""}} ${{fmtMs(r.our_ms)}} ${{fmtRatio(r)}}`.toLowerCase();
+    const allText = `${{r.pattern}} ${{r.stem || ""}} ${{r.type || ""}} ${{r.cx || ""}} ${{fmtMs(r.our_ms)}} ${{fmtMs(r.conflict_ms)}} ${{fmtRatio(r)}} ${{fmtConflictRatio(r)}}`.toLowerCase();
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${{esc(r.pattern)}}</td>` +
@@ -269,7 +301,9 @@ function render() {{
       `<td>${{esc(r.type || "")}}</td>` +
       `<td class="num">${{esc(r.cx || "")}}</td>` +
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
-      `<td class="num">${{esc(fmtRatio(r))}}</td>`;
+      `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
+      `<td class="num">${{esc(fmtRatio(r))}}</td>` +
+      `<td class="num">${{esc(fmtConflictRatio(r))}}</td>`;
     body.appendChild(tr);
   }}
   document.getElementById("status").textContent =
@@ -293,7 +327,8 @@ function csvParse(text) {{
     if (stem) out[stem] = {{
       pattern: pat,
       cx: row.mdla6_cx || row.CX || "",
-      ms: row.mdla7_ms || ""
+      ms: row.mdla7_ms || "",
+      conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || ""
     }};
   }}
   return out;
@@ -316,6 +351,7 @@ async function refreshFromOutput() {{
     for (const name of names) {{
       const stem = name.replace(/\\.html$/, "");
       let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
+      const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
       try {{
         const p = await fetch(`output/${{stem}}.profile.json`);
         if (p.ok) {{
@@ -330,7 +366,9 @@ async function refreshFromOutput() {{
         type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
-        ratio: null
+        conflict_ms: conflictMs,
+        ratio: null,
+        conflict_ratio: null
       }});
     }}
     if (next.length) rows = next;

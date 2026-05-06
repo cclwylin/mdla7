@@ -7,7 +7,7 @@ emits a CSV next to the regular ETHZ sweep that pairs the MDLA7 sim time
 with the MDLA6 baseline:
 
     output/mdla6_pattern_regression.csv
-        pattern,mdla6_cx,mdla7_ms,status
+        pattern,mdla6_cx,mdla7_ms,mdla7_conflict_ms,status,conflict_status
 
     output/<model>.html
         per-model profile report, matching run_model.py's HTML view
@@ -35,6 +35,8 @@ Usage:
     python3 systemc/run_mdla6_pattern.py --csv-in  <path>   # override input
     python3 systemc/run_mdla6_pattern.py --csv-out <path>   # override output cache
     python3 systemc/run_mdla6_pattern.py --filter mobilenet # substring filter
+    python3 systemc/run_mdla6_pattern.py --limit 5          # only run first 5 rows
+    python3 systemc/run_mdla6_pattern.py --offset 10 --limit 5
     python3 systemc/run_mdla6_pattern.py --include-excluded # debug excluded rows
 """
 
@@ -42,8 +44,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -126,6 +130,20 @@ def _report_exists_for(pattern: str, model_dir: Path) -> bool:
     return _artefact_paths(model_path)["html"].exists()
 
 
+def _mode_paths(model_path: Path, mode: str) -> dict[str, Path]:
+    paths = _artefact_paths(model_path)
+    if mode == "fast":
+        return paths
+    stem = model_path.stem
+    return {
+        "prog":  OUT_DIR / f"{stem}.{mode}.bin",
+        "prof":  OUT_DIR / f"{stem}.{mode}.profile.json",
+        "csv":   OUT_DIR / f"{stem}.{mode}.profile.csv",
+        "gantt": OUT_DIR / f"{stem}.{mode}.profile.png",
+        "html":  OUT_DIR / f"{stem}.{mode}.html",
+    }
+
+
 def _selected_log_lines(compile_stdout: str, sim_stdout: str) -> list[str]:
     lines: list[str] = []
     for ln in (compile_stdout or "").splitlines():
@@ -140,8 +158,8 @@ def _selected_log_lines(compile_stdout: str, sim_stdout: str) -> list[str]:
     return lines
 
 
-def _write_pattern_html(model_path: Path, compile_stdout: str, sim_stdout: str) -> Path:
-    paths = _artefact_paths(model_path)
+def _write_mode_html(model_path: Path, paths: dict[str, Path],
+                     compile_stdout: str, sim_stdout: str) -> Path:
     if not paths["prof"].exists():
         raise RuntimeError(f"profile missing: {paths['prof'].name}")
 
@@ -157,14 +175,108 @@ def _write_pattern_html(model_path: Path, compile_stdout: str, sim_stdout: str) 
                               _selected_log_lines(compile_stdout, sim_stdout))
 
 
-def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | None, str]:
-    """Compile + simulate one model. Returns (pattern, ms, status)."""
+def _write_combined_html(model_path: Path,
+                         fast_html: Path,
+                         conflict_html: Path,
+                         fast_ms: float | None,
+                         conflict_ms: float | None,
+                         fast_status: str,
+                         conflict_status: str) -> Path:
+    paths = _artefact_paths(model_path)
+    ratio = ""
+    if fast_ms and conflict_ms is not None:
+        ratio = f"{conflict_ms / fast_ms:.3f}x"
+    fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
+    conflict_doc = conflict_html.read_text(errors="ignore") if conflict_html.exists() else ""
+    def ms(v: float | None) -> str:
+        return f"{v:.3f} ms" if v is not None else ""
+    doc = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDLA7 profile — {html.escape(model_path.name)} — fast/conflict</title>
+<style>
+body {{ margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       color:#222; background:#f6f7f9; }}
+header {{ position:sticky; top:0; z-index:10; background:#fff; border-bottom:1px solid #d8dde6;
+          padding:12px 18px; box-shadow:0 1px 4px rgba(0,0,0,.04); }}
+h1 {{ margin:0 0 8px; font-size:18px; }}
+.summary {{ display:flex; flex-wrap:wrap; gap:10px 18px; color:#495464; font-size:12px; }}
+.summary b {{ color:#222; }}
+.tabs {{ margin-top:10px; display:flex; gap:8px; }}
+button {{ border:1px solid #c8d0dc; background:#fff; border-radius:5px; padding:5px 10px; cursor:pointer; }}
+button.active {{ background:#1f5fa8; color:#fff; border-color:#1f5fa8; }}
+.pane {{ display:none; padding:0; }}
+.pane.active {{ display:block; }}
+iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; display:block; }}
+</style></head>
+<body>
+<header>
+  <h1>{html.escape(model_path.name)} — fast/conflict profile</h1>
+  <div class="summary">
+    <span><b>fast:</b> {html.escape(ms(fast_ms))} {html.escape(fast_status)}</span>
+    <span><b>conflict:</b> {html.escape(ms(conflict_ms))} {html.escape(conflict_status)}</span>
+    <span><b>conflict/fast:</b> {html.escape(ratio)}</span>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-target="fast">fast</button>
+    <button class="tab" data-target="conflict">conflict</button>
+  </div>
+</header>
+<section id="fast" class="pane active">
+  <iframe title="fast profile" srcdoc="{html.escape(fast_doc, quote=True)}"></iframe>
+</section>
+<section id="conflict" class="pane">
+  <iframe title="conflict profile" srcdoc="{html.escape(conflict_doc, quote=True)}"></iframe>
+</section>
+<script>
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {{
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === btn.dataset.target));
+}}));
+</script>
+</body></html>
+"""
+    paths["html"].write_text(doc)
+    return paths["html"]
+
+
+def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, str]:
+    """Run test_model once. Returns (ms, status, stdout)."""
+    try:
+        sr = subprocess.run(
+            [str(TEST_BIN), str(bin_path), "--quiet", f"--l1-timing={l1_timing}"],
+            capture_output=True, text=True, timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "sim-timeout", ""
+    m = SIM_TIME_RE.search(sr.stdout or "")
+    if sr.returncode != 0 and not m:
+        last = _meaningful_stderr_line(sr.stderr) or f"exit {sr.returncode}"
+        return None, f"sim-fail: {last[:80]}", sr.stdout or ""
+    if not m:
+        return None, "sim-time-missing", sr.stdout or ""
+    cycles = int(m.group(1).replace(",", ""))
+    ms = cycles / 1.9e6   # spec frequency = 1.9 GHz (post-v8.25)
+
+    sm = re.search(r"summary:\s+(\d+)/(\d+)\s+layers PASS,\s+(\d+)\s+FAIL",
+                   sr.stdout or "")
+    if sm:
+        _, _, n_fail = (int(sm.group(k)) for k in (1, 2, 3))
+        status = "ok" if n_fail == 0 else f"{n_fail}-FAIL"
+    else:
+        status = "ok" if sr.returncode == 0 else f"exit {sr.returncode}"
+    return ms, status, sr.stdout or ""
+
+
+def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | None, float | None, str, str]:
+    """Compile + simulate one model in fast and conflict modes."""
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
     if not model_path.exists():
-        return pattern, None, f"missing-tflite: {model_path.name}"
+        return pattern, None, None, f"missing-tflite: {model_path.name}", ""
     paths = _artefact_paths(model_path)
     bin_path = paths["prog"]
+    conflict_paths = _mode_paths(model_path, "conflict")
 
     # ---- compile ----
     if progress:
@@ -175,50 +287,62 @@ def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | 
             capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
-        return pattern, None, "compile-timeout"
+        return pattern, None, None, "compile-timeout", ""
     if cr.returncode != 0:
         last = _meaningful_stderr_line(cr.stderr) or f"exit {cr.returncode}"
         if "Model provided has model identifier" in last:
             last = "corrupt .tflite"
-        return pattern, None, f"compile-fail: {last[:80]}"
+        return pattern, None, None, f"compile-fail: {last[:80]}", ""
 
-    # ---- simulate ----
+    # ---- simulate: fast report path ----
     if progress:
-        progress("simulate")
-    try:
-        sr = subprocess.run(
-            [str(TEST_BIN), str(bin_path), "--quiet"],
-            capture_output=True, text=True, timeout=900,
-        )
-    except subprocess.TimeoutExpired:
-        return pattern, None, "sim-timeout"
-    m = SIM_TIME_RE.search(sr.stdout or "")
-    if sr.returncode != 0 and not m:
-        last = _meaningful_stderr_line(sr.stderr) or f"exit {sr.returncode}"
-        return pattern, None, f"sim-fail: {last[:80]}"
-    if not m:
-        return pattern, None, "sim-time-missing"
-    cycles = int(m.group(1).replace(",", ""))
-    ms = cycles / 1.9e6   # spec frequency = 1.9 GHz (post-v8.25)
-
-    sm = re.search(r"summary:\s+(\d+)/(\d+)\s+layers PASS,\s+(\d+)\s+FAIL",
-                   sr.stdout or "")
-    if sm:
-        n_pass, n_total, n_fail = (int(sm.group(k)) for k in (1, 2, 3))
-        status = "ok" if n_fail == 0 else f"{n_fail}-FAIL"
-    else:
-        status = "ok" if sr.returncode == 0 else f"exit {sr.returncode}"
+        progress("simulate fast")
+    ms, status, fast_stdout = _simulate_one(bin_path, "fast")
 
     if progress:
-        progress("html")
+        progress("html fast")
+    fast_html = OUT_DIR / f"{canonical}.fast.html"
     try:
-        _write_pattern_html(model_path, cr.stdout or "", sr.stdout or "")
+        _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
+        if paths["html"].exists():
+            shutil.copyfile(paths["html"], fast_html)
     except Exception as e:
         if status == "ok":
             status = f"html-fail: {str(e)[:80]}"
         else:
             status = f"{status}; html-fail"
-    return pattern, ms, status
+
+    # ---- simulate: conflict timing only ----
+    if progress:
+        progress("simulate conflict")
+    try:
+        shutil.copyfile(bin_path, conflict_paths["prog"])
+    except OSError:
+        pass
+    conflict_ms, conflict_status, conflict_stdout = _simulate_one(
+        conflict_paths["prog"], "conflict")
+
+    if progress:
+        progress("html conflict")
+    conflict_html = conflict_paths["html"]
+    try:
+        _write_mode_html(model_path, conflict_paths, cr.stdout or "", conflict_stdout)
+    except Exception as e:
+        if conflict_status == "ok":
+            conflict_status = f"html-fail: {str(e)[:80]}"
+        else:
+            conflict_status = f"{conflict_status}; html-fail"
+
+    if progress:
+        progress("html combined")
+    try:
+        if fast_html.exists() and conflict_html.exists():
+            _write_combined_html(model_path, fast_html, conflict_html,
+                                 ms, conflict_ms, status, conflict_status)
+    except Exception as e:
+        if status == "ok":
+            status = f"html-fail: combined {str(e)[:70]}"
+    return pattern, ms, conflict_ms, status, conflict_status
 
 
 def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
@@ -243,7 +367,8 @@ def _load_prior_results(csv_path: Path) -> dict[str, dict]:
     (status == 'ok'). `*-FAIL` / `compile-fail` / `sim-fail` etc. should
     re-run because the underlying source likely changed since."""
     return {p: r for p, r in _load_prior_csv(csv_path).items()
-            if r.get("status") == "ok" and r.get("mdla7_ms")}
+            if r.get("status") == "ok" and r.get("mdla7_ms") and
+            r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms")}
 
 
 def main():
@@ -259,6 +384,10 @@ def main():
                     help="ignore prior --csv-out cache and re-run everything")
     ap.add_argument("--include-excluded", action="store_true",
                     help="include patterns excluded from the default sweep")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="only run the first N selected patterns (0 = no limit)")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="skip the first N selected patterns before applying --limit")
     args = ap.parse_args()
 
     OUT_DIR.mkdir(exist_ok=True)
@@ -284,6 +413,10 @@ def main():
                     _normalise_pattern(pat) in EXCLUDED_PATTERNS):
                 continue
             rows_in.append((pat, cx))
+    if args.offset:
+        rows_in = rows_in[args.offset:]
+    if args.limit:
+        rows_in = rows_in[:args.limit]
 
     if not rows_in:
         excluded = ", ".join(sorted(EXCLUDED_PATTERNS))
@@ -334,7 +467,8 @@ def main():
                 merged.append(prow)
         with csv_path.open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["pattern", "mdla6_cx",
-                                              "mdla7_ms", "status"])
+                                              "mdla7_ms", "mdla7_conflict_ms",
+                                              "status", "conflict_status"])
             w.writeheader()
             w.writerows(merged)
 
@@ -348,15 +482,21 @@ def main():
         if pat in prior_ok and _report_exists_for(pat, Path(args.model_dir)):
             cached = prior_ok[pat]
             cached_ms = cached.get("mdla7_ms", "")
+            cached_conflict_ms = cached.get("mdla7_conflict_ms", "")
             cached_status = cached.get("status", "ok")
+            cached_conflict_status = cached.get("conflict_status", "ok")
             ms_str = f"{float(cached_ms):>10.3f} ms" if cached_ms else f"{'—':>10s}    "
+            cms_str = f"{float(cached_conflict_ms):>10.3f} ms" if cached_conflict_ms else f"{'—':>10s}    "
             _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
-                       f"{ms_str}      cached  {cached_status}")
+                       f"fast={ms_str} conflict={cms_str} cached  "
+                       f"{cached_status}/{cached_conflict_status}")
             rows_out.append({
-                "pattern":   pat,
-                "mdla6_cx":  cx,
-                "mdla7_ms":  cached_ms,
-                "status":    cached_status,
+                "pattern":           pat,
+                "mdla6_cx":          cx,
+                "mdla7_ms":          cached_ms,
+                "mdla7_conflict_ms": cached_conflict_ms,
+                "status":            cached_status,
+                "conflict_status":   cached_conflict_status,
             })
             _checkpoint(rows_out)
             continue
@@ -366,32 +506,41 @@ def main():
             _row_update(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
                         f"{'—':>10s}      ({elapsed:5.1f}s)  running {stage}...")
 
-        pattern, ms, status = run_one(pat, Path(args.model_dir), progress=_progress)
+        pattern, ms, conflict_ms, status, conflict_status = run_one(
+            pat, Path(args.model_dir), progress=_progress)
         elapsed = time.time() - t0
         ms_str  = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
+        cms_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
+                   else f"{'—':>10s}    ")
         _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
-                   f"{ms_str}  ({elapsed:5.1f}s)  {status}")
+                   f"fast={ms_str} conflict={cms_str}  ({elapsed:5.1f}s)  "
+                   f"{status}/{conflict_status}")
         rows_out.append({
-            "pattern":   pat,
-            "mdla6_cx":  cx,
-            "mdla7_ms":  f"{ms:.3f}" if ms is not None else "",
-            "status":    status,
+            "pattern":           pat,
+            "mdla6_cx":          cx,
+            "mdla7_ms":          f"{ms:.3f}" if ms is not None else "",
+            "mdla7_conflict_ms": f"{conflict_ms:.3f}" if conflict_ms is not None else "",
+            "status":            status,
+            "conflict_status":   conflict_status,
         })
         _checkpoint(rows_out)            # durable after each row
         if not args.keep_bin:
             canonical = _normalise_pattern(pat)
-            bin_path = OUT_DIR / f"{canonical}.bin"
-            try:
-                if bin_path.exists():
-                    bin_path.unlink()
-            except OSError:
-                pass
+            for bin_path in (OUT_DIR / f"{canonical}.bin",
+                             OUT_DIR / f"{canonical}.conflict.bin"):
+                try:
+                    if bin_path.exists():
+                        bin_path.unlink()
+                except OSError:
+                    pass
 
     n_ok    = sum(1 for r in rows_out if r["mdla7_ms"])
+    n_conflict_ok = sum(1 for r in rows_out if r.get("mdla7_conflict_ms"))
     n_fail  = len(rows_out) - n_ok
     total_s = time.time() - t_total
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r["mdla7_ms"])
-    print(f"\n==== summary: {n_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
+    print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran, "
+          f"conflict {n_conflict_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
           f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()

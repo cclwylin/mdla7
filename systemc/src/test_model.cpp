@@ -282,10 +282,27 @@ int sc_main(int argc, char* argv[]) {
     sc_core::sc_report_handler::set_actions(sc_core::SC_INFO, sc_core::SC_DO_NOTHING);
 
     if (argc < 2) {
-        std::cerr << "usage: " << argv[0] << " program.bin [--quiet]\n";
+        std::cerr << "usage: " << argv[0]
+                  << " program.bin [--quiet] [--l1-timing=fast|conflict]\n";
         return 2;
     }
-    bool quiet = (argc > 2 && std::string(argv[2]) == "--quiet");
+    bool quiet = false;
+    L1TimingMode l1_timing_mode = L1TimingMode::FastEstimate;
+    for (int ai = 2; ai < argc; ++ai) {
+        const std::string arg = argv[ai];
+        if (arg == "--quiet") {
+            quiet = true;
+        } else if (arg == "--l1-timing=fast" || arg == "--l1-fast") {
+            l1_timing_mode = L1TimingMode::FastEstimate;
+        } else if (arg == "--l1-timing=conflict" || arg == "--l1-conflict") {
+            l1_timing_mode = L1TimingMode::PortConflict;
+        } else {
+            std::cerr << "unknown option: " << arg << "\n"
+                      << "usage: " << argv[0]
+                      << " program.bin [--quiet] [--l1-timing=fast|conflict]\n";
+            return 2;
+        }
+    }
 
     // --- Load program ----
     std::ifstream f(argv[1], std::ios::binary | std::ios::ate);
@@ -308,6 +325,11 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "test_model: " << argv[1] << "  ("
               << N << " layers, v" << hdr->version << ", "
               << file.size() / 1024 << " KB)\n";
+    if (!quiet) {
+        std::cout << "  L1 timing: "
+                  << (l1_timing_mode == L1TimingMode::PortConflict ? "conflict" : "fast")
+                  << "\n";
+    }
 
     // v8.22: size the DRAM model to fit this program's highest-used address.
     // compile_model places weights/inputs/outputs in 3 disjoint regions
@@ -332,7 +354,7 @@ int sc_main(int argc, char* argv[]) {
               << (max_addr / (1024 * 1024)) << " MB)\n";
 
     // --- Build sim, populate DRAM, build descriptor program ----
-    Mdla7System sys("mdla7", static_cast<std::size_t>(dram_bytes));
+    Mdla7System sys("mdla7", static_cast<std::size_t>(dram_bytes), l1_timing_mode);
 
     for (uint32_t i = 0; i < N; ++i) {
         const auto& L = metas[i];
@@ -354,7 +376,7 @@ int sc_main(int argc, char* argv[]) {
     };
 
     auto align64 = [](uint32_t x) -> uint32_t { return (x + 63) & ~uint32_t(63); };
-    constexpr uint32_t L1_BUDGET = L1MESH_BYTES;     // 2 MB (spec §3A.10)
+    constexpr uint32_t L1_BUDGET = L1MESH_BYTES;     // 3 MB (spec §3A.10)
 
     // Helper: build a descriptor with up to two waits.
     auto make_desc = [](OpClass cls, uint8_t dtype, uint8_t signal_tag,

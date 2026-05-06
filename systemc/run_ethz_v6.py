@@ -79,7 +79,7 @@ def _meaningful_stderr_line(stderr: str) -> str:
     return ""
 
 
-def run_one(model: Path) -> tuple[str, float | None, str]:
+def run_one(model: Path, l1_timing: str = "fast") -> tuple[str, float | None, str]:
     """Compile + simulate one model. Returns (pattern, ms, status)."""
     pattern  = model.stem
     bin_path = OUT_DIR / f"{pattern}.bin"
@@ -101,7 +101,7 @@ def run_one(model: Path) -> tuple[str, float | None, str]:
     # ---- simulate ----
     try:
         sr = subprocess.run(
-            [str(TEST_BIN), str(bin_path), "--quiet"],
+            [str(TEST_BIN), str(bin_path), "--quiet", f"--l1-timing={l1_timing}"],
             capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
@@ -137,6 +137,9 @@ def main():
                     help="substring filter on model basename (e.g. 'mobilenet')")
     ap.add_argument("--keep-bin",  action="store_true",
                     help="keep per-model .bin in output/ after the sweep")
+    ap.add_argument("--l1-timing", choices=("fast", "conflict"), default="fast",
+                    help="L1Mesh timing mode: fast aggregate estimate (default) "
+                         "or per-bank SRAM port conflict model")
     args = ap.parse_args()
 
     OUT_DIR.mkdir(exist_ok=True)
@@ -156,7 +159,7 @@ def main():
     t_total = time.time()
     for i, m in enumerate(models, 1):
         t0 = time.time()
-        pattern, ms, status = run_one(m)
+        pattern, ms, status = run_one(m, args.l1_timing)
         elapsed = time.time() - t0
         ms_str  = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         print(f"[{i:>2}/{len(models)}] {pattern:<40s} {ms_str}  ({elapsed:5.1f}s)  {status}")

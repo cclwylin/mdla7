@@ -50,14 +50,16 @@ tr:hover td { background:#f4f7fb; }
       <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","type":"","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":2.051,"ratio":3.3622950819672135},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"0.33","our_ms":0.989,"ratio":2.9969696969696966},{"pattern":"mobilevit_v2_float","stem":"mobilevit_v2_float","type":"Transformer","link":"output/mobilevit_v2_float.html","cx":"2.16","our_ms":6.143,"ratio":2.843981481481481},{"pattern":"efficientnet_b4_quant","stem":"efficientnet_b4_quant","type":"","link":"output/efficientnet_b4_quant.html","cx":"0.96","our_ms":2.645,"ratio":2.7552083333333335},{"pattern":"efficientnet_b4_float","stem":"efficientnet_b4_float","type":"","link":"output/efficientnet_b4_float.html","cx":"2.16","our_ms":5.892,"ratio":2.727777777777778},{"pattern":"srgan_quant","stem":"srgan_quant","type":"","link":"output/srgan_quant.html","cx":"3.4","our_ms":8.845,"ratio":2.601470588235294},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","type":"","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.53,"ratio":2.5500000000000003},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.63,"ratio":2.52},{"pattern":"vit_b16_quant","stem":"vit_b16_quant","type":"Transformer","link":"output/vit_b16_quant.html","cx":"4.83","our_ms":11.867,"ratio":2.456935817805383},{"pattern":"srgan_float","stem":"srgan_float","type":"","link":"output/srgan_float.html","cx":"9.31","our_ms":22.866,"ratio":2.4560687432867883},{"pattern":"sd_diffusion_quant","stem":"sd_diffusion_quant","type":"","link":"output/sd_diffusion_quant.html","cx":"1.61","our_ms":3.867,"ratio":2.401863354037267},{"pattern":"sam_float.cut","stem":"sam_float","type":"Transformer","link":"output/sam_float.html","cx":"3.49","our_ms":7.42,"ratio":2.126074498567335},{"pattern":"mobilebert_quant.cut","stem":"mobilebert_quant","type":"Transformer","link":"output/mobilebert_quant.html","cx":"1.2","our_ms":2.548,"ratio":2.1233333333333335},{"pattern":"esrgan_float","stem":"esrgan_float","type":"","link":"output/esrgan_float.html","cx":"2.22","our_ms":4.52,"ratio":2.0360360360360357},{"pattern":"vsr_quant","stem":"vsr_quant","type":"","link":"output/vsr_quant.html","cx":"0.77","our_ms":1.519,"ratio":1.9727272727272727},{"pattern":"esrgan_quant","stem":"esrgan_quant","type":"","link":"output/esrgan_quant.html","cx":"0.97","our_ms":1.891,"ratio":1.9494845360824742},{"pattern":"dped_int16","stem":"dped_int16","type":"","link":"output/dped_int16.html","cx":"5.42","our_ms":10.315,"ratio":1.9031365313653137},{"pattern":"yolo_v8_float","stem":"yolo_v8_float","type":"","link":"output/yolo_v8_float.html","cx":"2.16","our_ms":3.977,"ratio":1.8412037037037035},{"pattern":"unet_int16","stem":"unet_int16","type":"","link":"output/unet_int16.html","cx":"3.39","our_ms":5.974,"ratio":1.7622418879056048},{"pattern":"xlsr_float","stem":"xlsr_float","type":"","link":"output/xlsr_float.html","cx":"1.14","our_ms":1.987,"ratio":1.742982456140351},{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","type":"","link":"output/deeplab_v3_plus_quant.html","cx":"1.86","our_ms":3.136,"ratio":1.686021505376344},{"pattern":"swin_float","stem":"swin_float","type":"Transformer","link":"output/swin_float.html","cx":"1.68","our_ms":2.809,"ratio":1.6720238095238096},{"pattern":"unet_float","stem":"unet_float","type":"","link":"output/unet_float.html","cx":"4.81","our_ms":8.036,"ratio":1.6706860706860707},{"pattern":"vsr_float","stem":"vsr_float","type":"","link":"output/vsr_float.html","cx":"2.37","our_ms":3.865,"ratio":1.630801687763713},{"pattern":"deeplab_v3_plus_float","stem":"deeplab_v3_plus_float","type":"","link":"output/deeplab_v3_plus_float.html","cx":"4.87","our_ms":7.817,"ratio":1.6051334702258726},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","type":"","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.057,"ratio":1.6015151515151513},{"pattern":"unet_quant","stem":"unet_quant","type":"","link":"output/unet_quant.html","cx":"1.84","our_ms":2.89,"ratio":1.5706521739130435},{"pattern":"sd_decoder_quant","stem":"sd_decoder_quant","type":"","link":"output/sd_decoder_quant.html","cx":"6.53","our_ms":10.22,"ratio":1.5650842266462481},{"pattern":"mv3_depth_float","stem":"mv3_depth_float","type":"","link":"output/mv3_depth_float.html","cx":"1.59","our_ms":2.472,"ratio":1.5547169811320753},{"pattern":"pynet_v2_float","stem":"pynet_v2_float","type":"","link":"output/pynet_v2_float.html","cx":"14.38","our_ms":22.208,"ratio":1.544367176634214},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":0.926,"ratio":1.5433333333333334},{"pattern":"midas_v3_float","stem":"midas_v3_float","type":"","link":"output/midas_v3_float.html","cx":"1.54","our_ms":2.375,"ratio":1.5422077922077921},{"pattern":"imdn_float","stem":"imdn_float","type":"","link":"output/imdn_float.html","cx":"5.58","our_ms":8.6,"ratio":1.5412186379928314},{"pattern":"sd_encoder_quant","stem":"sd_encoder_quant","type":"","link":"output/sd_encoder_quant.html","cx":"3.22","our_ms":4.647,"ratio":1.443167701863354},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","type":"","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":0.812,"ratio":1.3096774193548388},{"pattern":"gpt2_quant.cut","stem":"gpt2_quant","type":"Transformer","link":"output/gpt2_quant.html","cx":"1.44","our_ms":1.87,"ratio":1.2986111111111112},{"pattern":"inception_v3_float","stem":"inception_v3_float","type":"","link":"output/inception_v3_float.html","cx":"1.56","our_ms":1.884,"ratio":1.2076923076923076},{"pattern":"pynet_v2_quant","stem":"pynet_v2_quant","type":"","link":"output/pynet_v2_quant.html","cx":"9.2","our_ms":10.55,"ratio":1.1467391304347827},{"pattern":"llama2_quant.cut","stem":"llama2_quant","type":"Transformer","link":"output/llama2_quant.html","cx":"0.71","our_ms":0.797,"ratio":1.1225352112676057},{"pattern":"imdn_quant","stem":"imdn_quant","type":"","link":"output/imdn_quant.html","cx":"2.46","our_ms":2.74,"ratio":1.1138211382113823},{"pattern":"dped_quant","stem":"dped_quant","type":"","link":"output/dped_quant.html","cx":"23.27","our_ms":24.035,"ratio":1.0328749462827675},{"pattern":"esrgan__int16","stem":"esrgan_int16","type":"","link":"output/esrgan_int16.html","cx":"3.05","our_ms":3.125,"ratio":1.0245901639344264},{"pattern":"mobilenet_v3_b4_float","stem":"mobilenet_v3_b4_float","type":"","link":"output/mobilenet_v3_b4_float.html","cx":"2.13","our_ms":2.052,"ratio":0.9633802816901409},{"pattern":"microisp_float","stem":"microisp_float","type":"","link":"output/microisp_float.html","cx":"8.39","our_ms":7.723,"ratio":0.9205005959475565},{"pattern":"swin_quant","stem":"swin_quant","type":"Transformer","link":"output/swin_quant.html","cx":"1.0","our_ms":0.846,"ratio":0.846},{"pattern":"sam_quant.cut","stem":"sam_quant","type":"Transformer","link":"output/sam_quant.html","cx":"2.03","our_ms":1.694,"ratio":0.8344827586206897},{"pattern":"microisp_quant","stem":"microisp_quant","type":"","link":"output/microisp_quant.html","cx":"5.42","our_ms":4.519,"ratio":0.8337638376383765},{"pattern":"mobilenet_v3_b4_quant","stem":"mobilenet_v3_b4_quant","type":"","link":"output/mobilenet_v3_b4_quant.html","cx":"0.77","our_ms":0.63,"ratio":0.8181818181818181},{"pattern":"microisp_int16","stem":"microisp_int16","type":"","link":"output/microisp_int16.html","cx":"7.11","our_ms":3.743,"ratio":0.5264416315049226},{"pattern":"resnet_float","stem":"resnet_float","type":"","link":"output/resnet_float.html","cx":"0.02","our_ms":0.01,"ratio":0.5},{"pattern":"resnet_quant","stem":"resnet_quant","type":"","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.005,"ratio":0.25},{"pattern":"ad01_fp32","stem":"ad01_fp32","type":"","link":"output/ad01_fp32.html","cx":"","our_ms":0.006836315789473684,"ratio":null},{"pattern":"kws_ref_model_float32","stem":"kws_ref_model_float32","type":"","link":"output/kws_ref_model_float32.html","cx":"","our_ms":0.00211,"ratio":null},{"pattern":"pretrainedResnet_large_float","stem":"pretrainedResnet_large_float","type":"","link":"output/pretrainedResnet_large_float.html","cx":"","our_ms":0.021973157894736844,"ratio":null},{"pattern":"vww_96_float","stem":"vww_96_float","type":"","link":"output/vww_96_float.html","cx":"","our_ms":0.009929473684210526,"ratio":null}];
+const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","type":"","link":"output/mobilenet_v3_float.html","cx":"0.61","our_ms":1.929,"conflict_ms":1.955,"ratio":3.1622950819672133,"conflict_ratio":1.013478486262312},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"0.33","our_ms":0.91,"conflict_ms":1.005,"ratio":2.7575757575757573,"conflict_ratio":1.1043956043956042},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","type":"","link":"output/yolo_v8_quant.html","cx":"0.6","our_ms":1.515,"conflict_ms":1.543,"ratio":2.525,"conflict_ratio":1.0184818481848186},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"0.25","our_ms":0.528,"conflict_ms":0.532,"ratio":2.112,"conflict_ratio":1.0075757575757576},{"pattern":"midas_v3_quant","stem":"midas_v3_quant","type":"","link":"output/midas_v3_quant.html","cx":"0.66","our_ms":1.071,"conflict_ms":1.085,"ratio":1.6227272727272726,"conflict_ratio":1.0130718954248366},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"0.6","our_ms":0.878,"conflict_ms":0.888,"ratio":1.4633333333333334,"conflict_ratio":1.0113895216400912},{"pattern":"inception_v3_quant","stem":"inception_v3_quant","type":"","link":"output/inception_v3_quant.html","cx":"0.62","our_ms":0.782,"conflict_ms":0.784,"ratio":1.261290322580645,"conflict_ratio":1.0025575447570332},{"pattern":"llama2_quant.cut","stem":"llama2_quant","type":"Transformer","link":"output/llama2_quant.html","cx":"0.71","our_ms":0.788,"conflict_ms":0.796,"ratio":1.1098591549295775,"conflict_ratio":1.0101522842639594},{"pattern":"resnet_float","stem":"resnet_float","type":"","link":"output/resnet_float.html","cx":"0.02","our_ms":0.01,"conflict_ms":0.01,"ratio":0.5,"conflict_ratio":1.0},{"pattern":"resnet_quant","stem":"resnet_quant","type":"","link":"output/resnet_quant.html","cx":"0.02","our_ms":0.005,"conflict_ms":0.005,"ratio":0.25,"conflict_ratio":1.0}];
 let rows = EMBEDDED_ROWS.slice();
 let sortState = { key: "ratio", dir: "desc", default: true };
 
@@ -78,6 +80,18 @@ function fmtRatio(r) {
   const n = ratioOf(r);
   return n === null ? "" : n.toFixed(2);
 }
+function conflictRatioOf(r) {
+  if (r.conflict_ratio !== null && r.conflict_ratio !== undefined && r.conflict_ratio !== "") {
+    const n = Number(r.conflict_ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const conflict = Number(r.conflict_ms), fast = Number(r.our_ms);
+  return Number.isFinite(conflict) && Number.isFinite(fast) && fast > 0 ? conflict / fast : null;
+}
+function fmtConflictRatio(r) {
+  const n = conflictRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
 function sortRows(xs) {
   if (!sortState.default) {
     const key = sortState.key;
@@ -85,7 +99,8 @@ function sortRows(xs) {
     xs.sort((a,b) => {
       const av = sortValue(a, key), bv = sortValue(b, key);
       let cmp = 0;
-      if (key === "cx" || key === "our_ms" || key === "ratio") {
+      if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
+          key === "ratio" || key === "conflict_ratio") {
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -109,7 +124,9 @@ function sortRows(xs) {
 }
 function sortValue(r, key) {
   if (key === "ratio") return ratioOf(r);
+  if (key === "conflict_ratio") return conflictRatioOf(r);
   if (key === "our_ms") return r.our_ms;
+  if (key === "conflict_ms") return r.conflict_ms;
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
   if (key === "type") return r.type || "";
@@ -137,7 +154,7 @@ function render() {
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {
-    const allText = `${r.pattern} ${r.stem || ""} ${r.type || ""} ${r.cx || ""} ${fmtMs(r.our_ms)} ${fmtRatio(r)}`.toLowerCase();
+    const allText = `${r.pattern} ${r.stem || ""} ${r.type || ""} ${r.cx || ""} ${fmtMs(r.our_ms)} ${fmtMs(r.conflict_ms)} ${fmtRatio(r)} ${fmtConflictRatio(r)}`.toLowerCase();
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(r.pattern)}</td>` +
@@ -145,7 +162,9 @@ function render() {
       `<td>${esc(r.type || "")}</td>` +
       `<td class="num">${esc(r.cx || "")}</td>` +
       `<td class="num">${esc(fmtMs(r.our_ms))}</td>` +
-      `<td class="num">${esc(fmtRatio(r))}</td>`;
+      `<td class="num">${esc(fmtMs(r.conflict_ms))}</td>` +
+      `<td class="num">${esc(fmtRatio(r))}</td>` +
+      `<td class="num">${esc(fmtConflictRatio(r))}</td>`;
     body.appendChild(tr);
   }
   document.getElementById("status").textContent =
@@ -169,7 +188,8 @@ function csvParse(text) {
     if (stem) out[stem] = {
       pattern: pat,
       cx: row.mdla6_cx || row.CX || "",
-      ms: row.mdla7_ms || ""
+      ms: row.mdla7_ms || "",
+      conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || ""
     };
   }
   return out;
@@ -192,6 +212,7 @@ async function refreshFromOutput() {
     for (const name of names) {
       const stem = name.replace(/\.html$/, "");
       let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
+      const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
       try {
         const p = await fetch(`output/${stem}.profile.json`);
         if (p.ok) {
@@ -206,7 +227,9 @@ async function refreshFromOutput() {
         type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
-        ratio: null
+        conflict_ms: conflictMs,
+        ratio: null,
+        conflict_ratio: null
       });
     }
     if (next.length) rows = next;

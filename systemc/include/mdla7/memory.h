@@ -29,6 +29,9 @@
 // v8.32: L1Mesh SRAM runs at 1.3 GHz while the simulator cycle axis remains
 //        core-clock based at 1.9 GHz. One SRAM beat therefore costs
 //        1.9 / 1.3 core cycles.
+// v8.33: selectable L1 timing:
+//        FastEstimate = aggregate 16-bank bandwidth estimate (default);
+//        PortConflict = per-bank finish-array SRAM port conflict model.
 
 #include <systemc>
 #include <cstdint>
@@ -39,21 +42,30 @@
 
 namespace mdla7 {
 
+enum class L1TimingMode {
+    FastEstimate,
+    PortConflict,
+};
+
 class L1Mesh : public sc_core::sc_module {
 public:
     SC_HAS_PROCESS(L1Mesh);
-    L1Mesh(sc_core::sc_module_name nm, std::size_t bytes = L1MESH_BYTES)
-      : sc_module(nm), mem(bytes, 0) {}
+    L1Mesh(sc_core::sc_module_name nm,
+           std::size_t bytes = L1MESH_BYTES,
+           L1TimingMode timing_mode = L1TimingMode::FastEstimate)
+      : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {}
 
     void read(uint32_t offset, void* dst, uint32_t n) {
         std::memcpy(dst, &mem[offset], n);
-        if (in_process()) impose_bank_latency(read_bank_finish_, offset, n);
+        if (in_process()) impose_latency(read_bank_finish_, offset, n);
     }
     void write(uint32_t offset, const void* src, uint32_t n) {
         std::memcpy(&mem[offset], src, n);
-        if (in_process()) impose_bank_latency(write_bank_finish_, offset, n);
+        if (in_process()) impose_latency(write_bank_finish_, offset, n);
     }
     std::size_t size() const { return mem.size(); }
+    void set_timing_mode(L1TimingMode mode) { timing_mode_ = mode; }
+    L1TimingMode timing_mode() const { return timing_mode_; }
 
 private:
     static constexpr unsigned N_BANKS         = 16;
@@ -68,7 +80,26 @@ private:
         return sc_core::sc_get_current_process_handle().valid();
     }
 
-    // v3.2: model 16 banks. An access spanning multiple banks accumulates
+    void impose_latency(sc_core::sc_time bank_finish[N_BANKS],
+                        uint32_t offset, uint32_t bytes) {
+        if (timing_mode_ == L1TimingMode::PortConflict)
+            impose_bank_latency(bank_finish, offset, bytes);
+        else
+            impose_fast_latency(bytes);
+    }
+
+    // Fast mode: aggregate-bandwidth estimate. It preserves the 16-bank
+    // sequential peak but skips per-stripe finish-array conflict accounting.
+    void impose_fast_latency(uint32_t bytes) {
+        const uint32_t aggregate_bpc = N_BANKS * BYTES_PER_CYCLE;
+        const double beats = double((bytes + aggregate_bpc - 1) / aggregate_bpc);
+        const sc_core::sc_time access(
+            beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
+            sc_core::SC_NS);
+        if (access != sc_core::SC_ZERO_TIME) sc_core::wait(access);
+    }
+
+    // Conflict mode: model 16 banks. An access spanning multiple banks accumulates
     // their per-bank wait times. The longest bank latency wins (parallel),
     // since simultaneous bank accesses overlap.
     void impose_bank_latency(sc_core::sc_time bank_finish[N_BANKS],
@@ -95,6 +126,7 @@ private:
         if (max_finish > now) sc_core::wait(max_finish - now);
     }
 
+    L1TimingMode timing_mode_;
     std::vector<uint8_t> mem;
     sc_core::sc_time read_bank_finish_ [N_BANKS];
     sc_core::sc_time write_bank_finish_[N_BANKS];

@@ -171,6 +171,17 @@ write peak is also `256 B/SRAM-cycle` if read/write are independent.
 The 16R/16W edge ports are therefore NoC ingress/ejection capacity, while the
 per-bank SRAM ports remain the hard backend bandwidth limiter.
 
+Simulator timing modes:
+
+| Mode | CLI | Meaning |
+|---|---|---|
+| Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
+| Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read and write/write to the same bank serialize through bank finish arrays, so cycles can increase when traffic collides. |
+
+The fast mode is intended for regular model sweeps. The conflict mode is for
+architecture studies where L1 bank/port contention matters more than simulation
+wall time.
+
 ### 3.3 UDMA ↔ DRAM（白線 = 1T 模型假設）
 
 - 真實 HW 上仍是 AXI / DDR controller，但 v0 SystemC 模型假設 **DRAM 為零延遲、單拍完成 R / W**。
