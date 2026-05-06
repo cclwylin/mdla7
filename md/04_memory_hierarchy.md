@@ -1,0 +1,1132 @@
+# 第 4 章 — Memory Hierarchy：DRAM、UDMA、L1Mesh
+
+> 上一章：[第 3 章 — Descriptor ISA 與 Dependency Tag](03_descriptor_tag.md)
+
+本章你會學到什麼：
+
+- MDLA7 的 address space 如何區分 L1Mesh 與 DRAM。
+- `L1Manager` 在 simulator 裡扮演什麼角色。
+- L1Mesh 16 banks、16-byte stripe、256 B/cycle peak 是什麼意思。
+- DRAM row hit / row miss / refresh model 如何影響 cycle。
+- UDMA 六種 mode 如何搬資料。
+- memory hierarchy 如何和 descriptor tag、tiling、cycle accuracy 連在一起。
+
+---
+
+## 4.1 先用一張文字圖理解
+
+MDLA7 的 memory path 可以先看成：
+
+```text
+Compute Engines
+  CONV / Requant / EWE / POOL
+        |
+        v
+L1Manager
+        |
+        +--> L1Mesh SRAM  0x00000000 - 0x001FFFFF
+        |
+        +--> DRAM         0x10000000 - 0xFFFFFFFF
+
+UDMA 也透過 L1Manager 搬資料
+```
+
+所有 engine 都不直接碰 `L1Mesh` 或 `Dram`，而是透過 [`L1Manager`](../systemc/include/mdla7/memory.h)。這讓 simulator 的 memory latency 入口集中：
+
+```cpp
+l1mgr.read(addr, dst, n);
+l1mgr.write(addr, src, n);
+```
+
+只要 address 在 L1 range，就走 L1Mesh；address 在 DRAM range，就走 Dram。
+
+---
+
+## 4.2 必讀檔案
+
+本章主要看：
+
+| 檔案 | 重點 |
+|---|---|
+| [`memory.h`](../systemc/include/mdla7/memory.h) | L1Mesh、Dram、L1Manager |
+| [`udma.h`](../systemc/include/mdla7/udma.h) | UDMA descriptor execution |
+| [`descriptor.h`](../systemc/include/mdla7/descriptor.h) | address range helper、UdmaBody |
+| [`test_model.cpp`](../systemc/src/test_model.cpp) | L1 address allocation、DRAM tensor layout、UDMA descriptor emission |
+| [`spec/spec.md`](../spec/spec.md) | memory bandwidth 與 architecture target |
+
+讀法建議：
+
+1. 從 `descriptor.h` 的 `L1MESH_BASE` / `DRAM_BASE` 開始。
+2. 讀 `L1Manager::read()` / `write()`。
+3. 讀 `L1Mesh::impose_bank_latency()`。
+4. 讀 `Dram::impose_latency()`。
+5. 讀 `Udma::run()` 和各個 `do_*()`。
+
+這個順序會先建立「位址去哪裡」，再理解「時間怎麼算」。
+
+---
+
+## 4.3 Address space
+
+MDLA7 simulator 的 address space 在 [`descriptor.h`](../systemc/include/mdla7/descriptor.h) 定義：
+
+```cpp
+constexpr uint32_t L1MESH_BASE  = 0x0000'0000;
+constexpr uint32_t L1MESH_END   = 0x001F'FFFF;
+constexpr uint32_t L1MESH_BYTES = L1MESH_END + 1;
+constexpr uint32_t DRAM_BASE    = 0x1000'0000;
+constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;
+```
+
+換成表格：
+
+| Range | 大小 / 意義 |
+|---|---|
+| `0x00000000` 到 `0x001FFFFF` | L1Mesh，2 MB on-chip SRAM |
+| `0x10000000` 到 `0xFFFFFFFF` | DRAM address space |
+| 其他 range | illegal，`L1Manager` 會報錯 |
+
+helper：
+
+```cpp
+inline bool addr_in_l1mesh(uint32_t a) { return a <= L1MESH_END; }
+inline bool addr_in_dram(uint32_t a) { return a >= DRAM_BASE; }
+```
+
+初學 debug memory 問題時，第一步就是把 address 分類：
+
+```text
+0x000xxxxx -> L1
+0x100xxxxx -> DRAM
+其他       -> 可疑
+```
+
+---
+
+## 4.4 L1Manager：thin router，不是完整 arbiter
+
+`L1Manager` 目前是一個 thin pass-through router：
+
+```cpp
+void read(uint32_t addr, void* dst, uint32_t n) {
+    if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, n);
+    else if (addr_in_dram(addr)) dram_.read(addr, dst, n);
+    else SC_REPORT_ERROR("L1Manager", "addr out of range");
+}
+```
+
+它負責：
+
+| 功能 | 目前狀態 |
+|---|---|
+| address decode | implemented |
+| route to L1Mesh / DRAM | implemented |
+| out-of-range error | implemented |
+| multi-master arbitration | simplified |
+| QoS / priority | not modelled |
+| cache coherency | not relevant，這裡是 scratchpad |
+
+換句話說，它不是一個完整硬體 interconnect model。真正的 latency 主要在 L1Mesh / DRAM 裡 imposing wait。
+
+這個設計對 simulator 有好處：
+
+- engine code 不需要知道某個 address 在 L1 還是 DRAM。
+- UDMA mode 可以用同一套 `read()` / `write()`。
+- future 如果要加 arbitration，可以集中在 `L1Manager`。
+
+---
+
+## 4.5 L1Mesh 的基本 spec
+
+L1Mesh 是 2 MB SRAM scratchpad。
+
+目前 model：
+
+| 參數 | 值 |
+|---|---:|
+| 容量 | 2 MB |
+| bank 數 | 16 |
+| stripe | 16 bytes |
+| per-bank bandwidth | 16 B/cycle |
+| sequential peak | 16 banks × 16 B/cycle = 256 B/cycle |
+| SRAM clock | 1.3 GHz |
+| core clock axis | 1.9 GHz |
+
+source 裡的 constants：
+
+```cpp
+static constexpr unsigned N_BANKS = 16;
+static constexpr unsigned BANK_STRIDE = 16;
+static constexpr unsigned BYTES_PER_CYCLE = 16;
+static constexpr double CORE_CLOCK_GHZ = 1.9;
+static constexpr double SRAM_CLOCK_GHZ = 1.3;
+```
+
+最重要的一句：
+
+```text
+Sequential access fans out across all 16 banks.
+```
+
+因為 stripe 是 16 bytes：
+
+```text
+address 0x0000 - 0x000F -> bank 0
+address 0x0010 - 0x001F -> bank 1
+address 0x0020 - 0x002F -> bank 2
+...
+address 0x00F0 - 0x00FF -> bank 15
+address 0x0100 - 0x010F -> bank 0
+```
+
+連續大塊資料可以分散到 16 banks，理想 peak 就是 256 B/cycle。
+
+---
+
+## 4.6 L1 bank latency 怎麼算
+
+`L1Mesh::read()` 和 `write()` 先 `memcpy`，再呼叫 `impose_bank_latency()`：
+
+```cpp
+std::memcpy(dst, &mem[offset], n);
+if (in_process()) impose_bank_latency(read_bank_finish_, offset, n);
+```
+
+這表示 functional data 先被複製，然後 simulation time 被推進。對 single-thread deterministic simulator 來說，這是常見寫法。
+
+latency model 的精神：
+
+```text
+每個 bank 有自己的 finish time。
+同一個 bank 的 access 會 serialize。
+不同 bank 的 access 可以 parallel。
+一個 request 的完成時間是所有 touched banks 的 max finish。
+```
+
+pseudo code：
+
+```cpp
+for each 16-byte stripe touched:
+    bank = (addr / 16) % 16
+    start = max(bank_finish[bank], now)
+    finish = start + beat_time
+    bank_finish[bank] = finish
+    max_finish = max(max_finish, finish)
+
+wait(max_finish - now)
+```
+
+如果一筆 access 是連續 256 bytes，它剛好 touch 16 banks：
+
+```text
+bank 0..15 各拿 16 bytes
+理想上約 1 SRAM beat
+換成 core cycle 要乘 1.9 / 1.3
+```
+
+如果一筆 access 每次都打同一個 bank，例如 stride 剛好讓地址落在同 bank：
+
+```text
+bank conflict 增加
+parallelism 下降
+latency 上升
+```
+
+這就是 banked SRAM model 想捕捉的現象。
+
+---
+
+## 4.7 SRAM clock 與 core clock 的縮放
+
+Simulator 的時間軸用 core clock cycle 表示，註解裡提到 core clock 是 1.9 GHz。但 L1Mesh SRAM 是 1.3 GHz。
+
+因此一個 SRAM beat 對 core cycle 的成本是：
+
+```text
+CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ = 1.9 / 1.3 ~= 1.46 core cycles
+```
+
+source 裡：
+
+```cpp
+const sc_core::sc_time access(
+    beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
+    sc_core::SC_NS);
+```
+
+這裡 `SC_NS` 在此 simulator 裡被當成抽象 cycle unit。你會看到很多地方用：
+
+```cpp
+wait(cycles, sc_core::SC_NS);
+```
+
+所以讀 code 時不要把它理解成真實 nanosecond，而要理解成：
+
+```text
+1 SC_NS ~= 1 simulator cycle
+```
+
+再由外層用 1.9 GHz 換算成 ms。
+
+---
+
+## 4.8 L1 read / write 分開計算
+
+`L1Mesh` 裡有兩組 bank finish time：
+
+```cpp
+sc_core::sc_time read_bank_finish_[N_BANKS];
+sc_core::sc_time write_bank_finish_[N_BANKS];
+```
+
+這代表 read 和 write 不是用同一組 bank port serialize。
+
+對 model 的意義：
+
+| 行為 | 模型 |
+|---|---|
+| read-read 同 bank | 會 serialize |
+| write-write 同 bank | 會 serialize |
+| read-write 同 bank | 目前不共用同一 finish array，較樂觀 |
+| different banks | 可 overlap |
+
+這反映 spec 裡 L1_Manager 到 L1Mesh 有讀寫 lane 的概念，但不是 full port-accurate model。
+
+如果未來要更接近 RTL，可以補：
+
+- read / write 同 bank port conflict。
+- engine master arbitration。
+- burst alignment penalty。
+- outstanding transaction depth。
+
+目前的 model 已足夠讓 tiling、bank conflict、DRAM pressure 對 performance 有一階效果。
+
+---
+
+## 4.9 DRAM model 的基本 spec
+
+`Dram` model 是 LPDDR-class abstract model。
+
+目前 constants：
+
+| 參數 | 值 |
+|---|---:|
+| default capacity | 256 MB |
+| row size | 8 KB |
+| banks | 16 |
+| bandwidth | 48 B/cycle |
+| row miss penalty | 50 cycles |
+| refresh period | 7800 cycles |
+| refresh stall | 200 cycles |
+
+註解中的 bandwidth 推導：
+
+```text
+LPDDR5X-10667 dual x32:
+10.667 Gbps/pin * 32 pins * 2 channels / 8 = 85.3 GB/s
+85.3 GB/s / 1.9 G cycles/s ~= 44.9 B/cycle
+round to 48 B/cycle
+```
+
+所以 DRAM sequential access 的理想 bandwidth 是 48 B/cycle，比 L1Mesh sequential peak 256 B/cycle 小很多。
+
+這也是為什麼 NPU performance 很重視：
+
+- L1 reuse
+- tiling
+- weight / activation locality
+- L1-resident handoff
+- avoiding redundant store/read
+
+---
+
+## 4.10 DRAM row hit / row miss
+
+DRAM model 追蹤每個 bank 目前 open row：
+
+```cpp
+int32_t open_row_[N_BANKS];
+```
+
+address 會被拆成：
+
+```cpp
+off  = addr - DRAM_BASE;
+bank = (off / ROW_BYTES) % N_BANKS;
+row  = (off / ROW_BYTES) / N_BANKS;
+```
+
+如果同一個 bank 再次讀寫相同 row：
+
+```text
+row hit -> no row miss penalty
+```
+
+如果 row 不同：
+
+```text
+row miss -> +50 cycles
+```
+
+access bandwidth 本身：
+
+```cpp
+access = ceil(bytes / 48) cycles
+```
+
+總 latency：
+
+```text
+finish = start + row_miss_penalty_if_any + ceil(bytes / 48)
+```
+
+這是一個簡化模型，但可以捕捉兩件重要事情：
+
+| 現象 | 模型反映 |
+|---|---|
+| 大塊連續讀寫比較有效 | row hit 多，bandwidth 主導 |
+| 小碎片、跳躍讀寫比較慢 | row miss penalty 比例變大 |
+
+---
+
+## 4.11 DRAM refresh
+
+DRAM 需要週期性 refresh。model 裡：
+
+```cpp
+REFRESH_PERIOD = 7800 cycles
+REFRESH_STALL  = 200 cycles
+```
+
+當 access start time 跨過新的 refresh period：
+
+```cpp
+start += missed * REFRESH_STALL;
+```
+
+refresh overhead 比例約：
+
+```text
+200 / 7800 ~= 2.6%
+```
+
+這個數字不會主導每個 layer，但長模型、DRAM-heavy workload 會累積。
+
+debug performance 時，如果你看到某些 UDMA access 比單純 bytes / 48 更慢，可能包含：
+
+- row miss
+- refresh stall
+- previous DRAM access serialization
+
+---
+
+## 4.12 DRAM 目前是 single finish time
+
+`Dram` 裡有一個 `last_finish_`：
+
+```cpp
+sc_core::sc_time last_finish_{sc_core::SC_ZERO_TIME};
+```
+
+每次 access start：
+
+```cpp
+start = max(last_finish_, now)
+```
+
+這代表 DRAM requests 在 model 裡大致 serialize。雖然它有 16 banks 與 open rows，但沒有完整 bank-level parallel outstanding model。
+
+這是比較保守還是比較樂觀？
+
+| 面向 | 影響 |
+|---|---|
+| 沒有多 request overlap | 對高併發 DRAM workload 較保守 |
+| row hit / row miss 有建模 | 對 access locality 有區分 |
+| fixed 48 B/cycle | 對 burst efficiency 做簡化 |
+| refresh 有建模 | 對長時間 bandwidth 有 overhead |
+
+對目前 SystemC simulator，這是合理的一階模型。未來若要更接近 DRAM controller，可加入 per-bank finish time、read/write turnaround、burst length、outstanding queue。
+
+---
+
+## 4.13 UDMA 的角色
+
+UDMA 是 DRAM 與 L1Mesh 之間的 data mover，也支援一些 layout transform。
+
+在 descriptor graph 裡，UDMA 常見位置：
+
+```text
+DRAM input / weights
+        |
+        v
+UDMA read
+        |
+        v
+L1 tensors
+        |
+        v
+CONV / EWE / POOL
+        |
+        v
+L1 output
+        |
+        v
+UDMA write
+        |
+        v
+DRAM output
+```
+
+UDMA descriptor 的 `direction`：
+
+| direction | 語意 | profile lane |
+|---:|---|---|
+| 0 | DRAM 到 L1，load | `tasks_read` |
+| 1 | L1 到 DRAM，store | `tasks_write` |
+
+UDMA implementation 裡會把 read / write busy time 分開記：
+
+```cpp
+busy_time_read
+busy_time_write
+tasks_read
+tasks_write
+```
+
+這對 profile 很有用，因為 load 和 store 對 pipeline 的意義不同：
+
+- load 餵 compute。
+- store drain output，通常可以背景化。
+
+---
+
+## 4.14 UDMA descriptor 的共同欄位
+
+`UdmaBody`：
+
+| 欄位 | 說明 |
+|---|---|
+| `mode` | UDMA mode |
+| `direction` | 0 read / 1 write |
+| `src_addr` | source address |
+| `dst_addr` | destination address |
+| `length` | bytes；依 mode 有不同語意 |
+| `src_stride` | source stride bytes |
+| `dst_stride` | destination stride bytes |
+| `num_chunks` | row / chunk count |
+| `idx_table_addr` | gather / concat table |
+| `slice_begin[4]` | slice / d2s metadata |
+| `slice_end[4]` | slice metadata |
+
+UDMA 的 `run()`：
+
+```cpp
+DescriptorBody body = cfg_in.read();
+const UdmaBody& u = body.udma;
+
+switch (u.mode) {
+case UM_LINEAR_COPY:    do_linear(u); break;
+case UM_STRIDED_2D:     do_strided(u); break;
+case UM_INDEXED_GATHER: do_gather(u); break;
+case UM_SCATTER_CONCAT: do_concat(u); break;
+case UM_STRIDED_SLICE:  do_slice(u); break;
+case UM_DEPTH_TO_SPACE: do_depth_to_space(u); break;
+}
+done_tag_out.write(0);
+```
+
+UDMA 本身只加 16-cycle decode startup：
+
+```cpp
+void wait_bytes(uint64_t) {
+    wait(16, sc_core::SC_NS);
+}
+```
+
+真正 memory bandwidth cost 由 `l1mgr.read()` / `write()` 裡的 L1Mesh / Dram 來 impose。
+
+---
+
+## 4.15 UDMA mode 0：LINEAR_COPY
+
+最單純的 mode：
+
+```text
+copy length bytes from src_addr to dst_addr
+```
+
+source shape：
+
+```cpp
+std::vector<uint8_t> buf(u.length);
+l1mgr.read(u.src_addr, buf.data(), u.length);
+l1mgr.write(u.dst_addr, buf.data(), u.length);
+wait_bytes(u.length);
+```
+
+常見用途：
+
+| 用途 | 方向 |
+|---|---|
+| input tensor load | DRAM -> L1 |
+| weight tile load | DRAM -> L1 |
+| output tensor store | L1 -> DRAM |
+| params blob load | DRAM -> L1 或直接放 L1 |
+
+debug LINEAR_COPY：
+
+| 檢查 | 說明 |
+|---|---|
+| `length` 是否等於 tensor bytes | dtype 會影響 byte count |
+| source / destination 是否重疊 | L1 scratchpad reuse 時要小心 |
+| direction 是否符合語意 | 雖非合法性必要，但 profile 會依它分 lane |
+| wait tag 是否保護 consumer | compute 不可早於 load |
+
+---
+
+## 4.16 UDMA mode 1：STRIDED_2D
+
+STRIDED_2D 用來複製多列資料：
+
+```text
+for r in rows:
+    copy length bytes
+    src += src_stride
+    dst += dst_stride
+```
+
+source：
+
+```cpp
+for (uint16_t r = 0; r < u.num_chunks; ++r) {
+    l1mgr.read(u.src_addr + r * u.src_stride, buf.data(), u.length);
+    l1mgr.write(u.dst_addr + r * u.dst_stride, buf.data(), u.length);
+}
+```
+
+常見用途：
+
+- 只搬 tensor 的一個 rectangular tile。
+- 從 full tensor row 裡取部分 columns / channels。
+- 把 compact tile 寫回有 stride 的 destination layout。
+
+你可以把欄位理解成：
+
+| 欄位 | 語意 |
+|---|---|
+| `length` | 每 row 要複製多少 bytes |
+| `num_chunks` | row 數 |
+| `src_stride` | source 下一 row 距離 |
+| `dst_stride` | destination 下一 row 距離 |
+
+常見 bug：
+
+| 現象 | 可能原因 |
+|---|---|
+| 每 row 開頭正確但下一 row 錯 | stride 設錯 |
+| tile 只對第一 row | `num_chunks` 錯 |
+| channel tail 錯 | `length` 沒乘 dtype bytes 或 channel count |
+
+---
+
+## 4.17 UDMA mode 2：INDEXED_GATHER
+
+INDEXED_GATHER 先讀 index table：
+
+```cpp
+std::vector<uint32_t> idx(u.num_chunks);
+l1mgr.read(u.idx_table_addr, idx.data(), idx.size() * sizeof(uint32_t));
+```
+
+再依 index 複製：
+
+```text
+dst[i] = src[idx[i]]
+```
+
+精確一點：
+
+```cpp
+s = src_addr + idx[i] * src_stride;
+d = dst_addr + i * dst_stride;
+copy length bytes
+```
+
+常見用途：
+
+- gather 非連續 tensor block。
+- 重新排列資料。
+- 某些 op lowering 後需要 indirect copy。
+
+debug 時注意：
+
+| 檢查 | 說明 |
+|---|---|
+| `idx_table_addr` 在哪個 memory space | table 可能在 L1 或 DRAM |
+| index 是 element index 還是 row index | source 用 `idx[i] * src_stride` |
+| `dst_stride` 是否等於 output element pitch | gather 結果可能有 padding |
+
+---
+
+## 4.18 UDMA mode 3：SCATTER_CONCAT
+
+SCATTER_CONCAT 用 metadata table 描述多個 source：
+
+```cpp
+struct ConcatEntry {
+    uint32_t src_addr;
+    uint32_t length;
+};
+```
+
+流程：
+
+```text
+cursor = dst_addr
+for each entry:
+    copy entry.length bytes from entry.src_addr to cursor
+    cursor += entry.length
+```
+
+常見用途：
+
+- TFLite CONCATENATION lowering。
+- 多個 branch output 合併成一個 tensor。
+- 某些 logical concat 如果不能 L1 view 化，就需要實際 copy。
+
+容易出錯的地方：
+
+| 問題 | 說明 |
+|---|---|
+| concat axis 不是最後一維 | memory layout 可能不是單純 append |
+| source 還沒完成 | concat descriptor wait tags 不完整 |
+| source 留在 L1 但被覆蓋 | 需要 store barrier 或 dependency 保護 |
+| non-conservative path | 若 compiler 做 view / handoff，要確認 data lifetime |
+
+CONCAT 類 bug 通常不是 UDMA copy loop 本身錯，而是 upstream descriptor DAG 或 layout assumption 錯。
+
+---
+
+## 4.19 UDMA mode 4：STRIDED_SLICE
+
+STRIDED_SLICE 支援 2D slice：
+
+```text
+rows = [slice_begin[0], slice_end[0])
+col_off = slice_begin[1]
+each output row length = length bytes
+```
+
+source address：
+
+```cpp
+s = src_addr + r * src_stride + col_off;
+d = dst_addr + (r - r0) * dst_stride;
+```
+
+常見用途：
+
+- TFLite STRIDED_SLICE。
+- 取 tensor 的 row / column 子區域。
+- 作為 compiler lowering 的簡化 copy primitive。
+
+注意這裡的 `col_off` 是 byte offset，不一定是 element index。如果 dtype 是 int16 / fp16，要記得乘 2。
+
+---
+
+## 4.20 UDMA mode 5：DEPTH_TO_SPACE
+
+DEPTH_TO_SPACE 是 NHWC layout transform。
+
+descriptor encoding：
+
+| 欄位 | 語意 |
+|---|---|
+| `num_chunks` | input H |
+| `slice_begin[0]` | input W |
+| `slice_begin[1]` | input Cin |
+| `slice_begin[2]` | block size |
+| `slice_begin[3]` | output Cout |
+| `length` | element bytes |
+| `src_stride` | input row bytes |
+| `dst_stride` | output row bytes |
+
+合法性檢查：
+
+```text
+Cin == Cout * block * block
+```
+
+核心 mapping：
+
+```text
+input  [ih, iw, ic]
+q  = ic / Cout
+oc = ic % Cout
+bh = q / block
+bw = q % block
+output [ih * block + bh, iw * block + bw, oc]
+```
+
+這類 op 最容易被誤認為「只是 reshape」。但在 NHWC memory layout 下，它通常需要真的搬動 bytes。
+
+---
+
+## 4.21 Memory latency 與 compute latency 的 overlap
+
+這份 simulator 裡，engine 常見 pattern 是：
+
+```cpp
+t_begin = sc_time_stamp();
+
+l1mgr.read(...);   // memory latency pushes time
+compute functional data
+
+cyc = compute_cycle_formula(...);
+elapsed = sc_time_stamp() - t_begin;
+if (cyc > elapsed) wait(cyc - elapsed);
+```
+
+這代表：
+
+```text
+engine wall time = max(memory latency already paid, compute cycle estimate)
+```
+
+而不是：
+
+```text
+memory latency + compute cycles
+```
+
+這是刻意的。真實硬體中，operand streaming 與 compute pipeline 通常 overlap。若直接相加，會太悲觀。
+
+例子：
+
+```text
+CONV input/weight read 花 100 cycles
+CONV compute formula 250 cycles
+
+engine total ~= 250 cycles
+額外 wait = 250 - 100 = 150
+```
+
+如果 memory 花 300 cycles：
+
+```text
+engine total ~= 300 cycles
+compute wait = 0
+```
+
+這個設計會在後面 cycle accuracy 章再深入。
+
+---
+
+## 4.22 UDMA 與 engine 的 overlap
+
+UDMA 是獨立 `SC_THREAD`，CONV / EWE / POOL / Requant 也各自是獨立 thread。因此只要 dependency tag 允許，它們可以在 SystemC time 上 overlap。
+
+例如：
+
+```text
+tile 0 CONV 正在跑
+tile 1 UDMA read input 可以同時跑
+tile -1 UDMA write output 也可能背景跑
+```
+
+這取決於 descriptor DAG：
+
+| DAG 寫法 | 結果 |
+|---|---|
+| tile 1 load wait tile 0 store | 太保守，overlap 少 |
+| tile 1 load 只 wait L1 buffer safe tag | overlap 較多 |
+| compute 不 wait load | functional hazard |
+| store 不 wait requant | output wrong |
+
+memory hierarchy 的效能不是單看 L1 / DRAM bandwidth，還要看 Command Engine 是否把工作排得出來。
+
+---
+
+## 4.23 L1 capacity 與 tiling
+
+L1Mesh 只有 2 MB。大模型 layer 不可能把所有 input、weight、output 都同時放進 L1。
+
+所以 compiler / scheduler 需要 tiling：
+
+```text
+把 tensor 拆成 tile
+每個 tile 搬入 L1
+compute
+寫出或 handoff
+重用 L1 buffer 給下一個 tile
+```
+
+一個 tile 至少要考慮：
+
+| 區塊 | 佔用 |
+|---|---|
+| input tile | activation bytes |
+| weight tile | weight bytes |
+| output tile | output bytes |
+| params blob | scale / bias / LUT |
+| scratch / correction map | op-specific temporary |
+| double buffer | 若要 overlap load/compute，可能需要兩份 |
+
+junior 常犯錯是只算 input + output，忘記 weight 和 params。對 convolution，weight 有時比 activation tile 更大。
+
+---
+
+## 4.24 L1-resident handoff
+
+如果 producer layer 的 output 可以留在 L1，consumer layer 直接讀 L1，就可以避免：
+
+```text
+producer output L1 -> DRAM store
+consumer input DRAM -> L1 load
+```
+
+這是 performance 上很有價值的 optimization。
+
+但它要求 compiler 正確管理 lifetime：
+
+```text
+producer output buffer 不能在 consumer 讀完前被覆蓋
+```
+
+handoff 問題常見於：
+
+- multi-tile layer。
+- concat / branch。
+- depth-to-space / reshape 類 tail op。
+- suppressed producer store。
+- buffer ping-pong slot reuse。
+
+如果 functional regression 出現：
+
+```text
+single tile PASS
+multi tile FAIL
+```
+
+請優先懷疑 L1 buffer lifetime 或 store barrier。
+
+---
+
+## 4.25 Descriptor wait tag 如何保護 memory
+
+Memory correctness 通常不是由 `L1Manager` 保護，而是由 descriptor dependency 保護。
+
+例如：
+
+```text
+UDMA load input
+  signal tag 10
+
+CONV
+  wait tag 10
+```
+
+這保證 CONV 不會在 input load 完成前讀 L1。
+
+另一個例子：
+
+```text
+Requant writes L1 output
+  signal tag 20
+
+UDMA store output
+  wait tag 20
+```
+
+這保證 store 不會在 output tensor 完成前讀 L1。
+
+L1 buffer reuse 也需要 tag：
+
+```text
+UDMA store old tile from buffer A
+  signal tag 30
+
+UDMA load new tile into buffer A
+  wait tag 30
+```
+
+如果缺了這種 wait，functional data 可能被覆蓋，`L1Mesh` 不會阻止你。scratchpad 的精神就是 compiler / scheduler 自己管理。
+
+---
+
+## 4.26 看 profile 時怎麼判讀 memory bottleneck
+
+Profile 裡通常會有 per-engine busy time 或 Gantt-like timeline。你可以問：
+
+| 問題 | 解讀 |
+|---|---|
+| UDMA read lane 很長嗎？ | input / weight load 可能是瓶頸 |
+| UDMA write lane 很長嗎？ | output store 或 concat / d2s tail 可能重 |
+| CONV lane 有空洞嗎？ | load 太晚、dependency 太保守、tiling 不佳 |
+| DRAM-heavy layer 是否接近 bytes / 48？ | bandwidth 主導 |
+| 很多小 UDMA descriptor 嗎？ | 16-cycle decode startup 和 row miss 可能累積 |
+| L1 access 是否跨很多 small stride？ | bank conflict 或 fragmented access |
+
+簡單估算：
+
+```text
+DRAM cycles ~= bytes / 48 + row_miss_penalty + refresh overhead
+L1 cycles   ~= bytes / 256 * 1.46，若 sequential 且 bank conflict 少
+UDMA extra  ~= 16 cycles per descriptor
+```
+
+這只是 first-order estimate，但足夠幫你判斷 cycle 是否離譜。
+
+---
+
+## 4.27 Memory debug checklist
+
+遇到 output mismatch，請照這個順序看：
+
+| Step | 檢查 |
+|---:|---|
+| 1 | fail layer 的 input / output dtype byte width |
+| 2 | UDMA `length` 是否等於預期 bytes |
+| 3 | `src_addr` / `dst_addr` 是否在正確 address range |
+| 4 | `src_stride` / `dst_stride` 是否用 bytes，不是 elements |
+| 5 | compute descriptor 是否 wait load tags |
+| 6 | store descriptor 是否 wait producer tags |
+| 7 | L1 buffer reuse 是否 wait old consumer / store |
+| 8 | concat / slice / d2s layout 是否符合 NHWC |
+| 9 | INT16 / FP16 output 是否用 2 bytes |
+| 10 | stream mode 是否讓 store / load 越序造成 overwrite |
+
+遇到 performance regression，請照這個順序看：
+
+| Step | 檢查 |
+|---:|---|
+| 1 | DRAM bytes 是否突然變多 |
+| 2 | UDMA descriptor count 是否暴增 |
+| 3 | L1-resident handoff 是否失效 |
+| 4 | tiling 是否變碎，造成 CONV fill 重複付 |
+| 5 | `wait_tags` 是否過度 serialize |
+| 6 | UDMA write 是否擋住 UDMA read |
+| 7 | L1 bank conflict 是否增加 |
+
+---
+
+## 4.28 一個手算例子：linear load
+
+假設有一筆 UDMA read：
+
+```text
+src = DRAM
+dst = L1
+length = 98,304 bytes
+```
+
+粗估 DRAM：
+
+```text
+bytes / 48 = 2048 cycles
+row miss = 50 cycles，至少第一個 row
+refresh = 視時間點，可能 0 或多個 200 cycles
+```
+
+粗估 L1 write：
+
+```text
+bytes / 256 = 384 cycles
+乘 SRAM/core ratio 1.46 -> 約 561 core cycles
+```
+
+UDMA decode：
+
+```text
+16 cycles
+```
+
+因為 UDMA `do_linear()` 是：
+
+```text
+read src -> write dst -> wait 16
+```
+
+所以這筆 descriptor 可能約：
+
+```text
+DRAM read 2098 + L1 write 561 + 16 = 2675 cycles
+```
+
+這是粗估。實際還會受 row locality、previous DRAM last_finish、L1 bank finish 影響。
+
+---
+
+## 4.29 一個手算例子：compute overlap
+
+假設 CONV descriptor 需要：
+
+```text
+input L1 read = 200 cycles
+weight L1 read = 500 cycles
+compute formula = 1200 cycles
+```
+
+因為 model 用 max overlap：
+
+```text
+CONV total ~= max(memory elapsed, compute formula)
+           ~= max(700, 1200)
+           ~= 1200 cycles
+```
+
+如果 tiling 改變後：
+
+```text
+input L1 read = 200
+weight L1 read = 1800
+compute formula = 1200
+```
+
+那 CONV 變成 memory-dominated：
+
+```text
+CONV total ~= 2000 cycles
+```
+
+這能幫你理解為什麼有些 layer 增加算力不會變快，因為瓶頸在 memory。
+
+---
+
+## 4.30 常見誤解
+
+| 誤解 | 正確理解 |
+|---|---|
+| L1 address 和 DRAM address 可以任意混用 | `L1Manager` 用 address range route，錯 range 會錯或報錯 |
+| UDMA direction 決定讀寫哪種 memory | 真正讀寫由 `src_addr` / `dst_addr` range 決定；direction 是語意和 profile |
+| L1 是無限快 | L1 有 bank latency、clock ratio、bank conflict |
+| DRAM 只看 bytes / bandwidth | row miss、refresh、serialization 也會影響 |
+| scratchpad 會自動避免 overwrite | 不會，必須靠 descriptor dependency 和 compiler lifetime 管理 |
+| `length` 是 element count | UDMA 裡大多是 bytes，dtype 要自己換算 |
+| CONV time = memory + compute | 目前 model 對 engine 內部採用 overlap，近似 max(memory, compute) |
+| 很多小 UDMA 沒關係 | 每筆有 decode startup，也更容易 row miss |
+
+---
+
+## 4.31 本章小結
+
+MDLA7 memory hierarchy 的主線是：
+
+```text
+DRAM 大但慢
+L1Mesh 小但快
+UDMA 負責搬資料
+descriptor tags 保護資料生命週期
+tiling 決定 L1 是否裝得下與能否 overlap
+```
+
+你要特別記住：
+
+1. L1Mesh 是 2 MB、16 banks、16-byte stripe，sequential peak 約 256 B/cycle。
+2. DRAM 是 48 B/cycle，含 row miss 與 refresh，通常是大模型瓶頸之一。
+3. UDMA 的功能正確仰賴 address、length、stride、wait tag 全部正確。
+4. Scratchpad 不會自動保護資料，compiler / scheduler 必須管理 lifetime。
+
+下一章會進入 compute engines，看看 CONV、Requant、EWE、POOL 如何消費 descriptor body，並把 memory data 轉成 tensor output。
+
+> 下一章 → [第 5 章 — Compute Engines Overview](05_compute_engines.md)

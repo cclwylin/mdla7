@@ -1,0 +1,268 @@
+# 第 13 章 — EWE / POOL / SOFTMAX / D2SPACE
+
+> 上一章：[第 12 章 — UDMA、DRAM Model、L1Manager Module Design](12_udma_dram_l1manager.md)
+
+本章你會學到什麼：
+
+- EWE engine 如何支援 binary、unary、softmax。
+- POOL engine 如何支援 max / avg / global。
+- DEPTH_TO_SPACE 為什麼目前在 UDMA 裡做。
+- 這些 non-CONV op 如何和 L1 handoff / streaming scheduler 互動。
+- 常見模型 tail op 的 debug 方法。
+
+---
+
+## 13.1 Non-CONV op 的角色
+
+真實模型不只有 convolution。常見 non-CONV：
+
+| 類型 | 例子 |
+|---|---|
+| element-wise | ADD、MUL、SUB |
+| activation | HARD_SWISH、GELU |
+| normalization-like tail | SOFTMAX |
+| spatial reduction | AVG_POOL、MAX_POOL、MEAN |
+| layout transform | RESHAPE、CONCAT、GATHER、DEPTH_TO_SPACE |
+
+MDLA7 simulator 把其中一部分放在 EWE / POOL，一部分用 UDMA data movement 實作。
+
+---
+
+## 13.2 EWE binary op
+
+EWE binary descriptor：
+
+```text
+in_a_addr
+in_b_addr
+out_addr
+h,w,c
+lut_addr
+subtype = ADD/MUL/SUB
+```
+
+INT path 使用 quant params；FP path 使用 FP16 storage + FP32 compute。
+
+Dependency：
+
+```text
+EWE waits input A producer
+EWE waits input B / params load
+store waits EWE done
+```
+
+branch model 常見 ADD residual，所以 input A / B 的 producer layer 很重要。
+
+---
+
+## 13.3 Binary EWE streaming
+
+`test_model.cpp` 有 `TileCommand::BINARY_EWE` 和 `emit_binary_ewe_wavefront()`，用 microblocks 做：
+
+```text
+load A tile
+load B tile
+EWE compute
+store output
+```
+
+兩個 ping-pong slot 可以 overlap：
+
+```text
+slot0 compute while slot1 load
+slot1 compute while slot0 store
+```
+
+這對大 element-wise tensor 很重要，否則整層 load/compute/store 會太串行。
+
+---
+
+## 13.4 Unary EWE
+
+HARD_SWISH / GELU 使用 single input：
+
+```text
+in_a_addr
+in_b_addr = 0
+params = clamp sentinel
+```
+
+FP path implemented：
+
+| op | formula |
+|---|---|
+| HARD_SWISH | `x * relu6(x+3) / 6` |
+| GELU | tanh approximation |
+
+INT unary support 目前較有限。若 INT model 有 unsupported unary，compiler / scheduler 可能 skip 或 chain-preserve。
+
+---
+
+## 13.5 Softmax
+
+Softmax 也是 EWE subtype：
+
+```text
+subtype = ES_SOFTMAX
+```
+
+FP softmax：
+
+```text
+max reduce
+exp / sum
+divide
+FP16 output
+```
+
+INT softmax：
+
+```text
+softmax_int8 LUT path
+```
+
+Softmax 的 cycle 是三 pass。對 transformer attention 大 tensor，softmax 可能是 visible bottleneck。
+
+---
+
+## 13.6 POOL
+
+POOL descriptor：
+
+```text
+input shape
+output shape
+mode
+kernel
+stride
+padding
+count_include_pad
+```
+
+MAX pool：
+
+```text
+output = max(valid window)
+```
+
+AVG / GLOBAL：
+
+```text
+output = rounded or FP average(valid window or full window)
+```
+
+MEAN 在 compiler 裡可 route via AVG_POOL 類 path。
+
+---
+
+## 13.7 Pool tiling
+
+Large pool 也可能 height tiled。注意：
+
+- global pool kernel 可能用 `255` sentinel。
+- tile split 不能破壞 reduction window。
+- avg divisor 要和 `count_include_pad` 一致。
+
+若 pool output off-by-one，先看 rounding；若整片錯，先看 kernel / stride / sentinel。
+
+---
+
+## 13.8 DEPTH_TO_SPACE
+
+DEPTH_TO_SPACE 目前由 UDMA `UM_DEPTH_TO_SPACE` 執行。
+
+NHWC mapping：
+
+```text
+input [ih, iw, ic]
+q  = ic / Cout
+oc = ic % Cout
+bh = q / block
+bw = q % block
+output [ih*block + bh, iw*block + bw, oc]
+```
+
+它看似 reshape，但在 memory layout 中需要 byte reorder。
+
+---
+
+## 13.9 D2S + ADD streaming path
+
+handoff 裡提到 VSR-like path：
+
+```text
+CONV -> DEPTH_TO_SPACE -> ADD
+```
+
+這種 tail 比普通 conv chain 複雜：
+
+- CONV output channel count 會因 D2S 改變。
+- D2S layout transform 必須在 ADD 前完成。
+- ADD 可能還需要另一個 branch input。
+- store barrier 要保護 tail output。
+
+所以 scheduler 對 channel-changing tail 會比 plain conv chain 更保守。
+
+---
+
+## 13.10 CONCAT / GATHER / RESHAPE
+
+這些 op 常走 data movement / materialized reference path：
+
+| op | 常見實作 |
+|---|---|
+| RESHAPE | byte passthrough or DRAM copy |
+| CONCAT | materialized concat / UDMA concat / barrier |
+| GATHER | numpy materialized reference + UDMA copy |
+
+要記住：
+
+```text
+不是所有 graph op 都有 dedicated engine。
+有些 op 是 compiler materialize + UDMA passthrough。
+```
+
+---
+
+## 13.11 Debug non-CONV op
+
+| op | debug point |
+|---|---|
+| ADD | input A/B dependency、params blob、broadcast |
+| MUL | multiplier params、scalar broadcast |
+| SUB | operand order A-B |
+| HARD_SWISH | FP formula / clamp |
+| GELU | tanh approximation |
+| SOFTMAX | axis / 3-pass / LUT |
+| AVG_POOL | divisor / rounding |
+| D2S | block size / Cin=Cout*b*b |
+| CONCAT | source lifetime / axis layout |
+| GATHER | index table |
+
+---
+
+## 13.12 常見誤解
+
+| 誤解 | 正確理解 |
+|---|---|
+| EWE 只是 ADD | EWE 包含 binary、unary、softmax |
+| DEPTH_TO_SPACE 是 no-op reshape | NHWC 下通常要搬 bytes |
+| MEAN 必須有專屬 engine | 目前可 route via avg-pool-like path |
+| CONCAT 一定只是 pointer alias | 多數情況需要 materialize 或 barrier |
+| softmax cycle 很小 | 大 tensor softmax 是三 pass，可能很重 |
+
+---
+
+## 13.13 本章小結
+
+Non-CONV op 是模型完整度的關鍵：
+
+```text
+EWE handles element-wise / nonlinear / softmax
+POOL handles spatial reductions
+UDMA handles data movement transforms
+```
+
+Debug 時先判斷 op 是 compute 還是 layout，再追 input producer、params、output writer。
+
+> 下一章 → [第 14 章 — Tiling、Fusion、Pending Store、L1-Resident Handoff](14_tiling_fusion_handoff.md)

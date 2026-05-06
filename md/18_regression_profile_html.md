@@ -1,0 +1,256 @@
+# 第 18 章 — Regression Scripts 與 Profile HTML
+
+> 上一章：[第 17 章 — Functional Verification 與 SystemC Function Coverage](17_verification_coverage.md)
+
+本章你會學到什麼：
+
+- `run_model.py` 如何串 compile、simulate、plot、HTML。
+- `run_mdla6_pattern.py` 和 `run_ethz_v6.py` 的用途。
+- profile JSON / CSV / PNG / HTML 各自怎麼用。
+- `model_profile.html` index 如何生成。
+- regression status 要如何解讀。
+
+---
+
+## 18.1 run_model.py
+
+主要入口：
+
+```bash
+cd systemc
+python3 run_model.py inception_v3_quant
+```
+
+flow：
+
+```text
+resolve model
+make build/test_model
+compile_model.py -> output/<stem>.bin
+test_model -> profile.json/csv
+plot_profile.py -> profile.png
+_write_html_report -> output/<stem>.html
+gen_model_profile.py -> model_profile.html
+```
+
+`run_model.py` 也會自動 re-exec 到 venv：
+
+```text
+~/.venvs/mdla7/bin/python
+```
+
+---
+
+## 18.2 Model resolve
+
+`resolve_model()` 支援：
+
+| 用法 | 說明 |
+|---|---|
+| exact path | 直接指定 `.tflite` |
+| substring | `inception` |
+| fuzzy | typo suggestion |
+| `--list` | 列出 model/ 下模型 |
+
+dtype priority 會讓 ETHZ_v6 / INT8 等 active bundles 優先。
+
+---
+
+## 18.3 Artefacts
+
+per-model output：
+
+```text
+systemc/output/<stem>.bin
+systemc/output/<stem>.profile.json
+systemc/output/<stem>.profile.csv
+systemc/output/<stem>.profile.png
+systemc/output/<stem>.html
+```
+
+預設成功後 `.bin` / `.profile.json` 可能被刪掉，保留 `.csv` / `.png` / `.html`。用：
+
+```bash
+python3 run_model.py model --keep-intermediate
+```
+
+可保留中間檔方便 debug。
+
+---
+
+## 18.4 profile JSON
+
+`.profile.json` 包含：
+
+- summary
+- layers
+- engine busy
+- task timelines
+
+適合：
+
+- plot Gantt。
+- programmatic analysis。
+- comparing cycles / utilization。
+
+---
+
+## 18.5 profile CSV
+
+`.profile.csv` 是 one row per layer。
+
+常見欄位：
+
+```text
+id, op, in_h, in_w, in_c, out_h, out_w, out_c,
+tiles_h, tiles_oc, pass, cycles_layer, cycles_cum,
+conv_util_pct, dram_r, dram_w, sram_r, sram_w, streamed
+```
+
+適合丟到 pandas / spreadsheet，找 top cycle layers。
+
+---
+
+## 18.6 profile PNG / HTML
+
+`plot_profile.py` 產生 static Gantt PNG。
+
+`run_model.py` 的 HTML report 更完整：
+
+- summary chips
+- interactive Gantt
+- layer table
+- engine utilization
+- compile log
+- sim log
+- notes / candidates
+
+HTML 對 debug overlap 和 labeling 很有用。
+
+---
+
+## 18.7 model_profile.html
+
+[`gen_model_profile.py`](../systemc/scripts/gen_model_profile.py) 掃 `systemc/output/*.html`，生成 index：
+
+```text
+systemc/model_profile.html
+```
+
+它會整理：
+
+- pattern
+- link
+- cx
+- our_ms
+- ratio
+
+用來看整個 regression corpus 的 performance 排名。
+
+---
+
+## 18.8 run_mdla6_pattern.py
+
+這是 MDLA6 pattern A/B style regression：
+
+```bash
+python3 run_mdla6_pattern.py --filter unet_int16 --rerun-all
+```
+
+特點：
+
+- pattern list 有 MDLA6 cx baseline。
+- 可 cache ok rows。
+- 每個 pattern 產 HTML。
+- 更新 `output/mdla6_pattern_regression.csv`。
+
+status：
+
+| status | 意義 |
+|---|---|
+| ok | all pass |
+| N-FAIL | sim completed but N layers fail |
+| compile-fail | compiler failed |
+| sim-fail | simulator failed |
+| html-fail | report generation issue |
+
+---
+
+## 18.9 run_ethz_v6.py
+
+ETHZ_v6 sweep：
+
+```bash
+python3 run_ethz_v6.py
+```
+
+它跑 `model/ETHZ_v6` corpus，輸出 regression CSV。
+
+用途：
+
+- large model coverage。
+- dtype / op mix coverage。
+- performance trend。
+- detecting compile-fail after compiler changes。
+
+---
+
+## 18.10 Regression triage
+
+看 regression 時先分三類：
+
+| 類型 | 下一步 |
+|---|---|
+| compile-fail | 看 compile_model log / unsupported op / shape limit |
+| sim-fail / timeout | 看 descriptor deadlock / sc_start cap / crash |
+| N-FAIL | 看 first fail layer / output mismatch |
+
+不要一開始就看整個 log。先分類狀態，再下鑽。
+
+---
+
+## 18.11 HTML Gantt 怎麼看
+
+看 Gantt 時問：
+
+- UDMA_R 是否提前餵 compute？
+- CONV 是否有大空洞？
+- UDMA_W 是否阻擋 read？
+- EWE/POOL tail 是否拖長？
+- stream descriptors 是否跨 layer overlap？
+- final layer done tag 在哪裡？
+
+Gantt 是 scheduler debug 的最佳入口。
+
+---
+
+## 18.12 常見誤解
+
+| 誤解 | 正確理解 |
+|---|---|
+| 只要看 console PASS/FAIL | performance debug 要看 profile |
+| `.profile.json` 一定存在 | 成功後可能被清掉，需 `--keep-intermediate` |
+| HTML 只是美化 | HTML Gantt 是 scheduler/debug 工具 |
+| ok rows 永遠不用 rerun | 改 scheduler/cycle model 時要 rerun |
+| ratio 越低一定越差 | 要看 cx baseline、model class、coverage |
+
+---
+
+## 18.13 本章小結
+
+Regression flow：
+
+```text
+single model -> run_model.py
+pattern sweep -> run_mdla6_pattern.py
+corpus sweep -> run_ethz_v6.py
+visual index -> model_profile.html
+```
+
+有效 debug 的方法是：
+
+```text
+status -> first failing layer -> profile timeline -> source root cause
+```
+
+> 下一章 → [第 19 章 — Debug Playbook：從 N-FAIL 到 Root Cause](19_debug_playbook.md)

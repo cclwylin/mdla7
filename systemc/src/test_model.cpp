@@ -1480,6 +1480,13 @@ int sc_main(int argc, char* argv[]) {
                 }
                 oh_done += this_oh;
             }
+            if (suppress_producer_store && !single_tile_layer && prev_store) {
+                const uint8_t barrier_tag = alloc_tag();
+                program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, prev_store));
+                acc[i].sram_r += 1;
+                acc[i].dram_w += 1;
+                prev_store = barrier_tag;
+            }
             layer_done_tag[i] = prev_store;
             tiles_h_per_layer [i] = uint16_t((L.out_h + tile_oh - 1) / tile_oh);
             tiles_oc_per_layer[i] = uint16_t((L.out_c + tile_oc - 1) / tile_oc);
