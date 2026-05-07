@@ -167,7 +167,8 @@ def main() -> None:
                          f"(filter={args.filter!r})")
     if not TEST_BIN.exists():
         raise SystemExit(f"test_model not built: {TEST_BIN}\n"
-                         f"  run `make` in {HERE}")
+                         f"  run `make -C ../systemc -s` from {HERE}\n"
+                         f"  or `make -C systemc -s` from {REPO_ROOT}")
 
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)

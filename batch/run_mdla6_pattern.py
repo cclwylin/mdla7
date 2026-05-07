@@ -155,7 +155,7 @@ def _selected_log_lines(compile_stdout: str, sim_stdout: str) -> list[str]:
             lines.append(ln)
     for ln in (sim_stdout or "").splitlines():
         if ln.startswith(("test_model:", "  layer", "  summary",
-                          "  sim time", "  DRAM ", "  SRAM ",
+                          "  sim time", "  DRAM ", "  SRAM ", "  L1Mesh ",
                           "  per-engine", "  utilization", "    ",
                           "  profile", "  csv")):
             lines.append(ln)
@@ -435,7 +435,9 @@ def main():
     if not csv_in.exists():
         sys.exit(f"input CSV not found: {csv_in}")
     if not TEST_BIN.exists():
-        sys.exit(f"test_model not built: {TEST_BIN}\n  run `make` in {HERE}")
+        sys.exit(f"test_model not built: {TEST_BIN}\n"
+                 f"  run `make -C ../systemc -s` from {HERE}\n"
+                 f"  or `make -C systemc -s` from {REPO_ROOT}")
 
     # Read MDLA6 patterns + their CX baselines.
     rows_in: list[tuple[str, str]] = []

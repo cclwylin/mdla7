@@ -61,6 +61,7 @@ enum OpKindEnum : uint16_t {
     OK_HARD_SWISH = 12,       // v8.30: unary x * relu6(x+3) / 6 (mobilenet_v3)
     OK_GELU       = 13,       // v8.30: unary x * Φ(x), tanh-approx (transformers)
     OK_D2SPACE    = 14,       // v8.32: DEPTH_TO_SPACE / pixel shuffle via UDMA
+    OK_MATERIALIZE = 15,      // compiler fallback: pre-materialized output bytes
 };
 inline const char* op_name(uint16_t k) {
     switch (k) {
@@ -79,6 +80,7 @@ inline const char* op_name(uint16_t k) {
         case OK_HARD_SWISH: return "h_swsh";
         case OK_GELU:       return "   gelu";
         case OK_D2SPACE:    return "d2spac";
+        case OK_MATERIALIZE:return "matrlz";
     }
     return "??unknown";
 }
@@ -283,7 +285,7 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh]\n";
+                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]\n";
         return 2;
     }
     bool quiet = false;
@@ -298,10 +300,12 @@ int sc_main(int argc, char* argv[]) {
             l1_timing_mode = L1TimingMode::PortConflict;
         } else if (arg == "--l1-timing=mesh" || arg == "--l1-mesh") {
             l1_timing_mode = L1TimingMode::MeshConflict;
+        } else if (arg == "--l1-timing=mesh-opt" || arg == "--l1-mesh-opt") {
+            l1_timing_mode = L1TimingMode::MeshOptimistic;
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh]\n";
+                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]\n";
             return 2;
         }
     }
@@ -329,6 +333,7 @@ int sc_main(int argc, char* argv[]) {
               << file.size() / 1024 << " KB)\n";
     if (!quiet) {
         const char* timing_name =
+            (l1_timing_mode == L1TimingMode::MeshOptimistic) ? "mesh-opt" :
             (l1_timing_mode == L1TimingMode::MeshConflict) ? "mesh" :
             (l1_timing_mode == L1TimingMode::PortConflict) ? "conflict" : "fast";
         std::cout << "  L1 timing: " << timing_name << "\n";
@@ -3427,6 +3432,42 @@ int sc_main(int argc, char* argv[]) {
             else                  chain_alt = 0;
             break;
         }
+        case OK_MATERIALIZE: {
+            flush_pending();
+            // Materialized fallback layers consume the compiler's reference
+            // bytes as their source. Some fallbacks intentionally break the
+            // normal input-chain semantics (runtime FC, unsupported reduce
+            // axes, descriptor-overflow tensors), so seed dram_in from ref_off
+            // here before the modeled DRAM->L1->DRAM copy.
+            sys.dram.write(L.dram_in, file.data() + L.ref_off, L.ref_size);
+            const uint32_t L1_TMP = 0;
+            const uint32_t chunk_max = std::min<uint32_t>(L1_BUDGET / 2, 1u << 20);
+            uint32_t done = 0;
+            uint8_t prev_tag = 0;
+            while (done < L.ref_size) {
+                const uint32_t chunk = std::min<uint32_t>(chunk_max, L.ref_size - done);
+                const uint8_t rd_tag = alloc_tag();
+                const uint8_t wr_tag = alloc_tag();
+                program.push_back(make_udma(uint32_t(L.dram_in + done), L1_TMP,
+                                            chunk, /*dir*/ 0, rd_tag, prev_tag));
+                program.push_back(make_udma(L1_TMP, uint32_t(L.dram_out + done),
+                                            chunk, /*dir*/ 1, wr_tag, rd_tag));
+                acc[i].dram_r += chunk;
+                acc[i].dram_w += chunk;
+                acc[i].sram_w += chunk;
+                acc[i].sram_r += chunk;
+                prev_tag = wr_tag;
+                done += chunk;
+            }
+            layer_done_tag[i] = prev_tag;
+            fuse_prev_l1_out_addr   = 0;
+            fuse_prev_l1_out_size   = 0;
+            fuse_prev_single_tile   = false;
+            fuse_prev_is_conv_class = false;
+            clear_prev_binary_ewe_live();
+            chain_alt = 0;
+            break;
+        }
         case OK_RESHAPE:
         case OK_GATHER: {
             flush_pending();
@@ -3764,6 +3805,47 @@ int sc_main(int argc, char* argv[]) {
               << overall_util << "%   peak="
               << peak_pct << "% (" << peak_eng << ")\n";
     std::cout.unsetf(std::ios::floatfield);
+    const auto& l1_stats = sys.l1mesh.stats();
+    if (l1_timing_mode == L1TimingMode::MeshConflict ||
+        l1_timing_mode == L1TimingMode::MeshOptimistic) {
+        auto pns = [](double v) -> uint64_t { return uint64_t(v + 0.5); };
+        std::cout << "  L1Mesh NoC: accesses=" << l1_stats.accesses
+                  << " bytes=" << l1_stats.bytes
+                  << " stripes=" << l1_stats.stripes
+                  << " imposed=" << pns(l1_stats.imposed_wait_ns) << " cyc\n"
+                  << "    wait edge/router/link/local/sram="
+                  << pns(l1_stats.edge_wait_ns) << "/"
+                  << pns(l1_stats.router_wait_ns) << "/"
+                  << pns(l1_stats.link_wait_ns) << "/"
+                  << pns(l1_stats.local_wait_ns) << "/"
+                  << pns(l1_stats.sram_wait_ns) << " cyc\n"
+                  << "    service edge/router/link/local/sram="
+                  << pns(l1_stats.edge_service_ns) << "/"
+                  << pns(l1_stats.router_service_ns) << "/"
+                  << pns(l1_stats.link_service_ns) << "/"
+                  << pns(l1_stats.local_service_ns) << "/"
+                  << pns(l1_stats.sram_service_ns) << " cyc\n";
+        std::cout << "  L1Mesh lane avg latency:\n";
+        for (size_t li = 0; li < l1_stats.read_lane.size(); ++li) {
+            const auto& r = l1_stats.read_lane[li];
+            const auto& w = l1_stats.write_lane[li];
+            const double r_avg = r.accesses ? r.latency_ns / double(r.accesses) : 0.0;
+            const double w_avg = w.accesses ? w.latency_ns / double(w.accesses) : 0.0;
+            const double r_wait = r.accesses ? r.wait_ns / double(r.accesses) : 0.0;
+            const double w_wait = w.accesses ? w.wait_ns / double(w.accesses) : 0.0;
+            const double r_srv = r.accesses ? r.service_ns / double(r.accesses) : 0.0;
+            const double w_srv = w.accesses ? w.service_ns / double(w.accesses) : 0.0;
+            std::cout << "    lane " << std::setw(2) << li
+                      << ": R avg/max=" << pns(r_avg) << "/" << pns(r.max_latency_ns)
+                      << " wait/svc=" << pns(r_wait) << "/" << pns(r_srv)
+                      << " cyc n=" << r.accesses
+                      << " bytes=" << r.bytes
+                      << " | W avg/max=" << pns(w_avg) << "/" << pns(w.max_latency_ns)
+                      << " wait/svc=" << pns(w_wait) << "/" << pns(w_srv)
+                      << " cyc n=" << w.accesses
+                      << " bytes=" << w.bytes << "\n";
+        }
+    }
 
     // Profile path = sibling of program.bin
     std::string prog_path = argv[1];
@@ -3787,7 +3869,66 @@ int sc_main(int argc, char* argv[]) {
         pf << "    \"sram_write_bytes\": " << total_sram_w << ",\n";
         pf << "    \"util_avg_pct\":  " << std::fixed << std::setprecision(2) << overall_util << ",\n";
         pf << "    \"util_peak_pct\": " << peak_pct << ",\n";
-        pf << "    \"util_peak_engine\": \"" << peak_eng << "\"\n";
+        pf << "    \"util_peak_engine\": \"" << peak_eng << "\"";
+        if (l1_timing_mode == L1TimingMode::MeshConflict ||
+            l1_timing_mode == L1TimingMode::MeshOptimistic) {
+            pf << ",\n";
+            pf << "    \"l1mesh\": {"
+               << "\"accesses\": " << l1_stats.accesses
+               << ", \"bytes\": " << l1_stats.bytes
+               << ", \"stripes\": " << l1_stats.stripes
+               << ", \"bursts\": " << l1_stats.bursts
+               << ", \"imposed_wait_cycles\": " << uint64_t(l1_stats.imposed_wait_ns + 0.5)
+               << ", \"edge_wait_cycles\": " << uint64_t(l1_stats.edge_wait_ns + 0.5)
+               << ", \"router_wait_cycles\": " << uint64_t(l1_stats.router_wait_ns + 0.5)
+               << ", \"link_wait_cycles\": " << uint64_t(l1_stats.link_wait_ns + 0.5)
+               << ", \"local_wait_cycles\": " << uint64_t(l1_stats.local_wait_ns + 0.5)
+               << ", \"sram_wait_cycles\": " << uint64_t(l1_stats.sram_wait_ns + 0.5)
+               << ", \"edge_service_cycles\": " << uint64_t(l1_stats.edge_service_ns + 0.5)
+               << ", \"router_service_cycles\": " << uint64_t(l1_stats.router_service_ns + 0.5)
+               << ", \"link_service_cycles\": " << uint64_t(l1_stats.link_service_ns + 0.5)
+               << ", \"local_service_cycles\": " << uint64_t(l1_stats.local_service_ns + 0.5)
+               << ", \"sram_service_cycles\": " << uint64_t(l1_stats.sram_service_ns + 0.5)
+               << ", \"read_lanes\": [";
+            for (size_t li = 0; li < l1_stats.read_lane.size(); ++li) {
+                const auto& lane = l1_stats.read_lane[li];
+                const double avg = lane.accesses ? lane.latency_ns / double(lane.accesses) : 0.0;
+                const double wait = lane.accesses ? lane.wait_ns / double(lane.accesses) : 0.0;
+                const double service = lane.accesses ? lane.service_ns / double(lane.accesses) : 0.0;
+                pf << "{\"id\": " << li
+                   << ", \"accesses\": " << lane.accesses
+                   << ", \"bytes\": " << lane.bytes
+                   << ", \"avg_latency_cycles\": " << uint64_t(avg + 0.5)
+                   << ", \"avg_wait_cycles\": " << uint64_t(wait + 0.5)
+                   << ", \"avg_service_cycles\": " << uint64_t(service + 0.5)
+                   << ", \"max_latency_cycles\": " << uint64_t(lane.max_latency_ns + 0.5)
+                   << ", \"max_wait_cycles\": " << uint64_t(lane.max_wait_ns + 0.5)
+                   << ", \"max_service_cycles\": " << uint64_t(lane.max_service_ns + 0.5)
+                   << "}";
+                if (li + 1 < l1_stats.read_lane.size()) pf << ", ";
+            }
+            pf << "], \"write_lanes\": [";
+            for (size_t li = 0; li < l1_stats.write_lane.size(); ++li) {
+                const auto& lane = l1_stats.write_lane[li];
+                const double avg = lane.accesses ? lane.latency_ns / double(lane.accesses) : 0.0;
+                const double wait = lane.accesses ? lane.wait_ns / double(lane.accesses) : 0.0;
+                const double service = lane.accesses ? lane.service_ns / double(lane.accesses) : 0.0;
+                pf << "{\"id\": " << li
+                   << ", \"accesses\": " << lane.accesses
+                   << ", \"bytes\": " << lane.bytes
+                   << ", \"avg_latency_cycles\": " << uint64_t(avg + 0.5)
+                   << ", \"avg_wait_cycles\": " << uint64_t(wait + 0.5)
+                   << ", \"avg_service_cycles\": " << uint64_t(service + 0.5)
+                   << ", \"max_latency_cycles\": " << uint64_t(lane.max_latency_ns + 0.5)
+                   << ", \"max_wait_cycles\": " << uint64_t(lane.max_wait_ns + 0.5)
+                   << ", \"max_service_cycles\": " << uint64_t(lane.max_service_ns + 0.5)
+                   << "}";
+                if (li + 1 < l1_stats.write_lane.size()) pf << ", ";
+            }
+            pf << "]}\n";
+        } else {
+            pf << "\n";
+        }
         pf.unsetf(std::ios::floatfield);
         pf << "  },\n";
         pf << "  \"engines\": {\n";

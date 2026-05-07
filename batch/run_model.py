@@ -370,7 +370,7 @@ def compile_and_run(model: Path, l1_timing: str = "fast") -> bool:
     # so relaying verbatim makes it diffable against the compile lines above.
     for ln in out.splitlines():
         if (ln.startswith(("test_model:", "  layer", "  summary",
-                           "  sim time", "  DRAM ", "  SRAM ",
+                           "  sim time", "  DRAM ", "  SRAM ", "  L1Mesh ",
                            "  per-engine", "  utilization", "    ",
                            "  profile", "  csv"))):
             emit(ln)
@@ -751,9 +751,8 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     eng_rows = "".join(_eng_row(n, e) for n, e in engines.items())
 
     # v8.16: surface compile_model's per-layer "ready / skipped" lines as a
-    # structured table. Includes layers the simulator never sees because
-    # compile skipped them (e.g. FP ADD), which otherwise only appear in the
-    # raw console pre block at the bottom of the report.
+    # structured table. v8.37: some former skips now appear as ready `matrlz`
+    # fallback layers, so keep the raw op name/status visible.
     def _compile_row(c: dict) -> str:
         ih, iw, ic = c["in"]
         if c["out"] is None:
@@ -800,6 +799,47 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     n_pass = int(summary.get("pass", 0) or 0)
     n_fail = int(summary.get("fail", 0) or 0)
     n_total = int(summary.get("layers", 0) or 0)
+    l1mesh = summary.get("l1mesh") if isinstance(summary.get("l1mesh"), dict) else None
+    l1mesh_rows = ""
+    if l1mesh:
+        def _lane_table_rows(kind: str) -> str:
+            rows = []
+            for lane in l1mesh.get(kind, []) or []:
+                rows.append(
+                    "<tr>"
+                    f"<td>{int(lane.get('id', 0) or 0)}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('accesses', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('bytes', 0) or 0) / 1024:.1f}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('avg_latency_cycles', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('avg_wait_cycles', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('avg_service_cycles', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('max_latency_cycles', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('max_wait_cycles', 0) or 0):,}</td>"
+                    f"<td style='text-align:right'>{int(lane.get('max_service_cycles', 0) or 0):,}</td>"
+                    "</tr>"
+                )
+            return "".join(rows)
+        l1mesh_lane_tables = f"""
+<h2>L1Mesh AXI lane latency</h2>
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+  <div>
+    <h3 style="font-size:13px; margin:0 0 6px;">AXI_R lanes</h3>
+    <table class="sortable"><thead><tr><th>lane</th><th>accesses</th><th>KB</th><th>avg cyc</th><th>avg wait</th><th>avg service</th><th>max cyc</th><th>max wait</th><th>max service</th></tr></thead>
+    <tbody>{_lane_table_rows('read_lanes')}</tbody></table>
+  </div>
+  <div>
+    <h3 style="font-size:13px; margin:0 0 6px;">AXI_W lanes</h3>
+    <table class="sortable"><thead><tr><th>lane</th><th>accesses</th><th>KB</th><th>avg cyc</th><th>avg wait</th><th>avg service</th><th>max cyc</th><th>max wait</th><th>max service</th></tr></thead>
+    <tbody>{_lane_table_rows('write_lanes')}</tbody></table>
+  </div>
+</div>
+"""
+        l1mesh_rows = f"""
+  <span class="kv"><b>L1Mesh NoC:</b> {int(l1mesh.get('accesses',0) or 0):,} accesses / {int(l1mesh.get('stripes',0) or 0):,} stripes / imposed {int(l1mesh.get('imposed_wait_cycles',0) or 0):,} cycles</span>
+  <span class="kv"><b>NoC wait edge/router/link/local/sram:</b> {int(l1mesh.get('edge_wait_cycles',0) or 0):,} / {int(l1mesh.get('router_wait_cycles',0) or 0):,} / {int(l1mesh.get('link_wait_cycles',0) or 0):,} / {int(l1mesh.get('local_wait_cycles',0) or 0):,} / {int(l1mesh.get('sram_wait_cycles',0) or 0):,} cycles</span>
+  <span class="kv"><b>NoC service edge/router/link/local/sram:</b> {int(l1mesh.get('edge_service_cycles',0) or 0):,} / {int(l1mesh.get('router_service_cycles',0) or 0):,} / {int(l1mesh.get('link_service_cycles',0) or 0):,} / {int(l1mesh.get('local_service_cycles',0) or 0):,} / {int(l1mesh.get('sram_service_cycles',0) or 0):,} cycles</span>"""
+    else:
+        l1mesh_lane_tables = ""
     html_doc = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>
@@ -832,11 +872,14 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   <span class="kv"><b>Util:</b> avg {float(summary.get('util_avg_pct',0.0) or 0.0):.1f}% / peak {float(summary.get('util_peak_pct',0.0) or 0.0):.1f}% ({html.escape(str(summary.get('util_peak_engine','')))})</span>
   <span class="kv"><b>DRAM r/w:</b> {summary.get('dram_read_bytes',0)/1e6:.2f} / {summary.get('dram_write_bytes',0)/1e6:.2f} MB</span>
   <span class="kv"><b>SRAM r/w:</b> {summary.get('sram_read_bytes',0)/1e6:.2f} / {summary.get('sram_write_bytes',0)/1e6:.2f} MB</span>
+{l1mesh_rows}
 </div>
 
 <h2>Per-engine busy</h2>
 <table><thead><tr><th>engine</th><th>busy cycles</th><th>utilization</th></tr></thead>
 <tbody>{eng_rows}</tbody></table>
+
+{l1mesh_lane_tables}
 
 <h2>Gantt timeline (interactive)</h2>
 <div id="gantt-controls" style="font-size:12px; margin:6px 0;">

@@ -153,6 +153,10 @@ batch/profile_hotspot.html
 
 `profile_hotspot.html` 是 Hotspot micro-pattern index，不顯示 `cx` /
 `myms/cx`，預設用 `mesh/fast` 排序，適合看 L1Mesh / NoC timing overhead。
+目前 L1Mesh mesh model 已加入 transparent NoC contention、AXI 16-beat burst
+chopping，以及 `AXI_R0..15` / `AXI_W0..15` lane latency table。看單一
+model 的 `.mesh.html` 時，`max service` 代表單一 chopped burst 的服務時間；
+`max latency` 則包含 queue wait。
 
 ---
 
@@ -210,6 +214,30 @@ batch/profile_hotspot.html
 ```
 
 Hotspot 沒有 MDLA6 `cx` baseline，所以報表不顯示 `cx` 欄位。
+
+最近 L1Mesh AXI burst/lane-stat update 後，Hotspot 的 `mesh/fast` 已接近
+`1.0`。若之後調整 edge mapping 或 NoC resource model，請用：
+
+```bash
+./batch/run_hotspot.py --rerun-all
+```
+
+再檢查 `batch/profile_hotspot.html` 以及個別
+`batch/output/<stem>.mesh.html` 的 lane latency table。
+
+Hotspot compile coverage update 後，原本 73 個 skipped compile rows 都會
+lower 成 `matrlz` fallback。最新完整 sweep：
+
+```text
+fast 11/11, conflict 11/11, mesh 11/11
+Compile log: 364 rows, 0 skipped
+matrlz fallback rows: 73
+```
+
+`matrlz` 是 compiler materialized-reference fallback，常見於 non-spatial
+MEAN、runtime FC、INT GELU、shape-prop mismatch reshape、descriptor dim
+overflow。它是可驗證/可 profile 的 coverage layer，不是 dedicated arithmetic
+engine。
 
 ---
 

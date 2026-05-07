@@ -130,22 +130,19 @@ row_addr        = bank_line % 768      // 0..767
 
 Ingress paths：
 
-| Ingress | Role | Goes through L1_Manager? |
-|---|---|---|
-| Left edge 4R/4W | CONV ACT_R primary ingress | No, direct to L1Mesh |
-| Top edge 4R/4W | CONV WGT_R primary ingress | No, direct to L1Mesh |
-| Right edge 4R/4W | L1Manager_R ingress for non-CONV / UDMA reads | Yes |
-| Bottom edge 4R/4W | L1Manager_W ingress for non-CONV / UDMA writes | Yes |
+| Logical edge | Banks | AXI_R lanes | AXI_W lanes |
+|---|---|---|---|
+| W0 | B0, B1 | R0, R1 | W0, W1 |
+| E0 | B2, B3 | R2, R3 | W2, W3 |
+| W1 | B4, B5 | R4, R5 | W4, W5 |
+| E1 | B6, B7 | R6, R7 | W6, W7 |
+| W2 | B8, B9 | R8, R9 | W8, W9 |
+| E2 | B10, B11 | R10, R11 | W10, W11 |
+| W3 | B12, B13 | R12, R13 | W12, W13 |
+| E3 | B14, B15 | R14, R15 | W14, W15 |
 
-The 4x4 mesh exposes 4 R/W edge ports per side:
-
-```
-top edge    : 4R + 4W  -> WGT_R ingress
-right edge  : 4R + 4W  -> L1Manager_R ingress
-bottom edge : 4R + 4W  -> L1Manager_W ingress
-left edge   : 4R + 4W  -> ACT_R ingress
-aggregate   : 16R + 16W edge injection/ejection
-```
+The 4x4 mesh exposes 16R + 16W edge injection/ejection lanes in this logical
+map. `spec/l1mesh.drawio` page `L1Mesh-AXI-Edge-Map` shows the same mapping.
 
 These edge ports reduce NoC injection hot spots and give each traffic class a
 clean physical side of the mesh. They do **not** multiply SRAM bank service
@@ -177,7 +174,8 @@ Simulator timing modes:
 |---|---|---|
 | Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
 | Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read and write/write to the same bank serialize through bank finish arrays, so cycles can increase when traffic collides. |
-| Mesh conflict | `--l1-timing=mesh` | Starts from the same per-bank SRAM port conflict model as `conflict`, then adds a 4x4 mesh approximation: every 16B beat enters from an edge port, uses deterministic XY routing through one-flit/cycle router/link resources, then arbitrates for the SRAM macro port. |
+| Mesh conflict | `--l1-timing=mesh` | Transparent 4x4 NoC contention model plus per-bank SRAM service. Long L1 accesses are chopped into AXI bursts: 128b lane × 16 beats = 256B per lane, or 4096B across 16 lanes. |
+| Mesh optimistic | `--l1-timing=mesh-opt` | Same AXI burst chopping and SRAM service, but skips NoC resource reservation. |
 
 The fast mode is intended for regular model sweeps. The conflict and mesh modes
 are for architecture studies where L1 bank/port contention and NoC routing hot
@@ -463,6 +461,13 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 | **Compare** | max, min, equal, less, greater, less_eq, greater_eq | 2-tensor → mask 或 select | 直 HW comparator |
 | **Bit / Logic** | and, or, xor, not, shift_l, shift_r | int 操作 | 直 HW |
 | **Reduce-style** | sum, mean, max, min（reduce 軸由 descriptor 指定） | tensor → tensor (rank-reduce) | HW iterator + accumulator |
+
+Simulator note: the current compiler has a `matrlz` fallback for graph nodes
+whose true lowering is not modeled yet. It pre-materializes reference bytes and
+models a chunked `DRAM -> L1 -> DRAM` UDMA copy. Hotspot uses this for
+non-spatial MEAN, runtime FC, INT GELU/HARD_SWISH, shape-prop mismatch reshape,
+and descriptor-dim overflow tensors. This is coverage scaffolding, not a
+replacement for the EWE/POOL arithmetic described above.
 
 **Datatype 支援：**
 - 所有 INT dtype（INT8 / INT16 / INT32）

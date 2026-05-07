@@ -179,14 +179,20 @@ traffic。
 
 NoC edge ports：
 
-| Edge | Ports | Primary traffic |
-|---|---:|---|
-| left | 4R + 4W | CONV ACT_R direct ingress |
-| top | 4R + 4W | CONV WGT_R direct ingress |
-| right | 4R + 4W | L1Manager_R |
-| bottom | 4R + 4W | L1Manager_W |
+目前 simulator 的 logical edge map 是 8 個 perimeter edges：
 
-四邊合計是 16R + 16W edge injection/ejection。這是在降低 NoC 邊界 hot spot，
+| Edge | Banks | AXI_R lanes | AXI_W lanes |
+|---|---|---|---|
+| W0 | B0, B1 | R0, R1 | W0, W1 |
+| E0 | B2, B3 | R2, R3 | W2, W3 |
+| W1 | B4, B5 | R4, R5 | W4, W5 |
+| E1 | B6, B7 | R6, R7 | W6, W7 |
+| W2 | B8, B9 | R8, R9 | W8, W9 |
+| E2 | B10, B11 | R10, R11 | W10, W11 |
+| W3 | B12, B13 | R12, R13 | W12, W13 |
+| E3 | B14, B15 | R14, R15 | W14, W15 |
+
+這合計是 16R + 16W edge injection/ejection。這是在降低 NoC 邊界 hot spot，
 不是把 SRAM backend bandwidth 乘四；真正的 per-bank service 仍是每 bank
 每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
 
@@ -294,28 +300,23 @@ x = bank_id % 4 = 2
 y = bank_id / 4 = 1
 ```
 
-如果這是 ACT_R，從 left edge 進來。left edge 對每一列都有一個入口，所以這個
-request 可以從 row 1 的左邊進入：
+如果 request 目標是 bank 6，logical edge map 會讓它從比較近的 E1 edge 進入：
 
 ```text
-left ingress row 1 -> B4 router -> B5 router -> B6 router -> local SRAM bank
+E1 edge -> B7 router -> B6 router -> local SRAM bank
 ```
 
 用座標表示：
 
 ```text
-source = (0, 1)
+source = (3, 1)
 dest   = (2, 1)
-route  = (0,1) -> (1,1) -> (2,1)
+route  = (3,1) -> (2,1)
 ```
 
-目前 mesh mode 用 deterministic XY routing：
-
-```text
-先走 X 方向，再走 Y 方向。
-```
-
-在這個例子裡，Y 一樣，所以只需要往右走兩步。
+目前 mesh mode 不再把每個 16B beat 的 hop latency 串起來加到 critical path；
+它會為 edge/router/link/local resource 做 contention reservation，真正完成時間
+主要由 bank SRAM service 和 queue wait 決定。
 
 如果目標是 bank 14：
 
@@ -323,16 +324,15 @@ route  = (0,1) -> (1,1) -> (2,1)
 B14 -> x=2, y=3
 ```
 
-ACT_R 從 left edge row 3 進來：
+bank 14 走 E3 edge：
 
 ```text
-source = (0, 3)
+source = (3, 3)
 dest   = (2, 3)
-route  = (0,3) -> (1,3) -> (2,3)
+route  = (3,3) -> (2,3)
 ```
 
-WGT_R 的概念一樣，只是主要從 top edge 進來。若要更接近實體圖，top edge 可以想成
-每一欄有入口；right / bottom 則給 L1Manager read / write traffic 使用。
+目前 `L1Mesh-AXI-Edge-Map` 頁面列出 16R / 16W lanes 對 W/E edge 和 bank 的完整 mapping。
 
 ### 4.5.3 什麼叫 router/link conflict
 
@@ -358,15 +358,13 @@ router B4 east output -> B5
 在 `--l1-timing=mesh` 裡，一個 16B beat 會依序消耗：
 
 ```text
-1. edge ingress port
-2. 每一跳 router output
-3. 每一跳 directed link
-4. 目標 router 的 local output
-5. 目標 bank 的 SRAM macro port
+1. long access 先切成 AXI 16-beat bursts
+2. edge/router/link/local resource 做 contention reservation
+3. 目標 bank 的 SRAM lane 服務 chopped burst
 ```
 
-所以 mesh mode 比 port-conflict mode 多看了「路上會不會塞」，不只看「到了 bank
-以後 SRAM port 會不會塞」。
+所以 mesh mode 比 port-conflict mode 多看了「路上資源是否有 queue buildup」，
+但不再把每個 hop 固定 latency 疊到每個 16B stripe 上。
 
 ### 4.5.4 edge ports 為什麼不是 SRAM bandwidth
 
@@ -417,14 +415,15 @@ bank service = 16B / SRAM cycle
 它做了：
 
 ```text
-每 16B stripe = 1 個 flit
-bank = (addr / 16) % 16
-bank -> 4x4 座標
-read 從 left edge 進
-write 從 right edge 進
-route 使用 deterministic XY
-每個 edge ingress / router output / link / bank port 都有 finish time
-如果資源忙，就等到它空
+long access 先切成 AXI burst chunks
+AXI lane width = 128b = 16B
+max burst = 16 beats
+per-lane burst = 256B
+16-lane aggregate chunk = 4096B
+每個 chunk 再分散到 16 banks
+bank swizzle 減少 repeated-slice row/column 熱點
+edge/router/link/local resource 只當 contention reservation
+SRAM bank port service 仍是真正完成時間的主要限制
 ```
 
 它還沒做完整硬體 QoS：
@@ -453,6 +452,7 @@ source 裡的 constants：
 static constexpr unsigned N_BANKS = 16;
 static constexpr unsigned BANK_STRIDE = 16;
 static constexpr unsigned BYTES_PER_CYCLE = 16;
+static constexpr unsigned AXI_MAX_BURST_BEATS = 16;
 static constexpr double CORE_CLOCK_GHZ = 1.9;
 static constexpr double SRAM_CLOCK_GHZ = 1.3;
 ```
@@ -502,7 +502,8 @@ Simulator 提供三種 L1 timing mode：
 |---|---|---|
 | fast estimate | `--l1-timing=fast` | 預設。用 aggregate bandwidth 估算，不逐 bank 計算 port conflict，適合 regression sweep。 |
 | port conflict | `--l1-timing=conflict` | 逐 bank finish-array 模型，read/read 和 write/write 同 bank 會 serialize，適合架構分析。 |
-| mesh conflict | `--l1-timing=mesh` | 在 bank port conflict 之外，加入 4x4 mesh edge ingress、XY router/link arbitration，再進 SRAM macro port，適合找 NoC hotspot。 |
+| mesh conflict | `--l1-timing=mesh` | 逐 bank SRAM service + transparent NoC contention reservation；長 access 依 AXI 16-beat burst 切成 4096B aggregate chunks；適合找 lane imbalance / queue buildup。 |
+| mesh optimistic | `--l1-timing=mesh-opt` | 使用 mesh-style burst chopping + SRAM bank service，但跳過 NoC resource reservation。 |
 
 明確地說，`mesh` 不是取代 `conflict`，而是：
 
@@ -512,6 +513,20 @@ mesh = SRAM bank/port conflict + NoC edge/router/link conflict
 
 因此 `conflict/fast` 看 SRAM bank/port overhead，`mesh/conflict` 看額外 NoC
 overhead，`mesh/fast` 則是兩者合併後的總 overhead。
+
+mesh profile 的 HTML 會額外顯示 `L1Mesh AXI lane latency` 表：
+
+| 欄位 | 意義 |
+|---|---|
+| accesses | 此 lane 被分配到的 chopped AXI bursts 數 |
+| KB | 此 lane 總服務資料量 |
+| avg cyc / max cyc | request 到 burst 完成的 latency |
+| avg wait / max wait | queue wait，包含前序 burst / resource contention |
+| avg service / max service | 單一 chopped burst 在 SRAM lane 上的服務時間 |
+
+如果 `max service` 很高，通常代表 burst chopping 或 beat 寬度不合理；目前
+16-beat burst 下，128b lane 的 max service 約 23 core cycles。若 `max latency`
+仍很高，多半是 large FC / weight transfer 的後段 chopped bursts 排隊。
 
 `batch/run_model.py` 可用 `--l1-timing` 單跑其中一種模式。`batch/run_mdla6_pattern.py`、
 `batch/run_hotspot.py`、`batch/run_ethz_v5.py`、`batch/run_ethz_v6.py`、
@@ -633,8 +648,8 @@ sc_core::sc_time write_bank_finish_[N_BANKS];
 
 - read / write 同 bank port conflict。
 - engine master arbitration。
-- burst alignment penalty。
 - outstanding transaction depth。
+- requester class（CONV ACT_R / CONV WGT_R / L1Manager_R / L1Manager_W）傳到 `L1Mesh`。
 
 目前的 model 已足夠讓 tiling、bank conflict、DRAM pressure 對 performance 有一階效果。
 
