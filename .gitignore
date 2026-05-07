@@ -7,6 +7,9 @@
 model/*
 !model/Hotspot/
 !model/Hotspot/*.tflite
+!model/ETHZ_v6/
+model/ETHZ_v6/*
+!model/ETHZ_v6/.gitkeep
 
 # Compile artefacts
 systemc/build/
