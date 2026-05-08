@@ -612,11 +612,15 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         cursor = 0
         for wi, (idx, L, total_w) in enumerate(write_layers):
             remaining_tasks = len(annotated) - cursor
+            if remaining_tasks <= 0:
+                break
             if wi + 1 == len(write_layers):
                 take = remaining_tasks
             else:
                 take = round(len(annotated) * (total_w / total_w_all))
                 take = max(1, min(take, remaining_tasks - (len(write_layers) - wi - 1)))
+            if take <= 0:
+                continue
             layer_tasks = list(range(cursor, cursor + take))
             cursor += take
             layer_id = int(L.get("id", idx) or idx)

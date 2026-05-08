@@ -2123,6 +2123,8 @@ int sc_main(int argc, char* argv[]) {
             const bool exact_input =
                 B.in_h == A.out_h && B.in_w == A.out_w;
             if (!padded_input && !exact_input) return false;
+            if (B.out_c <= 4 && B.out_h >= 256 && B.out_w >= 256)
+                return false;
 
             const uint32_t elem = 1;
             const uint64_t pure_wgt = conv_pure_weight_bytes(B);
@@ -2403,6 +2405,9 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             if (D.out_h != uint32_t(D.in_h) * block ||
                 D.out_w != uint32_t(D.in_w) * block)
+                return false;
+            if ((A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8) &&
+                (D.out_h >= 1024 || D.out_w >= 1024))
                 return false;
             if (graph_metas) {
                 const auto& GA = graph_metas[i];
