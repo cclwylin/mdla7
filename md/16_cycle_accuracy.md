@@ -243,6 +243,9 @@ Profile 裡常有：
 ## 16.11 Ideal cycle
 
 HTML profile 會顯示 ideal cycle / cumulative ideal cycle。這通常是用 layer compute estimate 做比較。
+CONV 的 `MAC util` 用 ideal CONV cycle 除以實際 CONV engine task
+duration；不要拿 ideal cycle 除以 per-layer wall window，因為 stream/fuse
+會讓下一層在前一層 tail 尚未全部 retired 前就開始，layer window 可能被壓短。
 
 用法：
 

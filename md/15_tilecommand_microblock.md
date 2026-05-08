@@ -229,6 +229,50 @@ optional store EWE output
 這主要服務 Deeplab / large residual 類 pattern，避免 `CONV store -> EWE reload`
 在大 activation 上造成 DRAM 與 L1Mesh hotspot。
 
+## 15.8.2 CONV-CONV microblock streaming
+
+`try_stream_conv_chain()` 現在把 Conv chain 分成兩種安全等級：
+
+- `CONV(1x1) -> CONV(1x1) -> ...` linear pointwise chain 可以用 generic
+  microblock streaming，只要每個 intermediate 是 direct single-consumer
+  boundary。
+- `CONV(3x3 SAME) -> ... -> DEPTH_TO_SPACE -> EWE` 保留既有的 deep stream
+  path，會為下游 spatial layer 擴張 halo rows。
+
+Plain `CONV(3x3 SAME) -> CONV(3x3 SAME)` chain 仍先走保守 per-layer tiler。
+U-Net 類 tiled pair 會立刻暴露 seam correctness 風險；要開這條路徑，需要
+更明確的 line-buffer / halo ownership，而不是只靠 row-range expansion。
+
+## 15.8.3 Binary EWE microblock chain
+
+`try_stream_binary_ewe_chain()` 針對線性的 `ADD/MUL/SUB -> ADD/MUL/SUB`
+chain 做真正的 L1 handoff。條件刻意保守：
+
+- INT8 binary EWE。
+- 每層 shape / dtype 相同。
+- `GraphMeta` 確認 producer output 是下一層的 `input0`，避免 ADD/SUB/MUL
+  量化參數因 input0/input1 對調而失真。
+- 中間 producer 允許 `no-store`。
+- chain 尾端若直接接 `SOFTMAX`，會退回原本的 per-layer EWE wavefront；
+  這條 path 能把 attention matrix 以 contiguous L1 tensor 留給 softmax，
+  避免 softmax 重新從 DRAM 讀整張 matrix。
+
+每個 microblock 會先載入第一層 input-A tile，接著對同一個 tile 依序跑
+多個 EWE stage。中間結果只在兩個 L1 data buffer ping-pong，不寫回 DRAM；
+每層自己的 input-B tile 和 48B params 仍從 DRAM 載入。Profile 的 `flow`
+欄位會把這些 stage 標成同一個 flow，例如 sd decoder slice 的
+`L9 -> L10 -> L11`。
+
+同時，Hotspot 裡 `RESHAPE/MATERIALIZE` 若只是中間 graph boundary 且大小不變，
+會被當成 metadata/reference checkpoint 跳過 DRAM copy；下游 layer 的 synthetic
+input 已由 compiler materialize，所以 functional correctness 仍由後續可驗證 layer
+錨定。
+
+同樣的 rule 也套到中間 `CONV/DWCONV/FC` 與 unary EWE (`GELU/HARD_SWISH`)
+producer：GraphMeta 顯示後面還有 consumer 時，不再把這個 transient activation
+寫回 DRAM；若現有 fused/tiled path 能保留 L1 layout，就走真 on-chip handoff，
+否則 consumer 仍使用 compiler 已 materialize 的 synthetic input。
+
 ---
 
 ## 15.9 Stream metadata 和 HTML profile

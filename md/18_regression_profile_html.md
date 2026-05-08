@@ -102,10 +102,14 @@ batch/output/<stem>.html
 常見欄位：
 
 ```text
-id, op, in_h, in_w, in_c, out_h, out_w, out_c,
+id, flow, op, in_h, in_w, in_c, out_h, out_w, out_c,
 tiles_h, tiles_oc, pass, cycles_layer, cycles_cum,
-conv_util_pct, dram_r, dram_w, sram_r, sram_w, streamed
+conv_util_pct, dram_r, dram_w, sram_r, sram_w
 ```
+
+`flow` 是 L1 handoff group 的起點 layer id。沒有 fuse 的 layer 會滿足
+`flow == id`；例如 L9/L10/L11 若真的形成同一個 on-chip flow，三列都會
+顯示 `flow = 9`。
 
 適合丟到 pandas / spreadsheet，找 top cycle layers。
 
@@ -119,13 +123,15 @@ conv_util_pct, dram_r, dram_w, sram_r, sram_w, streamed
 
 - summary chips
 - interactive Gantt
-- layer table
+- layer table, including flow id and CONV MAC util
 - engine utilization
 - compile log
 - sim log
 - notes / candidates
 
-HTML 對 debug overlap 和 labeling 很有用。
+HTML 對 debug overlap 和 labeling 很有用。CONV MAC util 是用 ideal
+CONV cycle / 實際 CONV task duration，不用 layer wall window，避免 fused
+或 overlapped layer window 被壓短時出現大於 100% 的假象。
 
 ---
 

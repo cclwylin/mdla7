@@ -246,6 +246,7 @@ sim time: 3443920 cycles @ 1.9 GHz (= 1.813 ms)
 
 | 欄位 | 意義 |
 |---|---|
+| `flow` | Profile 裡的 L1 handoff group 起點 layer id；沒有 fuse 時 `flow == id` |
 | `tiles=HxOC` | 這層被切成多少 OH tile / OC tile |
 | `cycles_layer` | 這層 window 的 cycle |
 | `cum` | cumulative cycles |
@@ -339,7 +340,7 @@ Producer output stays in L1
   -> Skip intermediate DRAM write
 ```
 
-這會降低 DRAM bandwidth，改善 cycle。代價是中間 layer 的 per-layer verification 需要換方法。現在 report 會把這些 layer 註明為 fused / streamed，summary 也會說有多少層沒有 intermediate DRAM verify。
+這會降低 DRAM bandwidth，改善 cycle。代價是中間 layer 的 per-layer verification 需要換方法。現在 console 會把這些 layer 註明為 fused / streamed，Profile CSV/HTML 會用 `flow` 欄位把真正的 L1 handoff group 標在一起，summary 也會說有多少層沒有 intermediate DRAM verify。
 
 ---
 

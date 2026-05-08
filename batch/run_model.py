@@ -587,6 +587,52 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             prev_end = end
         return annotated
 
+    def _annotate_udma_write_tasks(tasks: list) -> list:
+        """Return HTML-only UDMA-W tasks with layer/write byte metadata.
+
+        The simulator serializes write-lane timing as bare [start,end] pairs.
+        Layer accounting in profile.json is already authoritative, so attach
+        each write task to the layer window it starts in and split that layer's
+        dram_w bytes across its tasks.  This keeps Gantt hover/stat summaries
+        consistent with the layer table and top-level DRAM W total.
+        """
+        annotated = [list(t[:2]) for t in tasks]
+        if not annotated or not layers:
+            return annotated
+
+        write_layers = [
+            (idx, L, int(L.get("dram_w", 0) or 0))
+            for idx, L in enumerate(layers)
+            if int(L.get("dram_w", 0) or 0) > 0
+        ]
+        total_w_all = sum(w for _, _, w in write_layers)
+        if not write_layers or total_w_all <= 0:
+            return annotated
+
+        cursor = 0
+        for wi, (idx, L, total_w) in enumerate(write_layers):
+            remaining_tasks = len(annotated) - cursor
+            if wi + 1 == len(write_layers):
+                take = remaining_tasks
+            else:
+                take = round(len(annotated) * (total_w / total_w_all))
+                take = max(1, min(take, remaining_tasks - (len(write_layers) - wi - 1)))
+            layer_tasks = list(range(cursor, cursor + take))
+            cursor += take
+            layer_id = int(L.get("id", idx) or idx)
+            op = str(L.get("op", "")).strip().lower()
+            base = total_w // len(layer_tasks) if layer_tasks else 0
+            rem = total_w % len(layer_tasks) if layer_tasks else 0
+            for pos, ti in enumerate(layer_tasks):
+                nbytes = base + (1 if pos < rem else 0)
+                t = annotated[ti]
+                label = f"L{layer_id} {op} output/store"
+                if nbytes:
+                    label += f" ({_kb(nbytes)} KB)"
+                t.append(label)
+                t.append(nbytes)
+        return annotated
+
     def _conv_wait_tasks_from_udma(udma_tasks: list) -> list:
         """Synthetic Gantt lane: CONV-class layer front-end waits on UDMA reads."""
         waits = []
@@ -630,12 +676,15 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         if name == "udma_r":
             tasks = _annotate_udma_read_tasks(tasks)
             conv_wait_tasks = _conv_wait_tasks_from_udma(tasks)
+        elif name == "udma_w":
+            tasks = _annotate_udma_write_tasks(tasks)
         eng_payload[name] = {
             "busy": int(e.get("busy_cycles", 0) or 0),
             "tasks": tasks,
         }
     layer_marks = [
         {"id": int(L.get("id", i)),
+         "flow": int(L.get("flow", L.get("id", i)) if L.get("flow") is not None else L.get("id", i)),
          "op": str(L.get("op", "")).strip(),
          "end": int(L.get("cycles_cum", 0) or 0)}
         for i, L in enumerate(layers)
@@ -647,16 +696,65 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         "total":   total_cyc,
     })
 
-    def _dtype_mac_per_cycle(dtype: str) -> int:
+    def _dtype_bit_widths(dtype: str) -> tuple[int, int]:
         d = (dtype or "").upper()
-        # Spec §5.3 / §3A.2: INT8×8 baseline = 16,384 MAC/cyc;
-        # INT16×16 and FP* = 4,096 MAC/cyc. INT16x8 hybrid keeps INT8
-        # weights but INT16 activations; use the conservative INT16 rate.
+        # Mirrors ConvEngine::conv_cycles(): bit-mult invariant with
+        # 1,048,576 bit-mults/cycle.
+        if "FP8" in d:
+            return (8, 8)
+        if "INT8X4" in d or "INT4" in d:
+            return (8, 4)
+        if "INT16X4" in d:
+            return (16, 4)
+        if "INT16X8" in d:
+            return (16, 8)
         if "INT16" in d or "FP" in d or "BF" in d:
-            return 4096
+            return (16, 16)
+        return (8, 8)
+
+    def _conv_model_cycles(macs: int, dtype: str, tile_count: int) -> int:
+        a_bits, b_bits = _dtype_bit_widths(dtype)
+        return _ceil_div(int(macs) * a_bits * b_bits, 1_048_576) + 64 * max(1, tile_count)
+
+    def _conv_task_cycles_by_layer() -> list[int]:
+        """Map serialized CONV engine tasks back to conv-class layers.
+
+        The layer wall window can be shorter than a CONV task when functional
+        chain delivery and stream overlap let a successor start before the
+        producer's modeled compute tail has retired.  For MAC utilization,
+        divide by the CONV task time itself, not by that shortened layer window.
+        """
+        tasks = list((engines.get("conv", {}) or {}).get("tasks") or [])
+        by_layer = [0] * len(layers)
+        task_idx = 0
+        for idx, L in enumerate(layers):
+            op = str(L.get("op", "")).strip().lower()
+            if op not in ("conv", "dwconv", "fc"):
+                continue
+            th, toc = (L.get("tiles") or [1, 1])
+            n_tasks = max(1, int(th or 1) * int(toc or 1))
+            total = 0
+            for _ in range(n_tasks):
+                if task_idx >= len(tasks):
+                    break
+                t = tasks[task_idx]
+                if len(t) >= 2:
+                    total += max(0, int(t[1]) - int(t[0]))
+                task_idx += 1
+            by_layer[idx] = total
+        return by_layer
+
+    conv_task_cycles = _conv_task_cycles_by_layer()
+
+    def _dtype_elem_lanes(dtype: str) -> int:
+        d = (dtype or "").upper()
+        if "FP" in d or "BF" in d:
+            return 32
+        if "INT16" in d:
+            return 32
         if "INT4" in d or "INT8X4" in d:
-            return 32768
-        return 16384
+            return 64
+        return 64
 
     def _ceil_div(a: int, b: int) -> int:
         return (a + b - 1) // b if b > 0 else 0
@@ -673,18 +771,20 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             if compile_row.get("k"):
                 kh, kw = compile_row["k"]
         out_elems = int(oh) * int(ow) * int(oc)
+        th, toc = (L.get("tiles") or [1, 1])
+        tile_count = max(1, int(th or 1) * int(toc or 1))
         if op in ("conv", "dwconv", "fc"):
             if op == "dwconv":
                 macs = out_elems * int(kh) * int(kw)
             else:
                 macs = out_elems * int(kh) * int(kw) * _ceil_div(int(ic), max(group, 1))
-            return _ceil_div(macs, _dtype_mac_per_cycle(dtype))
+            return _conv_model_cycles(macs, dtype, tile_count)
         if op in ("avgpool", "maxpool"):
-            return _ceil_div(out_elems * int(kh) * int(kw), 16)
+            return _ceil_div(out_elems * int(kh) * int(kw), _dtype_elem_lanes(dtype))
         if op in ("add", "mul", "sub", "h_swsh", "gelu"):
-            return _ceil_div(out_elems, 16)
+            return _ceil_div(out_elems, _dtype_elem_lanes(dtype))
         if op == "softmax":
-            return 3 * _ceil_div(out_elems, 16)
+            return 3 * _ceil_div(out_elems, _dtype_elem_lanes(dtype))
         return 0
 
     ideal_rows: list[tuple[int, int]] = []
@@ -697,6 +797,8 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
     def _layer_row(L: dict) -> str:
         layer_idx = int(L.get("id", 0) or 0)
+        flow_raw = L.get("flow")
+        flow_idx = int(flow_raw if flow_raw is not None else layer_idx)
         ih, iw, ic = (L.get("in")  or [0, 0, 0])
         oh, ow, oc = (L.get("out") or [0, 0, 0])
         kh, kw     = (L.get("k")   or [0, 0])
@@ -707,9 +809,10 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         )
         cycles_layer = int(L.get('cycles_layer', 0) or 0)
         op_norm = str(L.get("op", "")).strip().lower()
-        ideal_util = (
-            100.0 * ideal_layer / cycles_layer
-            if cycles_layer > 0 and ideal_layer > 0 and op_norm in ("conv", "dwconv", "fc")
+        conv_task = conv_task_cycles[layer_idx] if 0 <= layer_idx < len(conv_task_cycles) else 0
+        mac_util = (
+            100.0 * ideal_layer / conv_task
+            if conv_task > 0 and ideal_layer > 0 and op_norm in ("conv", "dwconv", "fc")
             else 0.0
         )
         # v8.5: old "conv util" is actually CONV-engine occupancy within the
@@ -721,6 +824,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                      else '<td style="color:#b00020">FAIL</td>')
         return ("<tr>" +
             f"<td>{layer_idx}</td>" +
+            f"<td>F{flow_idx}</td>" +
             f"<td>{html.escape(str(L.get('op','')).strip())}</td>" +
             f"<td>{ih}</td><td>{iw}</td><td>{ic}</td>" +
             f"<td>{oh}</td><td>{ow}</td><td>{oc}</td>" +
@@ -731,7 +835,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             f"<td style='text-align:right'>{int(L.get('cycles_cum',0)):,}</td>" +
             f"<td style='text-align:right'>{ideal_layer:,}</td>" +
             f"<td style='text-align:right'>{ideal_cum_val:,}</td>" +
-            f"<td style='text-align:right'>{ideal_util:.2f}%</td>" +
+            f"<td style='text-align:right'>{mac_util:.2f}%</td>" +
             f"<td style='text-align:right'>{util:.1f}%</td>" +
             f"<td style='text-align:right'>{_kb(L.get('dram_r',0))}</td>" +
             (f"<td style='text-align:right;color:#b00020;font-weight:600'>{_kb(L.get('dram_w',0))}</td>"
@@ -955,7 +1059,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   // → axis (32 px). The OP_ROW shows one rect per layer with the op id and
   // name; click an op rect to zoom to that layer.
   const LANE_H = 56, LANE_PAD = 8, LEFT = 72, RIGHT = 12, TOP = 8, AXIS_H = 32;
-  const OP_ROW_H = 28;
+  const OP_ROW_H = 34;
   const total = Math.max(1, data.total | 0);
 
   // viewState: visible cycle window.
@@ -1010,16 +1114,20 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       const fill = (L.id % 2) ? '#dde6f5' : '#eaf0fb';
       ops += `<rect class="gantt-op" x="${{x0}}" y="${{Y_OPS + 2}}" width="${{w}}" height="${{OP_ROW_H - 4}}" `
            + `fill="${{fill}}" stroke="#9bb5db" stroke-width="0.5" `
-           + `data-id="${{L.id}}" data-op="${{L.op}}" data-start="${{L.start}}" data-end="${{L.end}}"/>`;
-      // Label: "L<id> op" if there's room, else just "L<id>".
-      const label_full = `L${{L.id}} ${{L.op}}`;
-      const label_short = `L${{L.id}}`;
-      const min_w_full  = label_full.length * 6.5;
-      const min_w_short = label_short.length * 6.5;
+           + `data-id="${{L.id}}" data-flow="${{L.flow}}" data-op="${{L.op}}" data-start="${{L.start}}" data-end="${{L.end}}"/>`;
+      // Label: two lines when there is room: layer/flow on top, op below.
+      const label_top = `L${{L.id}} F${{L.flow}}`;
+      const label_flow = `F${{L.flow}}`;
+      const min_w_full = Math.max(label_top.length, String(L.op).length) * 6.5;
+      const min_w_top  = label_top.length * 6.5;
+      const min_w_flow = label_flow.length * 6.5;
       if (w >= min_w_full) {{
-        ops += `<text x="${{x0 + 4}}" y="${{Y_OPS + OP_ROW_H/2 + 4}}" font-size="11" fill="#1a3766" pointer-events="none">${{label_full}}</text>`;
-      }} else if (w >= min_w_short) {{
-        ops += `<text x="${{x0 + 3}}" y="${{Y_OPS + OP_ROW_H/2 + 4}}" font-size="11" fill="#1a3766" pointer-events="none">${{label_short}}</text>`;
+        ops += `<text x="${{x0 + 4}}" y="${{Y_OPS + 14}}" font-size="10" fill="#1a3766" pointer-events="none">${{label_top}}</text>`;
+        ops += `<text x="${{x0 + 4}}" y="${{Y_OPS + 27}}" font-size="10" fill="#1a3766" pointer-events="none">${{L.op}}</text>`;
+      }} else if (w >= min_w_top) {{
+        ops += `<text x="${{x0 + 3}}" y="${{Y_OPS + OP_ROW_H/2 + 4}}" font-size="11" fill="#1a3766" pointer-events="none">${{label_top}}</text>`;
+      }} else if (w >= min_w_flow) {{
+        ops += `<text x="${{x0 + 3}}" y="${{Y_OPS + OP_ROW_H/2 + 4}}" font-size="11" fill="#1a3766" pointer-events="none">${{label_flow}}</text>`;
       }}
     }}
     gOps.innerHTML = ops;
@@ -1234,10 +1342,11 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       tip.style.opacity = '1';
     }} else if (t && t.classList && t.classList.contains('gantt-op')) {{
       const id  = t.getAttribute('data-id');
+      const flow = t.getAttribute('data-flow');
       const op  = t.getAttribute('data-op');
       const s   = +t.getAttribute('data-start');
       const e   = +t.getAttribute('data-end');
-      tip.textContent = `L${{id}} ${{op}}\\n${{fmt(s)}} → ${{fmt(e)}} cyc\\nΔ ${{fmt(e - s)}} cyc\\n(click to zoom)`;
+      tip.textContent = `L${{id}} F${{flow}} ${{op}}\\n${{fmt(s)}} → ${{fmt(e)}} cyc\\nΔ ${{fmt(e - s)}} cyc\\n(click to zoom)`;
       tip.style.left = (ev.pageX + 12) + 'px';
       tip.style.top  = (ev.pageY + 12) + 'px';
       tip.style.opacity = '1';
@@ -1431,12 +1540,12 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 <input class="filter" data-target="profile-tbl" type="search" placeholder="filter rows… (substring match)" autocomplete="off"/>
 <span class="filter-info" data-info="profile-tbl"></span>
 <table id="profile-tbl" class="sortable"><thead><tr>
-<th>id</th><th>op</th><th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
+<th>id</th><th>flow</th><th>op</th><th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
 <th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
 <th>tiles<br>(H×OC)</th>
 <th>cyc/layer</th><th>cyc/cum</th>
 <th>ideal<br>cyc/layer</th><th>ideal<br>cyc/cum</th>
-<th>ideal<br>util</th><th>conv<br>occupancy</th>
+<th>conv<br>MAC util</th><th>conv<br>occupancy</th>
 <th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th><th>verify</th>
 </tr></thead>
 <tbody>{layer_rows}</tbody></table>

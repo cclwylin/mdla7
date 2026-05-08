@@ -4,7 +4,7 @@
 
 本章你會學到什麼：
 
-- 為什麼 2 MB L1 需要 tiling。
+- 為什麼 3 MB L1Mesh 需要 tiling。
 - OH tiling、OC tiling、ping-pong allocation 的基本策略。
 - L1-resident handoff 如何減少 DRAM traffic。
 - pending store 是什麼，為什麼不能亂 drop。
@@ -15,7 +15,7 @@
 
 ## 14.1 為什麼需要 tiling
 
-L1Mesh 只有 2 MB。一個 layer 可能需要：
+L1Mesh 只有 3 MB。一個 layer 可能需要：
 
 ```text
 input tile
@@ -191,7 +191,7 @@ reset on chain break
 目的：
 
 ```text
-讓 live input 和 new output 避開，降低 2 MB L1 壓力。
+讓 live input 和 new output 避開，降低 3 MB L1Mesh 壓力。
 ```
 
 ---

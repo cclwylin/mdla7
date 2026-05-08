@@ -33,9 +33,17 @@ a claim that the arithmetic path exists yet. It currently covers non-spatial
 MEAN axes, runtime-matmul FC, INT GELU/HARD_SWISH fallback, reshape shape-prop
 mismatches, and tensors that would exceed the 16-bit descriptor dim fields.
 
-Next useful priority: replace high-volume `matrlz` fallbacks with real engine
-lowering where it matters most, especially non-spatial MEAN/reduce and
-attention reshape/transpose style movement.
+Next useful priority: extend MicroBlock fusion beyond current safe paths.
+`try_stream_conv_chain()` now keeps generic Conv→Conv streaming to pointwise
+`1x1` linear chains, and preserves the validated deep `3x3 Conv... -> D2S ->
+EWE` path. `try_stream_binary_ewe_chain()` also fuses linear INT8
+`ADD/MUL/SUB` chains tile-by-tile, so sd decoder flows such as
+`L9 -> L10 -> L11` avoid re-reading intermediate activations from DRAM. Plain
+spatial `3x3 Conv -> 3x3 Conv` still needs explicit line-buffer / halo
+ownership before it should bypass DRAM on U-Net-like tiled pairs. After that,
+replace high-volume `matrlz` fallbacks with real engine lowering where it
+matters most, especially non-spatial MEAN/reduce and attention
+reshape/transpose style movement.
 
 ## Current Layout
 
