@@ -32,6 +32,7 @@ multi-GB artifacts.
 Usage:
     ./batch/run_mdla6_pattern.py                    # default: cache prior ok
     ./batch/run_mdla6_pattern.py --rerun-all        # force re-test all rows
+    ./batch/run_mdla6_pattern.py --fast-only        # run fast mode only
     ./batch/run_mdla6_pattern.py --csv-in  <path>   # override input
     ./batch/run_mdla6_pattern.py --csv-out <path>   # override output cache
     ./batch/run_mdla6_pattern.py --filter mobilenet # substring filter
@@ -289,8 +290,9 @@ def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, st
     return ms, status, sr.stdout or ""
 
 
-def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | None, float | None, float | None, str, str, str]:
-    """Compile + simulate one model in fast, conflict, and mesh modes."""
+def run_one(pattern: str, model_dir: Path, progress=None,
+            fast_only: bool = False) -> tuple[str, float | None, float | None, float | None, str, str, str]:
+    """Compile + simulate one model; optionally skip conflict/mesh."""
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
     if not model_path.exists():
@@ -333,6 +335,9 @@ def run_one(pattern: str, model_dir: Path, progress=None) -> tuple[str, float | 
             status = f"html-fail: {str(e)[:80]}"
         else:
             status = f"{status}; html-fail"
+
+    if fast_only:
+        return pattern, ms, None, None, status, "", ""
 
     # ---- simulate: conflict timing only ----
     if progress:
@@ -405,13 +410,16 @@ def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
     return out
 
 
-def _load_prior_results(csv_path: Path) -> dict[str, dict]:
+def _load_prior_results(csv_path: Path, fast_only: bool = False) -> dict[str, dict]:
     """Subset of _load_prior_csv that returns only reusable cache rows
     (status == 'ok'). `*-FAIL` / `compile-fail` / `sim-fail` etc. should
     re-run because the underlying source likely changed since."""
-    return {p: r for p, r in _load_prior_csv(csv_path).items()
-            if r.get("status") == "ok" and r.get("mdla7_ms") and
-            r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
+    rows = {p: r for p, r in _load_prior_csv(csv_path).items()
+            if r.get("status") == "ok" and r.get("mdla7_ms")}
+    if fast_only:
+        return rows
+    return {p: r for p, r in rows.items()
+            if r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
             r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")}
 
 
@@ -426,6 +434,8 @@ def main():
                     help="keep per-model .bin in output/ after the sweep")
     ap.add_argument("--rerun-all", action="store_true",
                     help="ignore prior --csv-out cache and re-run everything")
+    ap.add_argument("--fast-only", action="store_true",
+                    help="run only fast mode; leave conflict/mesh CSV fields empty")
     ap.add_argument("--include-excluded", action="store_true",
                     help="include patterns excluded from the default sweep")
     ap.add_argument("--limit", type=int, default=0,
@@ -473,7 +483,7 @@ def main():
     # v8.29: cache prior `ok` rows from the same csv-out so a re-run of the
     # sweep skips already-passing models. Pass --rerun-all to force re-test
     # (e.g. after a sim or compile-side change that might affect cycles).
-    prior_ok = {} if args.rerun_all else _load_prior_results(csv_out)
+    prior_ok = {} if args.rerun_all else _load_prior_results(csv_out, fast_only=args.fast_only)
     if prior_ok:
         print(f"  (cache: {len(prior_ok)} prior ok rows in {csv_out.name}; "
               f"--rerun-all to ignore)", flush=True)
@@ -529,17 +539,19 @@ def main():
         if pat in prior_ok and _report_exists_for(pat, Path(args.model_dir)):
             cached = prior_ok[pat]
             cached_ms = cached.get("mdla7_ms", "")
-            cached_conflict_ms = cached.get("mdla7_conflict_ms", "")
-            cached_mesh_ms = cached.get("mdla7_mesh_ms", "")
+            cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
+            cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
             cached_status = cached.get("status", "ok")
-            cached_conflict_status = cached.get("conflict_status", "ok")
-            cached_mesh_status = cached.get("mesh_status", "ok")
+            cached_conflict_status = "" if args.fast_only else cached.get("conflict_status", "ok")
+            cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
             ms_str = f"{float(cached_ms):>10.3f} ms" if cached_ms else f"{'—':>10s}    "
             cms_str = f"{float(cached_conflict_ms):>10.3f} ms" if cached_conflict_ms else f"{'—':>10s}    "
             mesh_str = f"{float(cached_mesh_ms):>10.3f} ms" if cached_mesh_ms else f"{'—':>10s}    "
+            suffix = (f"{cached_status}" if args.fast_only
+                      else f"{cached_status}/{cached_conflict_status}/{cached_mesh_status}")
             _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
                        f"fast={ms_str} conflict={cms_str} mesh={mesh_str} cached  "
-                       f"{cached_status}/{cached_conflict_status}/{cached_mesh_status}")
+                       f"{suffix}")
             rows_out.append({
                 "pattern":           pat,
                 "mdla6_cx":          cx,
@@ -559,16 +571,17 @@ def main():
                         f"{'—':>10s}      ({elapsed:5.1f}s)  running {stage}...")
 
         pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
-            pat, Path(args.model_dir), progress=_progress)
+            pat, Path(args.model_dir), progress=_progress, fast_only=args.fast_only)
         elapsed = time.time() - t0
         ms_str  = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         cms_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
                    else f"{'—':>10s}    ")
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
+        suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
         _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
                    f"fast={ms_str} conflict={cms_str} mesh={mesh_str}  ({elapsed:5.1f}s)  "
-                   f"{status}/{conflict_status}/{mesh_status}")
+                   f"{suffix}")
         rows_out.append({
             "pattern":           pat,
             "mdla6_cx":          cx,
