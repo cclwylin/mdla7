@@ -168,6 +168,7 @@ OP_SUB        = 11
 OP_HARD_SWISH = 12
 OP_GELU       = 13
 OP_D2SPACE    = 14
+OP_MATERIALIZE = 15
 ```
 
 C++：
@@ -480,6 +481,22 @@ skipped (shape exceeds descriptor's ushort dim limit)
 ```
 
 junior debug compile-fail 時，先找第一個 skipped / SystemExit，而不是先看 C++。
+
+現在 Hotspot path 也有 `matrlz` fallback：
+
+```text
+layer  4  matrlz  in=1x1x77  k=1x1  s=1x1  g=1  out=1x1x77  (77 INT8)  ready
+```
+
+`matrlz` 是 ready layer，不是 skipped。它代表 compiler 把該 op 的
+reference tensor 預先 materialize，simulator 再用分塊 UDMA
+`DRAM -> L1 -> DRAM` copy 來保留 profile/verification coverage。常見來源：
+
+- non-spatial `MEAN` axes。
+- runtime-matmul `FULLY_CONNECTED`。
+- INT `GELU` / `HARD_SWISH` fallback。
+- attention reshape shape-prop mismatch。
+- descriptor `uint16_t` dim overflow。
 
 ---
 

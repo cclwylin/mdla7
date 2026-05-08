@@ -31,7 +31,7 @@ Main data sources:
 | Source | Usage |
 | --- | --- |
 | `batch/output/<model_stem>.profile.json` | Source of truth for simulated cycles, engine busy time, engine tasks, layer stats, verification status, and memory traffic. |
-| Console compile log from `compile_model.py` | Parsed for compile-log rows, dtype display, and skipped compile layers. |
+| Console compile log from `compile_model.py` | Parsed for compile-log rows, dtype display, skipped compile layers, and `matrlz` fallback layers. |
 
 ### Page Sections
 
@@ -179,6 +179,37 @@ Memory sizes in this table are displayed as:
 KB = bytes / 1024
 ```
 
+### L1Mesh AXI Lane Latency
+
+Mesh-mode reports include an additional `L1Mesh AXI lane latency` section when
+`summary.l1mesh` is present in the profile JSON. It shows one table for
+`AXI_R0..15` and one table for `AXI_W0..15`.
+
+| Column | Meaning |
+| --- | --- |
+| `lane` | AXI lane id. Lane `n` maps to logical bank/lane `Bn`. |
+| `accesses` | Number of chopped AXI bursts served on this lane. |
+| `KB` | Total bytes served by this lane, shown in KB. |
+| `avg cyc` | Average end-to-end latency from chopped burst issue to service completion. |
+| `avg wait` | Average queue/resource wait component. |
+| `avg service` | Average SRAM-lane service component. |
+| `max cyc` | Maximum end-to-end latency. |
+| `max wait` | Maximum wait component. |
+| `max service` | Maximum service component. |
+
+The L1Mesh mesh model now uses AXI burst chopping:
+
+```text
+AXI lane width = 128b = 16B
+max burst      = 16 beats
+per-lane burst = 256B
+16-lane chunk  = 4096B
+```
+
+This means `max service` should describe a real 16-beat burst. Large
+`max latency` values can still be valid when many chopped bursts from a large
+FC/weight transfer queue behind earlier bursts.
+
 ### Ideal Cycle Calculation
 
 The ideal cycle columns are compute-only estimates. They do not include DRAM,
@@ -230,6 +261,13 @@ Columns:
 | `elements` | Output element count. |
 | `dtype` | Compile-time dtype display. |
 | `status` | `ready` or skipped reason. |
+
+`matrlz` is a ready layer. It means `compile_model.py` pre-materialized the
+reference tensor and `test_model.cpp` modeled a chunked `DRAM -> L1 -> DRAM`
+UDMA copy. It is used for coverage fallbacks such as non-spatial MEAN axes,
+runtime-matmul FC, INT GELU/HARD_SWISH, reshape shape-prop mismatches, and
+descriptor-dim overflow tensors. Treat it as "graph node covered by
+materialized movement", not as a real arithmetic engine implementation.
 
 ### Table Sorting And Filtering
 

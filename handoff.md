@@ -10,15 +10,30 @@ history for old checkpoints.
 
 ## Next Priority
 
-First thing next: investigate L1Mesh mesh / NoC overhead.
+The L1Mesh mesh / NoC overhead pass is implemented. `MeshConflict` now uses a
+transparent burst NoC model with per-bank SRAM service, 8 perimeter edge queues
+per read/write direction, bank swizzle, and AXI burst chopping. AXI burst max is
+16 beats on a 128b lane, so one lane burst is 256B and one 16-lane aggregate
+burst chunk is 4096B. Per-lane profile tables now report avg/max latency,
+wait, service, accesses, and KB for `AXI_R0..15` and `AXI_W0..15`.
 
-From the current Hotspot profile, `conflict/fast` is almost flat
-(`~1.00-1.04x`), while `mesh/conflict` is much larger (`~1.6-1.9x`). That means
-the dominant Hotspot penalty is not SRAM bank-port conflict; it is the mesh
-approximation's edge ingress / router output / directed link / local output
-queueing. Treat `profile_hotspot.html` as the starting debug page, sorted by
-`mesh/fast`, and focus first on why transformer-like repeated slices create NoC
-hotspots.
+Latest Hotspot rerun after this change brought `mesh/fast` close to 1.0. A
+focused GPT2 check shows `max_service` per lane is now ~23 cycles for a
+16-beat burst; high `max_latency` values can still appear when many chopped
+bursts from a large FC transfer queue behind earlier bursts.
+
+Hotspot compile coverage was also cleaned up. The previous 73 Hotspot
+`skipped` compile-log rows now lower to a `matrlz` fallback layer, so the
+latest 11-slice Hotspot sweep has 364 compile rows and 0 skipped rows. `matrlz`
+means the compiler pre-materializes the reference tensor and the simulator
+models a chunked `DRAM -> L1 -> DRAM` UDMA copy; it is a coverage fallback, not
+a claim that the arithmetic path exists yet. It currently covers non-spatial
+MEAN axes, runtime-matmul FC, INT GELU/HARD_SWISH fallback, reshape shape-prop
+mismatches, and tensors that would exceed the 16-bit descriptor dim fields.
+
+Next useful priority: replace high-volume `matrlz` fallbacks with real engine
+lowering where it matters most, especially non-spatial MEAN/reduce and
+attention reshape/transpose style movement.
 
 ## Current Layout
 
@@ -101,6 +116,7 @@ All other profile indexes hide `cx` fields and default to sorting by `mesh/fast`
 - `L1TimingMode::FastEstimate`
 - `L1TimingMode::PortConflict`
 - `L1TimingMode::MeshConflict`
+- `L1TimingMode::MeshOptimistic`
 
 `systemc/src/test_model.cpp` accepts:
 
@@ -108,16 +124,26 @@ All other profile indexes hide `cx` fields and default to sorting by `mesh/fast`
 --l1-timing=fast
 --l1-timing=conflict
 --l1-timing=mesh
+--l1-timing=mesh-opt
 ```
 
 Mode relationship:
 
 ```text
-mesh = port-conflict SRAM bank timing + NoC edge/router/link timing
+mesh = port-conflict SRAM bank timing + transparent NoC resource contention
+mesh-opt = mesh-style burst chopping + SRAM bank timing, skipping NoC resource reservations
 ```
 
 So `mesh/conflict` isolates the extra NoC overhead, while `conflict/fast`
-isolates the SRAM bank/port conflict overhead.
+isolates the SRAM bank/port conflict overhead. In the current model, `mesh`
+also chops long accesses into AXI bursts:
+
+```text
+AXI lane width = 128b = 16B
+max burst      = 16 beats
+per-lane burst = 256B
+16-lane chunk  = 4096B
+```
 
 Aliases still exist:
 
@@ -125,6 +151,7 @@ Aliases still exist:
 --l1-fast
 --l1-conflict
 --l1-mesh
+--l1-mesh-opt
 ```
 
 `run_mdla6_pattern.py`, `run_hotspot.py`, `run_ethz_v5.py`, `run_ethz_v6.py`,
@@ -173,9 +200,20 @@ L1Mesh-specific drawio pages were split out:
 spec/l1mesh.drawio
 ```
 
-`spec/mdla7.drawio` keeps the top-level MDLA7 diagrams. The user has manually
-modified the `L1Mesh-4x4-NoC` diagram; future diagram edits should read and
-modify the current file in place, not redraw from an old base.
+`spec/l1mesh.drawio` now includes:
+
+```text
+L1Mesh-4x4-NoC
+L1Mesh-Arbitration
+L1Mesh-Bank-Tile
+L1Mesh-AXI-Edge-Map
+```
+
+`L1Mesh-AXI-Edge-Map` shows the 16 `AXI_R` and 16 `AXI_W` lanes mapped onto
+the 8 logical W/E perimeter edges. `spec/mdla7.drawio` keeps the top-level
+MDLA7 diagrams. The user has manually modified the `L1Mesh-4x4-NoC` diagram;
+future diagram edits should read and modify the current file in place, not
+redraw from an old base.
 
 ## Current Validation
 
@@ -191,7 +229,36 @@ python3 -m py_compile batch/run_model.py batch/run_ethz_v5.py batch/run_ethz_v6.
 git diff --check
 ```
 
+Recently verified after the Hotspot `matrlz` fallback update:
+
+```bash
+python3 -m py_compile systemc/scripts/compile_model.py batch/run_model.py batch/run_hotspot.py
+make -C systemc -s
+./batch/run_model.py sd_encoder_quant_L12_L51 --keep-intermediate
+./batch/run_hotspot.py --rerun-all
+```
+
+Latest Hotspot result:
+
+```text
+fast 11/11 ran, conflict 11/11 ran, mesh 11/11 ran
+Compile log: 364 rows, 0 skipped
+matrlz fallback rows: 73
+```
+
 All passed.
+
+Recently verified after L1Mesh AXI burst/lane-stat updates:
+
+```bash
+python3 -m py_compile batch/run_model.py batch/run_mdla6_pattern.py batch/run_hotspot.py
+make -C systemc -s
+./batch/run_hotspot.py --filter gpt2 --limit 1 --rerun-all
+```
+
+The GPT2 mesh profile now reports per-lane `max_service` around 23 cycles for
+16-beat AXI bursts. `max_latency` can remain much larger because it includes
+queue wait across many chopped bursts in large FC transfers.
 
 ## Git Notes
 

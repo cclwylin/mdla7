@@ -61,10 +61,36 @@ enum class L1TimingMode {
     FastEstimate,
     PortConflict,
     MeshConflict,
+    MeshOptimistic,
 };
 
 class L1Mesh : public sc_core::sc_module {
 public:
+    struct Stats {
+        struct Lane {
+            uint64_t accesses = 0;
+            uint64_t bytes = 0;
+            double latency_ns = 0.0;
+            double wait_ns = 0.0;
+            double service_ns = 0.0;
+            double max_latency_ns = 0.0;
+            double max_wait_ns = 0.0;
+            double max_service_ns = 0.0;
+        };
+        uint64_t accesses = 0;
+        uint64_t bytes = 0;
+        uint64_t stripes = 0;
+        uint64_t bursts = 0;
+        double edge_wait_ns = 0.0, edge_service_ns = 0.0;
+        double router_wait_ns = 0.0, router_service_ns = 0.0;
+        double link_wait_ns = 0.0, link_service_ns = 0.0;
+        double local_wait_ns = 0.0, local_service_ns = 0.0;
+        double sram_wait_ns = 0.0, sram_service_ns = 0.0;
+        double imposed_wait_ns = 0.0;
+        std::array<Lane, 16> read_lane{};
+        std::array<Lane, 16> write_lane{};
+    };
+
     struct AccessTicket {
         sc_core::sc_time done{sc_core::SC_ZERO_TIME};
     };
@@ -105,6 +131,8 @@ public:
     std::size_t size() const { return mem.size(); }
     void set_timing_mode(L1TimingMode mode) { timing_mode_ = mode; }
     L1TimingMode timing_mode() const { return timing_mode_; }
+    const Stats& stats() const { return stats_; }
+    void reset_stats() { stats_ = Stats{}; }
 
 private:
     static constexpr unsigned N_BANKS         = 16;
@@ -115,6 +143,9 @@ private:
     static constexpr unsigned AXI_BURST_BYTES = AXI_BURST_BEATS * AXI_BEAT_BYTES;
     static constexpr unsigned BANK_STRIDE     = AXI_BEAT_BYTES;
     static constexpr unsigned BYTES_PER_CYCLE = 16;    // per-bank AXI 128b lane
+    static constexpr unsigned AXI_MAX_BURST_BEATS = 16;
+    static constexpr unsigned AXI_AGGREGATE_BURST_BYTES =
+        N_BANKS * BYTES_PER_CYCLE * AXI_MAX_BURST_BEATS;
     static constexpr double   CORE_CLOCK_GHZ  = 1.9;
     static constexpr double   SRAM_CLOCK_GHZ  = 1.3;
 
@@ -124,7 +155,8 @@ private:
 
     sc_core::sc_time schedule_latency(uint32_t offset, uint32_t bytes,
                                       bool is_read) {
-        if (timing_mode_ == L1TimingMode::MeshConflict)
+        if (timing_mode_ == L1TimingMode::MeshConflict ||
+            timing_mode_ == L1TimingMode::MeshOptimistic)
             return schedule_mesh_latency(offset, bytes, is_read);
         else if (timing_mode_ == L1TimingMode::PortConflict)
             return schedule_bank_latency(offset, bytes, is_read);
@@ -178,54 +210,237 @@ private:
         return finish;
     }
 
-    static sc_core::sc_time service_sram_beat(sc_core::sc_time& finish,
-                                              sc_core::sc_time now,
-                                              uint32_t bytes) {
+    static double ns(sc_core::sc_time t) {
+        return t.to_seconds() * 1e9;
+    }
+
+    sc_core::sc_time reserve_resource(sc_core::sc_time& finish,
+                                      sc_core::sc_time now,
+                                      uint32_t beats,
+                                      double& wait_ns,
+                                      double& service_ns) {
+        if (beats == 0) return now;
+        const sc_core::sc_time access(double(beats), sc_core::SC_NS);
+        const sc_core::sc_time start = (finish > now) ? finish : now;
+        wait_ns += ns(start - now);
+        service_ns += ns(access);
+        finish = start + access;
+        return start;
+    }
+
+    sc_core::sc_time service_sram_beat(sc_core::sc_time& finish,
+                                       sc_core::sc_time now,
+                                       uint32_t bytes) {
         const double beats = double((bytes + BYTES_PER_CYCLE - 1) /
                                     BYTES_PER_CYCLE);
         const sc_core::sc_time access(
             beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
             sc_core::SC_NS);
         const sc_core::sc_time start = (finish > now) ? finish : now;
+        stats_.sram_wait_ns += ns(start - now);
+        stats_.sram_service_ns += ns(access);
         finish = start + access;
         return finish;
     }
 
-    // Mesh mode: 16 SRAM banks sit behind two parallel 4x4 mesh planes. Each
-    // 16B bank stripe is one flit. The request enters from a deterministic edge
-    // port, takes XY routing through one-flit/cycle directed links on the less
-    // busy plane, then arbitrates for the shared target bank's 16B/cycle SRAM
-    // macro port.
+    static uint32_t ceil_div(uint32_t a, uint32_t b) {
+        return (a + b - 1) / b;
+    }
+
+    static uint32_t swizzled_bank(uint32_t stripe) {
+        // Rotate each 256B super-stripe across the 4x4 physical mesh. Linear
+        // 16B striping already uses all banks inside one 256B burst; the XOR
+        // term prevents repeated transformer slices with matching offsets from
+        // hammering the same physical row/column every block.
+        return (stripe ^ (stripe >> 4)) & (N_BANKS - 1);
+    }
+
+    static sc_core::sc_time max_time(sc_core::sc_time a, sc_core::sc_time b) {
+        return (a > b) ? a : b;
+    }
+
+    void reserve_route(uint32_t src_x, uint32_t src_y,
+                       uint32_t dst_x, uint32_t dst_y,
+                       uint32_t beats,
+                       sc_core::sc_time now,
+                       unsigned plane,
+                       sc_core::sc_time& ready) {
+        uint32_t x = src_x;
+        uint32_t y = src_y;
+        while (x != dst_x) {
+            const bool east = x < dst_x;
+            const uint32_t out_dir = east ? DIR_E : DIR_W;
+            sc_core::sc_time start = reserve_resource(
+                mesh_router_out_finish_[plane][node_id(x, y)][out_dir], now, beats,
+                stats_.router_wait_ns, stats_.router_service_ns);
+            ready = max_time(ready, start);
+            if (east) {
+                start = reserve_resource(mesh_hlink_finish_[plane][y][x][0], now, beats,
+                                         stats_.link_wait_ns, stats_.link_service_ns);
+                ready = max_time(ready, start);
+                ++x;
+            } else {
+                start = reserve_resource(mesh_hlink_finish_[plane][y][x - 1][1], now, beats,
+                                         stats_.link_wait_ns, stats_.link_service_ns);
+                ready = max_time(ready, start);
+                --x;
+            }
+        }
+        while (y != dst_y) {
+            const bool south = y < dst_y;
+            const uint32_t out_dir = south ? DIR_S : DIR_N;
+            sc_core::sc_time start = reserve_resource(
+                mesh_router_out_finish_[plane][node_id(x, y)][out_dir], now, beats,
+                stats_.router_wait_ns, stats_.router_service_ns);
+            ready = max_time(ready, start);
+            if (south) {
+                start = reserve_resource(mesh_vlink_finish_[plane][y][x][0], now, beats,
+                                         stats_.link_wait_ns, stats_.link_service_ns);
+                ready = max_time(ready, start);
+                ++y;
+            } else {
+                start = reserve_resource(mesh_vlink_finish_[plane][y - 1][x][1], now, beats,
+                                         stats_.link_wait_ns, stats_.link_service_ns);
+                ready = max_time(ready, start);
+                --y;
+            }
+        }
+        sc_core::sc_time start = reserve_resource(
+            mesh_router_out_finish_[plane][node_id(x, y)][DIR_LOCAL], now, beats,
+            stats_.local_wait_ns, stats_.local_service_ns);
+        ready = max_time(ready, start);
+    }
+
+    // Mesh mode: 16 SRAM banks sit behind two parallel 4x4 mesh planes. The
+    // original model charged
+    // every 16B stripe for edge + router + link + local latency in series.
+    // That was intentionally conservative, but it made small transformer-like
+    // slices pay packet startup cost over and over.
+    //
+    // Current model is a transparent burst NoC:
+    //   * long accesses are chopped into AXI bursts. Each 128b lane has
+    //     AxLEN<=15 (16 beats), so one 16-lane aggregate burst is 4096B;
+    //   * bank SRAM ports remain the throughput limiter;
+    //   * edge/router/link/local resources are reserved for contention stats;
+    //   * resource service time is pipelined and only prior contention delays
+    //     the caller. MeshOptimistic skips those NoC reservations entirely.
     //
     // This is intentionally still an architectural timing model, not a
     // cycle-accurate packet network: current read/write calls do not carry the
     // requester class (CONV ACT, CONV WGT, UDMA, EWE, ...), so priority is
-    // approximated by separate read/write edge ingress while all internal mesh
-    // links are shared.
+    // approximated by independent read/write multi-edge ingress while all
+    // internal mesh links are shared.
     sc_core::sc_time schedule_mesh_latency(uint32_t offset, uint32_t bytes,
                                            bool is_read) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
-        sc_core::sc_time max_finish = now;
         const uint32_t end = offset + bytes;
-        for (uint32_t a = offset; a < end; ) {
-            const uint32_t bank = (a / BANK_STRIDE) % N_BANKS;
-            const uint32_t dst_x = bank % MESH_W;
-            const uint32_t dst_y = bank / MESH_W;
-            const uint32_t src_x = is_read ? 0 : (MESH_W - 1);
-            const uint32_t src_y = dst_y;
-            const uint32_t next_stripe = ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
-            const uint32_t chunk = std::min(end, next_stripe) - a;
+        sc_core::sc_time burst_now = now;
 
-            const unsigned plane = pick_mesh_plane(now, src_x, src_y,
-                                                   dst_x, dst_y, is_read);
-            sc_core::sc_time t = route_on_mesh_plane(plane, now, src_x, src_y,
-                                                     dst_x, dst_y, is_read,
-                                                     bank, a);
-            t = service_sram_beat(sram_bank_finish_[bank], t, chunk);
-            if (t > max_finish) max_finish = t;
-            a += chunk;
+        stats_.accesses += 1;
+        stats_.bytes += bytes;
+        const bool optimistic = timing_mode_ == L1TimingMode::MeshOptimistic;
+
+        for (uint32_t burst_off = offset; burst_off < end; ) {
+            const uint32_t burst_end = std::min<uint32_t>(
+                end, burst_off + AXI_AGGREGATE_BURST_BYTES);
+            std::array<uint32_t, N_BANKS> bank_bytes{};
+            std::array<uint32_t, N_BANKS> bank_addr{};
+            std::array<bool, N_BANKS> bank_seen{};
+            uint64_t burst_stripes = 0;
+            for (uint32_t a = burst_off; a < burst_end; ) {
+                const uint32_t stripe = a / BANK_STRIDE;
+                const uint32_t bank = swizzled_bank(stripe);
+                const uint32_t next_stripe = ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
+                const uint32_t chunk = std::min(burst_end, next_stripe) - a;
+                bank_bytes[bank] += chunk;
+                if (!bank_seen[bank]) {
+                    bank_seen[bank] = true;
+                    bank_addr[bank] = a;
+                }
+                ++burst_stripes;
+                a += chunk;
+            }
+
+            stats_.stripes += burst_stripes;
+            stats_.bursts += 1;
+
+            const uint32_t burst_bytes = burst_end - burst_off;
+            const uint32_t aggregate_beats =
+                ceil_div(burst_bytes, N_BANKS * BYTES_PER_CYCLE);
+
+            sc_core::sc_time ingress_ready = burst_now;
+            if (!optimistic) {
+                // Four row ingress lanes per side and direction. Pick the
+                // earliest perimeter lane for this chopped AXI burst.
+                sc_core::sc_time best_start;
+                bool have_best = false;
+                unsigned best_plane = 0;
+                unsigned best_side = 0;
+                unsigned best_row = 0;
+                const unsigned rw = is_read ? 0 : 1;
+                for (unsigned plane = 0; plane < MESH_PLANES; ++plane) {
+                    for (unsigned side = 0; side < 2; ++side) {
+                        for (unsigned row = 0; row < MESH_H; ++row) {
+                            const sc_core::sc_time finish = mesh_edge_finish_[plane][rw][side][row];
+                            const sc_core::sc_time start =
+                                (finish > burst_now) ? finish : burst_now;
+                            if (!have_best || start < best_start) {
+                                best_start = start;
+                                best_plane = plane;
+                                best_side = side;
+                                best_row = row;
+                                have_best = true;
+                            }
+                        }
+                    }
+                }
+                ingress_ready = reserve_resource(
+                    mesh_edge_finish_[best_plane][rw][best_side][best_row], burst_now,
+                    aggregate_beats, stats_.edge_wait_ns, stats_.edge_service_ns);
+            }
+
+            sc_core::sc_time burst_finish = burst_now;
+            for (uint32_t bank = 0; bank < N_BANKS; ++bank) {
+                const uint32_t chunk = bank_bytes[bank];
+                if (!chunk) continue;
+                const uint32_t beats = ceil_div(chunk, BYTES_PER_CYCLE);
+                const uint32_t dst_x = bank % MESH_W;
+                const uint32_t dst_y = bank / MESH_W;
+                sc_core::sc_time ready = ingress_ready;
+
+                if (!optimistic) {
+                    const uint32_t west_dist = dst_x;
+                    const uint32_t east_dist = (MESH_W - 1) - dst_x;
+                    const uint32_t src_x = (west_dist <= east_dist) ? 0 : (MESH_W - 1);
+                    const uint32_t src_y = dst_y;
+                    const unsigned plane = (bank + stats_.bursts) % MESH_PLANES;
+                    reserve_route(src_x, src_y, dst_x, dst_y, beats,
+                                  burst_now, plane, ready);
+                }
+
+                const double sram_service_before = stats_.sram_service_ns;
+                probe_axi_input(ready, is_read, bank, bank_addr[bank]);
+                sc_core::sc_time t = service_sram_beat(sram_bank_finish_[bank], ready, chunk);
+                const double lane_service = stats_.sram_service_ns - sram_service_before;
+                Stats::Lane& lane = is_read ? stats_.read_lane[bank]
+                                            : stats_.write_lane[bank];
+                lane.accesses += 1;
+                lane.bytes += chunk;
+                const double latency = ns(t - burst_now);
+                const double lane_wait = std::max(0.0, latency - lane_service);
+                lane.latency_ns += latency;
+                lane.wait_ns += lane_wait;
+                lane.service_ns += lane_service;
+                if (latency > lane.max_latency_ns) lane.max_latency_ns = latency;
+                if (lane_wait > lane.max_wait_ns) lane.max_wait_ns = lane_wait;
+                if (lane_service > lane.max_service_ns) lane.max_service_ns = lane_service;
+                if (t > burst_finish) burst_finish = t;
+            }
+            burst_now = burst_finish;
+            burst_off = burst_end;
         }
-        return max_finish;
+        stats_.imposed_wait_ns += ns(burst_now - now);
+        return burst_now;
     }
 
     static constexpr unsigned MESH_PLANES = 2;
@@ -236,107 +451,6 @@ private:
                               DIR_W = 3, DIR_LOCAL = 4 };
     static constexpr unsigned node_id(unsigned x, unsigned y) {
         return y * MESH_W + x;
-    }
-
-    sc_core::sc_time reserve_virtual_cycle(const sc_core::sc_time& finish,
-                                           sc_core::sc_time now) const {
-        const sc_core::sc_time access(1.0, sc_core::SC_NS);
-        const sc_core::sc_time start = (finish > now) ? finish : now;
-        return start + access;
-    }
-
-    sc_core::sc_time estimate_mesh_plane(unsigned plane, sc_core::sc_time now,
-                                         uint32_t src_x, uint32_t src_y,
-                                         uint32_t dst_x, uint32_t dst_y,
-                                         bool is_read) const {
-        sc_core::sc_time t = now;
-        t = reserve_virtual_cycle(mesh_edge_finish_[plane][is_read ? 0 : 1][src_y], t);
-
-        uint32_t x = src_x;
-        uint32_t y = src_y;
-        while (x != dst_x) {
-            const bool east = x < dst_x;
-            const uint32_t out_dir = east ? DIR_E : DIR_W;
-            t = reserve_virtual_cycle(mesh_router_out_finish_[plane][node_id(x, y)][out_dir], t);
-            if (east) {
-                t = reserve_virtual_cycle(mesh_hlink_finish_[plane][y][x][0], t);
-                ++x;
-            } else {
-                t = reserve_virtual_cycle(mesh_hlink_finish_[plane][y][x - 1][1], t);
-                --x;
-            }
-        }
-        while (y != dst_y) {
-            const bool south = y < dst_y;
-            const uint32_t out_dir = south ? DIR_S : DIR_N;
-            t = reserve_virtual_cycle(mesh_router_out_finish_[plane][node_id(x, y)][out_dir], t);
-            if (south) {
-                t = reserve_virtual_cycle(mesh_vlink_finish_[plane][y][x][0], t);
-                ++y;
-            } else {
-                t = reserve_virtual_cycle(mesh_vlink_finish_[plane][y - 1][x][1], t);
-                --y;
-            }
-        }
-        return reserve_virtual_cycle(mesh_router_out_finish_[plane][node_id(x, y)][DIR_LOCAL], t);
-    }
-
-    unsigned pick_mesh_plane(sc_core::sc_time now,
-                             uint32_t src_x, uint32_t src_y,
-                             uint32_t dst_x, uint32_t dst_y,
-                             bool is_read) const {
-        unsigned best = 0;
-        sc_core::sc_time best_t = estimate_mesh_plane(0, now, src_x, src_y,
-                                                      dst_x, dst_y, is_read);
-        for (unsigned p = 1; p < MESH_PLANES; ++p) {
-            const sc_core::sc_time t = estimate_mesh_plane(p, now, src_x, src_y,
-                                                           dst_x, dst_y, is_read);
-            if (t < best_t) {
-                best = p;
-                best_t = t;
-            }
-        }
-        return best;
-    }
-
-    sc_core::sc_time route_on_mesh_plane(unsigned plane, sc_core::sc_time now,
-                                         uint32_t src_x, uint32_t src_y,
-                                         uint32_t dst_x, uint32_t dst_y,
-                                         bool is_read, uint32_t bank,
-                                         uint32_t addr) {
-        sc_core::sc_time t = now;
-        auto& edge = mesh_edge_finish_[plane][is_read ? 0 : 1][src_y];
-        const sc_core::sc_time edge_start = (edge > t) ? edge : t;
-        probe_axi_input(edge_start, is_read, bank, addr);
-        t = service_one_cycle(edge, t);
-
-        uint32_t x = src_x;
-        uint32_t y = src_y;
-        while (x != dst_x) {
-            const bool east = x < dst_x;
-            const uint32_t out_dir = east ? DIR_E : DIR_W;
-            t = service_one_cycle(mesh_router_out_finish_[plane][node_id(x, y)][out_dir], t);
-            if (east) {
-                t = service_one_cycle(mesh_hlink_finish_[plane][y][x][0], t);
-                ++x;
-            } else {
-                t = service_one_cycle(mesh_hlink_finish_[plane][y][x - 1][1], t);
-                --x;
-            }
-        }
-        while (y != dst_y) {
-            const bool south = y < dst_y;
-            const uint32_t out_dir = south ? DIR_S : DIR_N;
-            t = service_one_cycle(mesh_router_out_finish_[plane][node_id(x, y)][out_dir], t);
-            if (south) {
-                t = service_one_cycle(mesh_vlink_finish_[plane][y][x][0], t);
-                ++y;
-            } else {
-                t = service_one_cycle(mesh_vlink_finish_[plane][y - 1][x][1], t);
-                --y;
-            }
-        }
-        return service_one_cycle(mesh_router_out_finish_[plane][node_id(x, y)][DIR_LOCAL], t);
     }
 
     static const char* engine_id_from_process() {
@@ -421,9 +535,10 @@ private:
     }
 
     L1TimingMode timing_mode_;
+    Stats stats_;
     std::vector<uint8_t> mem;
     sc_core::sc_time sram_bank_finish_[N_BANKS];
-    sc_core::sc_time mesh_edge_finish_[MESH_PLANES][2][MESH_H];
+    sc_core::sc_time mesh_edge_finish_[MESH_PLANES][2][2][MESH_H];
     sc_core::sc_time mesh_router_out_finish_[MESH_PLANES][N_BANKS][5];
     sc_core::sc_time mesh_hlink_finish_[MESH_PLANES][MESH_H][MESH_W - 1][2];
     sc_core::sc_time mesh_vlink_finish_[MESH_PLANES][MESH_H - 1][MESH_W][2];

@@ -214,6 +214,7 @@ CONV -> DEPTH_TO_SPACE -> ADD
 | RESHAPE | byte passthrough or DRAM copy |
 | CONCAT | materialized concat / UDMA concat / barrier |
 | GATHER | numpy materialized reference + UDMA copy |
+| MATRLZ | compiler pre-materialized reference + chunked `DRAM -> L1 -> DRAM` UDMA copy |
 
 要記住：
 
@@ -221,6 +222,10 @@ CONV -> DEPTH_TO_SPACE -> ADD
 不是所有 graph op 都有 dedicated engine。
 有些 op 是 compiler materialize + UDMA passthrough。
 ```
+
+`matrlz` 是目前用來取代 Hotspot skipped rows 的明確 fallback。它保留
+graph node、timing movement、PASS/FAIL verification，但不表示 EWE/POOL/CONV
+已經支援該 arithmetic。後續如果補上真 lowering，應該讓 `matrlz` 數量下降。
 
 ---
 
