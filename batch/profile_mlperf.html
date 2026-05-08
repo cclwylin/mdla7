@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MDLA7 MLPerf_Tiny Profiles</title>
+<title>MDLA7 MLPerf Profiles</title>
 <style>
 :root {
   color-scheme: light;
@@ -36,7 +36,7 @@ tr:hover td { background:#f4f7fb; }
 </head>
 <body>
 <main>
-<h1>MDLA7 MLPerf_Tiny Profiles</h1>
+<h1>MDLA7 MLPerf Profiles</h1>
 <div class="bar">
   <button id="refresh">Refresh Output</button>
   <input id="filter" placeholder="filter pattern">
@@ -55,14 +55,15 @@ tr:hover td { background:#f4f7fb; }
 
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_conflict_ratio">mesh/conflict <span class="sort-mark"></span></button></th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"vww_96_int8","stem":"vww_96_int8","type":"","link":"output/vww_96_int8.html","cx":"","our_ms":0.006,"conflict_ms":0.006,"mesh_ms":0.012,"ratio":null,"conflict_ratio":1.0,"mesh_ratio":2.0}];
-const LIVE_CSV = "output/mlperf_regression.csv";
+const EMBEDDED_ROWS = [{"pattern":"vww_96_int8","stem":"vww_96_int8","type":"","link":"output/vww_96_int8.html","cx":"","our_ms":0.006,"conflict_ms":0.006,"mesh_ms":0.012,"ratio":null,"conflict_ratio":1.0,"mesh_ratio":2.0,"mesh_conflict_ratio":2.0}];
+const LIVE_CSV = "batch/output/mlperf_regression.csv";
 const ONLY_METRIC_ROWS = true;
 const SHOW_CX = false;
 const DEFAULT_SORT_KEY = "mesh_ratio";
@@ -110,6 +111,18 @@ function fmtMeshRatio(r) {
   const n = meshRatioOf(r);
   return n === null ? "" : n.toFixed(2);
 }
+function meshConflictRatioOf(r) {
+  if (r.mesh_conflict_ratio !== null && r.mesh_conflict_ratio !== undefined && r.mesh_conflict_ratio !== "") {
+    const n = Number(r.mesh_conflict_ratio);
+    if (Number.isFinite(n)) return n;
+  }
+  const mesh = Number(r.mesh_ms), conflict = Number(r.conflict_ms);
+  return Number.isFinite(mesh) && Number.isFinite(conflict) && conflict > 0 ? mesh / conflict : null;
+}
+function fmtMeshConflictRatio(r) {
+  const n = meshConflictRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}
 function sortRows(xs) {
   if (!sortState.default) {
     const key = sortState.key;
@@ -119,7 +132,7 @@ function sortRows(xs) {
       let cmp = 0;
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
-          key === "mesh_ratio") {
+          key === "mesh_ratio" || key === "mesh_conflict_ratio") {
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -148,6 +161,7 @@ function sortValue(r, key) {
   if (key === "ratio") return ratioOf(r);
   if (key === "conflict_ratio") return conflictRatioOf(r);
   if (key === "mesh_ratio") return meshRatioOf(r);
+  if (key === "mesh_conflict_ratio") return meshConflictRatioOf(r);
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
   if (key === "mesh_ms") return r.mesh_ms;
@@ -180,7 +194,7 @@ function render() {
   for (const r of sortRows(rows.slice())) {
     const parts = [r.pattern, r.stem || "", r.type || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
-                   fmtConflictRatio(r), fmtMeshRatio(r)];
+                   fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
     if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
     const allText = parts.join(" ").toLowerCase();
     if (q && !allText.includes(q)) continue;
@@ -194,7 +208,8 @@ function render() {
       `<td class="num">${esc(fmtMs(r.mesh_ms))}</td>` +
       (SHOW_CX ? `<td class="num">${esc(fmtRatio(r))}</td>` : "") +
       `<td class="num">${esc(fmtConflictRatio(r))}</td>` +
-      `<td class="num">${esc(fmtMeshRatio(r))}</td>`;
+      `<td class="num">${esc(fmtMeshRatio(r))}</td>` +
+      `<td class="num">${esc(fmtMeshConflictRatio(r))}</td>`;
     body.appendChild(tr);
   }
   document.getElementById("status").textContent =
@@ -267,7 +282,8 @@ async function refreshFromOutput() {
         mesh_ms: meshMs,
         ratio: null,
         conflict_ratio: null,
-        mesh_ratio: null
+        mesh_ratio: null,
+        mesh_conflict_ratio: null
       });
     }
     if (next.length) rows = next;

@@ -128,6 +128,8 @@ SRAM macro 與容量：
 | Stripe / beat | `16 B` |
 | AXI burst length | `16 beats` |
 | AXI burst bytes | `256 B` |
+| SRAM macro port | `1R/W` shared read-or-write |
+| Router input FIFO depth | `2 flits` provisional |
 
 Address mapping：
 
@@ -161,7 +163,24 @@ aggregate   : 32R + 32W across 2 mesh planes
 
 The two mesh planes reduce NoC injection/router/link hot spots and give each
 traffic class a clean physical side of each mesh. They do **not** duplicate the
-SRAM macro backend and do **not** multiply SRAM bank service bandwidth.
+SRAM macro backend and do **not** multiply SRAM bank service bandwidth. Each
+SRAM macro/bank port is **1R/W**: a bank can serve either one read beat or one
+write beat at a time, not independent 1R+1W.
+
+Router input FIFO depth is provisionally **2 flits**. The current SystemC mesh
+timing records edge/router-output/link finish times; it does not yet model
+input FIFO occupancy or upstream backpressure, so this depth is documented as an
+architecture parameter before it becomes a timing-sensitive knob.
+
+Set `MDLA7_L1_AXI_PROBE=<csv path>` to dump the L1Mesh 32 AXI input lanes:
+
+```text
+cycle,1st axi (engineid) addr,2nd axi (engineid) addr,...,32nd axi (engineid) addr
+```
+
+Columns 1..16 are read lanes, columns 17..32 are write lanes. Each cell records
+the requester inferred from the SystemC process and the 16B beat address, e.g.
+`(udma) 0x00000040`.
 
 Per-bank service target：
 
@@ -179,17 +198,16 @@ CONV ACT/WGT frontend and the dual mesh fabric are intentionally wider than the
 16-bank SRAM backend. The direct path bypasses L1_Manager arbitration, but it
 does not bypass bank conflicts or per-bank read service limits. With 16 banks
 and one 16B read beat per bank per SRAM cycle, raw L1Mesh read peak remains
-`256 B/SRAM-cycle`; write peak is also `256 B/SRAM-cycle` if read/write are
-independent. The `32R + 32W` aggregate edge ports are therefore NoC
-ingress/ejection capacity, while the per-bank SRAM ports remain the hard backend
-bandwidth limiter.
+`256 B/SRAM-cycle` aggregate across read and write combined. The `32R + 32W`
+aggregate edge ports are therefore NoC ingress/ejection capacity, while the
+per-bank 1R/W SRAM ports remain the hard backend bandwidth limiter.
 
 Simulator timing modes:
 
 | Mode | CLI | Meaning |
 |---|---|---|
 | Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
-| Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read and write/write to the same bank serialize through bank finish arrays, so cycles can increase when traffic collides. |
+| Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read, write/write, and read/write to the same bank serialize through one shared bank finish array, so cycles can increase when traffic collides. |
 | Mesh conflict | `--l1-timing=mesh` | Starts from the same per-bank SRAM port conflict model as `conflict`, then adds a dual-4x4 mesh approximation: every 16B beat enters from an edge port, chooses the less busy mesh plane, uses deterministic XY routing through one-flit/cycle router/link resources, then arbitrates for the shared SRAM macro port. |
 
 The fast mode is intended for regular model sweeps. The conflict and mesh modes
@@ -460,7 +478,10 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 ### Layer-level fused 行為
 
 - CONV → Requant 是硬接 chain，**所有 conv layer 都必跑 Requant**（不可 bypass）。若 layer 不需要 quant，Requant lane 走 identity（scale=1, shift=0, zp=0）。
-- CONV → Requant → EWE / POOL 不在 chain 上 fused，需要 round-trip L1Mesh。
+- CONV → Requant → EWE / POOL 不在硬體 chain 上 fused；但 scheduler 可對大型
+  `CONV -> EWE(ADD/MUL/SUB)` residual 邊界做 microblock streaming handoff，
+  省掉 CONV intermediate DRAM store / EWE input-A reload。POOL halo/window
+  邊界仍走保守 tiling。
 
 ---
 

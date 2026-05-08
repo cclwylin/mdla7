@@ -196,6 +196,9 @@ def _write_combined_html(model_path: Path,
     mesh_ratio = ""
     if fast_ms and mesh_ms is not None:
         mesh_ratio = f"{mesh_ms / fast_ms:.3f}x"
+    mesh_conflict_ratio = ""
+    if conflict_ms and mesh_ms is not None:
+        mesh_conflict_ratio = f"{mesh_ms / conflict_ms:.3f}x"
     fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
     conflict_doc = conflict_html.read_text(errors="ignore") if conflict_html.exists() else ""
     mesh_doc = mesh_html.read_text(errors="ignore") if mesh_html.exists() else ""
@@ -229,6 +232,7 @@ iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; dis
     <span><b>mesh:</b> {html.escape(ms(mesh_ms))} {html.escape(mesh_status)}</span>
     <span><b>conflict/fast:</b> {html.escape(conflict_ratio)}</span>
     <span><b>mesh/fast:</b> {html.escape(mesh_ratio)}</span>
+    <span><b>mesh/conflict:</b> {html.escape(mesh_conflict_ratio)}</span>
   </div>
   <div class="tabs">
     <button class="tab active" data-target="fast">fast</button>

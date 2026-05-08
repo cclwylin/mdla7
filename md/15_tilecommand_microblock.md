@@ -205,6 +205,32 @@ CONV
 
 ---
 
+## 15.8.1 CONV-EWE microblock streaming
+
+`test_model.cpp` 也有保守的 `CONV -> EWE(ADD/MUL/SUB)` streaming path。它不是把
+EWE 接進 CONV/Requant 的硬體 chain，而是在 row microblock 上做 handoff：
+
+```text
+load CONV input tile
+CONV -> Requant writes tile to L1
+load EWE input-B tile / params
+EWE consumes CONV tile directly
+optional store EWE output
+```
+
+啟用條件刻意保守：
+
+- CONV output shape / dtype 必須等於下一層 EWE input/output。
+- CONV intermediate store 必須是 producer-no-store boundary。
+- single-tile CONV 留給原本 L1-resident fused path；新路徑只處理需要 H-tiling
+  的大型 residual。
+- EWE output 若還是 producer，store 可以 suppress；slot reuse 等 EWE done tag。
+
+這主要服務 Deeplab / large residual 類 pattern，避免 `CONV store -> EWE reload`
+在大 activation 上造成 DRAM 與 L1Mesh hotspot。
+
+---
+
 ## 15.9 Stream metadata 和 HTML profile
 
 `layer_id`、`microblock_id`、`stream_slot` 不只是 scheduling，也能讓 profile 更可讀：

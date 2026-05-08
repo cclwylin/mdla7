@@ -67,6 +67,48 @@ SC_MODULE(EweEngine) {
     //   | i32 mult_out | i32 shift_out
     //   | i32 left_shift | i32 act_min | i32 act_max ]   = 48 bytes
     void run_add(const EweBody& e, uint64_t elems) {
+        int32_t p[12];
+        l1mgr.read(e.lut_addr, p, sizeof(p));
+        const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
+        const int32_t mult_a = p[3], shift_a = p[4];
+        const int32_t mult_b = p[5], shift_b = p[6];
+        const int32_t mult_o = p[7], shift_o = p[8];
+        const int32_t left_shift = p[9];
+        const int32_t act_min = p[10], act_max = p[11];
+        run_binary_int_chunked(e, elems, [&](int8_t av, int8_t bv) {
+            int32_t a = (int32_t(av) - zp_a) << left_shift;
+            int32_t b = (int32_t(bv) - zp_b) << left_shift;
+            int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
+            int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
+            int64_t raw = int64_t(sa) + int64_t(sb);
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v  = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
+            if (v < act_min) v = act_min;
+            if (v > act_max) v = act_max;
+            return int8_t(v);
+        });
+    }
+
+    template <typename Fn>
+    void run_binary_int_chunked(const EweBody& e, uint64_t elems, Fn&& fn) {
+        static constexpr uint64_t CHUNK_ELEMS = 1024;
+        std::vector<int8_t> a_buf(CHUNK_ELEMS), b_buf(CHUNK_ELEMS), out_buf(CHUNK_ELEMS);
+        L1Manager::AccessTicket prev_write{};
+        for (uint64_t base = 0; base < elems; base += CHUNK_ELEMS) {
+            const uint64_t n64 = std::min<uint64_t>(CHUNK_ELEMS, elems - base);
+            const uint32_t n = uint32_t(n64);
+            auto ta = l1mgr.read_async(uint32_t(e.in_a_addr + base), a_buf.data(), n);
+            auto tb = l1mgr.read_async(uint32_t(e.in_b_addr + base), b_buf.data(), n);
+            L1Manager::wait_all({ta, tb});
+            for (uint32_t i = 0; i < n; ++i)
+                out_buf[i] = fn(a_buf[i], b_buf[i]);
+            prev_write = l1mgr.write_async(uint32_t(e.out_addr + base), out_buf.data(), n);
+        }
+        L1Manager::wait_ticket(prev_write);
+    }
+
+    void run_add_old_unused(const EweBody& e, uint64_t elems) {
         std::vector<int8_t> a_buf(elems), b_buf(elems), out_buf(elems);
         l1mgr.read(e.in_a_addr, a_buf.data(), elems);
         l1mgr.read(e.in_b_addr, b_buf.data(), elems);
@@ -130,23 +172,19 @@ SC_MODULE(EweEngine) {
     //   [ zp_a | zp_b | zp_o | mq_a | sh_a (unused) | mq_b | sh_b (unused)
     //   | mq_o (= MUL multiplier) | sh_o | left_shift (unused) | act_min | act_max ]
     void run_mul(const EweBody& e, uint64_t elems) {
-        std::vector<int8_t> a_buf(elems), b_buf(elems), out_buf(elems);
-        l1mgr.read(e.in_a_addr, a_buf.data(), elems);
-        l1mgr.read(e.in_b_addr, b_buf.data(), elems);
         int32_t p[12];
         l1mgr.read(e.lut_addr, p, sizeof(p));
         const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
         const int32_t mult_o = p[7], shift_o = p[8];
         const int32_t act_min = p[10], act_max = p[11];
-        for (uint64_t i = 0; i < elems; ++i) {
-            const int32_t a = int32_t(a_buf[i]) - zp_a;
-            const int32_t b = int32_t(b_buf[i]) - zp_b;
+        run_binary_int_chunked(e, elems, [&](int8_t av, int8_t bv) {
+            const int32_t a = int32_t(av) - zp_a;
+            const int32_t b = int32_t(bv) - zp_b;
             int32_t v = multiply_by_quantized_multiplier(a * b, mult_o, shift_o) + zp_out;
             if (v < act_min) v = act_min;
             if (v > act_max) v = act_max;
-            out_buf[i] = int8_t(v);
-        }
-        l1mgr.write(e.out_addr, out_buf.data(), elems);
+            return int8_t(v);
+        });
     }
 
     // v8.30: TFLite int8 SUB. Same shape as run_add but with sb negated.
@@ -154,9 +192,6 @@ SC_MODULE(EweEngine) {
     //   sb = MBQM((b - zp_b) << ls, mult_b, shift_b)
     //   out = clip( MBQM(sa - sb, mult_o, shift_o) + zp_o, [act_min, act_max] )
     void run_sub(const EweBody& e, uint64_t elems) {
-        std::vector<int8_t> a_buf(elems), b_buf(elems), out_buf(elems);
-        l1mgr.read(e.in_a_addr, a_buf.data(), elems);
-        l1mgr.read(e.in_b_addr, b_buf.data(), elems);
         int32_t p[12];
         l1mgr.read(e.lut_addr, p, sizeof(p));
         const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
@@ -165,9 +200,9 @@ SC_MODULE(EweEngine) {
         const int32_t mult_o = p[7], shift_o = p[8];
         const int32_t left_shift = p[9];
         const int32_t act_min = p[10], act_max = p[11];
-        for (uint64_t i = 0; i < elems; ++i) {
-            int32_t a = (int32_t(a_buf[i]) - zp_a) << left_shift;
-            int32_t b = (int32_t(b_buf[i]) - zp_b) << left_shift;
+        run_binary_int_chunked(e, elems, [&](int8_t av, int8_t bv) {
+            int32_t a = (int32_t(av) - zp_a) << left_shift;
+            int32_t b = (int32_t(bv) - zp_b) << left_shift;
             int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
             int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
             int64_t raw = int64_t(sa) - int64_t(sb);
@@ -176,9 +211,8 @@ SC_MODULE(EweEngine) {
             int32_t v  = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
             if (v < act_min) v = act_min;
             if (v > act_max) v = act_max;
-            out_buf[i] = int8_t(v);
-        }
-        l1mgr.write(e.out_addr, out_buf.data(), elems);
+            return int8_t(v);
+        });
     }
 
     // v8.30: FP unary activations (HARD_SWISH / GELU). Storage FP16; compute FP32.

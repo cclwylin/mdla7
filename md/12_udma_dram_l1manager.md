@@ -83,6 +83,7 @@ L1Mesh 是 3 MB dual-4x4 banked SRAM NoC。兩個 mesh plane 共用同一組
 |---|---:|
 | banks | 16 |
 | mesh planes | 2 x 4x4 |
+| router input FIFO depth | 2 flits provisional |
 | macro | 768 x 16B = 12 KB |
 | macros per bank | 16 |
 | bank capacity | 192 KB |
@@ -131,13 +132,11 @@ simulation time 推進
 L1 有：
 
 ```cpp
-read_bank_finish_[16]
-write_bank_finish_[16]
+sram_bank_finish_[16]
 ```
 
-這代表 read/read 和 write/write 同 bank 會 serialize，不同 bank 可 overlap。
-
-注意目前 read/write 分開，對同 bank simultaneous read/write 較樂觀。這是 model simplification。
+這代表每個 SRAM macro/bank port 是 **1R/W**。read/read、write/write、read/write
+只要打到同一 bank 都會 serialize；不同 bank 可 overlap。
 
 硬體 spec 的 per-bank read priority 是：
 

@@ -123,6 +123,7 @@ def collect_rows(metrics_csvs: list[Path],
         ratio = None
         conflict_ratio = None
         mesh_ratio = None
+        mesh_conflict_ratio = None
         try:
             cx_f = float(cx)
             if cx_f > 0 and our_ms is not None:
@@ -133,6 +134,8 @@ def collect_rows(metrics_csvs: list[Path],
             conflict_ratio = conflict_ms / our_ms
         if our_ms and our_ms > 0 and mesh_ms is not None:
             mesh_ratio = mesh_ms / our_ms
+        if conflict_ms and conflict_ms > 0 and mesh_ms is not None:
+            mesh_conflict_ratio = mesh_ms / conflict_ms
         rows.append({
             "pattern": pat,
             "stem": stem,
@@ -146,6 +149,7 @@ def collect_rows(metrics_csvs: list[Path],
             "ratio": ratio,
             "conflict_ratio": conflict_ratio,
             "mesh_ratio": mesh_ratio,
+            "mesh_conflict_ratio": mesh_conflict_ratio,
         })
     def key(row: dict[str, object]):
         ratio = row.get("ratio")
@@ -248,13 +252,14 @@ tr:hover td {{ background:#f4f7fb; }}
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
-      {cx_headers}
+{cx_headers}
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
-      {ratio_headers}
+{ratio_headers}
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_conflict_ratio">mesh/conflict <span class="sort-mark"></span></button></th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
@@ -310,6 +315,18 @@ function fmtMeshRatio(r) {{
   const n = meshRatioOf(r);
   return n === null ? "" : n.toFixed(2);
 }}
+function meshConflictRatioOf(r) {{
+  if (r.mesh_conflict_ratio !== null && r.mesh_conflict_ratio !== undefined && r.mesh_conflict_ratio !== "") {{
+    const n = Number(r.mesh_conflict_ratio);
+    if (Number.isFinite(n)) return n;
+  }}
+  const mesh = Number(r.mesh_ms), conflict = Number(r.conflict_ms);
+  return Number.isFinite(mesh) && Number.isFinite(conflict) && conflict > 0 ? mesh / conflict : null;
+}}
+function fmtMeshConflictRatio(r) {{
+  const n = meshConflictRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}}
 function sortRows(xs) {{
   if (!sortState.default) {{
     const key = sortState.key;
@@ -319,7 +336,7 @@ function sortRows(xs) {{
       let cmp = 0;
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
-          key === "mesh_ratio") {{
+          key === "mesh_ratio" || key === "mesh_conflict_ratio") {{
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -348,6 +365,7 @@ function sortValue(r, key) {{
   if (key === "ratio") return ratioOf(r);
   if (key === "conflict_ratio") return conflictRatioOf(r);
   if (key === "mesh_ratio") return meshRatioOf(r);
+  if (key === "mesh_conflict_ratio") return meshConflictRatioOf(r);
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
   if (key === "mesh_ms") return r.mesh_ms;
@@ -380,7 +398,7 @@ function render() {{
   for (const r of sortRows(rows.slice())) {{
     const parts = [r.pattern, r.stem || "", r.type || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
-                   fmtConflictRatio(r), fmtMeshRatio(r)];
+                   fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
     if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
     const allText = parts.join(" ").toLowerCase();
     if (q && !allText.includes(q)) continue;
@@ -394,7 +412,8 @@ function render() {{
       `<td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` +
       (SHOW_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
       `<td class="num">${{esc(fmtConflictRatio(r))}}</td>` +
-      `<td class="num">${{esc(fmtMeshRatio(r))}}</td>`;
+      `<td class="num">${{esc(fmtMeshRatio(r))}}</td>` +
+      `<td class="num">${{esc(fmtMeshConflictRatio(r))}}</td>`;
     body.appendChild(tr);
   }}
   document.getElementById("status").textContent =
@@ -467,7 +486,8 @@ async function refreshFromOutput() {{
         mesh_ms: meshMs,
         ratio: null,
         conflict_ratio: null,
-        mesh_ratio: null
+        mesh_ratio: null,
+        mesh_conflict_ratio: null
       }});
     }}
     if (next.length) rows = next;

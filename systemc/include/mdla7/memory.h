@@ -10,12 +10,15 @@
 //
 // v2.1 / v3.2: L1Mesh has 16 banks (256-byte interleave) — concurrent
 //       accesses to different banks proceed in parallel, only same-bank
-//       accesses serialize.  Each bank port = 16 byte / cycle (one AXI 128b
-//       lane).  16 banks × 16 byte = 256 B / cycle peak per direction
+//       accesses serialize.  Each SRAM macro port = 16 byte / cycle (one AXI
+//       128b lane) and is 1R/W, not independent 1R+1W.  16 banks × 16 byte =
+//       256 B / cycle peak aggregate backend bandwidth
 //       (matches spec §3.2 L1_Manager↔L1Mesh = 16 R + 16 W lanes).
 //       AXI bursts use 16 beats × 16 B = 256 B as the transaction granularity.
 //       The NoC fabric is modeled as two parallel 4x4 mesh planes sharing this
 //       same 16-bank SRAM backend.
+//       Router input FIFO depth is provisionally 2 flits; current timing only
+//       models edge/router-output/link finish times, not input backpressure.
 //
 // v2.3: DRAM models LPDDR-class row-hit / row-miss latency.
 // v3.1: + DRAM refresh — periodic stall when crossing a refresh boundary.
@@ -38,10 +41,18 @@
 //        MeshConflict = dual-4x4 mesh edge/router/link + SRAM macro conflict model.
 
 #include <systemc>
+#include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <set>
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <string>
 #include "mdla7/descriptor.h"
 
 namespace mdla7 {
@@ -54,19 +65,42 @@ enum class L1TimingMode {
 
 class L1Mesh : public sc_core::sc_module {
 public:
+    struct AccessTicket {
+        sc_core::sc_time done{sc_core::SC_ZERO_TIME};
+    };
+
     SC_HAS_PROCESS(L1Mesh);
     L1Mesh(sc_core::sc_module_name nm,
            std::size_t bytes = L1MESH_BYTES,
            L1TimingMode timing_mode = L1TimingMode::FastEstimate)
-      : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {}
+      : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {
+        if (const char* p = std::getenv("MDLA7_L1_AXI_PROBE")) {
+            if (*p) open_axi_probe(p);
+        }
+    }
+    ~L1Mesh() override { flush_axi_probe_row(); }
 
     void read(uint32_t offset, void* dst, uint32_t n) {
-        std::memcpy(dst, &mem[offset], n);
-        if (in_process()) impose_latency(read_bank_finish_, offset, n);
+        AccessTicket t = read_async(offset, dst, n);
+        wait_ticket(t);
     }
     void write(uint32_t offset, const void* src, uint32_t n) {
+        AccessTicket t = write_async(offset, src, n);
+        wait_ticket(t);
+    }
+    AccessTicket read_async(uint32_t offset, void* dst, uint32_t n) {
+        std::memcpy(dst, &mem[offset], n);
+        return in_process() ? AccessTicket{schedule_latency(offset, n, true)}
+                            : AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket write_async(uint32_t offset, const void* src, uint32_t n) {
         std::memcpy(&mem[offset], src, n);
-        if (in_process()) impose_latency(write_bank_finish_, offset, n);
+        return in_process() ? AccessTicket{schedule_latency(offset, n, false)}
+                            : AccessTicket{sc_core::sc_time_stamp()};
+    }
+    static void wait_ticket(const AccessTicket& t) {
+        const sc_core::sc_time now = sc_core::sc_time_stamp();
+        if (in_process() && t.done > now) sc_core::wait(t.done - now);
     }
     std::size_t size() const { return mem.size(); }
     void set_timing_mode(L1TimingMode mode) { timing_mode_ = mode; }
@@ -88,33 +122,31 @@ private:
         return sc_core::sc_get_current_process_handle().valid();
     }
 
-    void impose_latency(sc_core::sc_time bank_finish[N_BANKS],
-                        uint32_t offset, uint32_t bytes) {
+    sc_core::sc_time schedule_latency(uint32_t offset, uint32_t bytes,
+                                      bool is_read) {
         if (timing_mode_ == L1TimingMode::MeshConflict)
-            impose_mesh_latency(bank_finish, offset, bytes,
-                                bank_finish == read_bank_finish_);
+            return schedule_mesh_latency(offset, bytes, is_read);
         else if (timing_mode_ == L1TimingMode::PortConflict)
-            impose_bank_latency(bank_finish, offset, bytes);
-        else
-            impose_fast_latency(bytes);
+            return schedule_bank_latency(offset, bytes, is_read);
+        return schedule_fast_latency(bytes);
     }
 
     // Fast mode: aggregate-bandwidth estimate. It preserves the 16-bank
     // sequential peak but skips per-stripe finish-array conflict accounting.
-    void impose_fast_latency(uint32_t bytes) {
+    sc_core::sc_time schedule_fast_latency(uint32_t bytes) {
         const uint32_t aggregate_bpc = AXI_BURST_BYTES;
         const double beats = double((bytes + aggregate_bpc - 1) / aggregate_bpc);
         const sc_core::sc_time access(
             beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
             sc_core::SC_NS);
-        if (access != sc_core::SC_ZERO_TIME) sc_core::wait(access);
+        return sc_core::sc_time_stamp() + access;
     }
 
     // Conflict mode: model 16 banks. An access spanning multiple banks accumulates
     // their per-bank wait times. The longest bank latency wins (parallel),
     // since simultaneous bank accesses overlap.
-    void impose_bank_latency(sc_core::sc_time bank_finish[N_BANKS],
-                             uint32_t offset, uint32_t bytes) {
+    sc_core::sc_time schedule_bank_latency(uint32_t offset, uint32_t bytes,
+                                           bool is_read) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
         sc_core::sc_time max_finish = now;
         uint32_t end = offset + bytes;
@@ -128,13 +160,14 @@ private:
                 beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
                 sc_core::SC_NS);
             const sc_core::sc_time start =
-                (bank_finish[bank] > now) ? bank_finish[bank] : now;
+                (sram_bank_finish_[bank] > now) ? sram_bank_finish_[bank] : now;
+            probe_axi_input(start, is_read, bank, a);
             const sc_core::sc_time finish = start + access;
-            bank_finish[bank] = finish;
+            sram_bank_finish_[bank] = finish;
             if (finish > max_finish) max_finish = finish;
             a += chunk;
         }
-        if (max_finish > now) sc_core::wait(max_finish - now);
+        return max_finish;
     }
 
     static sc_core::sc_time service_one_cycle(sc_core::sc_time& finish,
@@ -169,9 +202,8 @@ private:
     // requester class (CONV ACT, CONV WGT, UDMA, EWE, ...), so priority is
     // approximated by separate read/write edge ingress while all internal mesh
     // links are shared.
-    void impose_mesh_latency(sc_core::sc_time bank_finish[N_BANKS],
-                             uint32_t offset, uint32_t bytes,
-                             bool is_read) {
+    sc_core::sc_time schedule_mesh_latency(uint32_t offset, uint32_t bytes,
+                                           bool is_read) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
         sc_core::sc_time max_finish = now;
         const uint32_t end = offset + bytes;
@@ -187,17 +219,19 @@ private:
             const unsigned plane = pick_mesh_plane(now, src_x, src_y,
                                                    dst_x, dst_y, is_read);
             sc_core::sc_time t = route_on_mesh_plane(plane, now, src_x, src_y,
-                                                     dst_x, dst_y, is_read);
-            t = service_sram_beat(bank_finish[bank], t, chunk);
+                                                     dst_x, dst_y, is_read,
+                                                     bank, a);
+            t = service_sram_beat(sram_bank_finish_[bank], t, chunk);
             if (t > max_finish) max_finish = t;
             a += chunk;
         }
-        if (max_finish > now) sc_core::wait(max_finish - now);
+        return max_finish;
     }
 
     static constexpr unsigned MESH_PLANES = 2;
     static constexpr unsigned MESH_W = 4;
     static constexpr unsigned MESH_H = 4;
+    static constexpr unsigned ROUTER_INPUT_FIFO_DEPTH = 2; // flits, architectural knob
     enum MeshDir : unsigned { DIR_N = 0, DIR_E = 1, DIR_S = 2,
                               DIR_W = 3, DIR_LOCAL = 4 };
     static constexpr unsigned node_id(unsigned x, unsigned y) {
@@ -268,9 +302,13 @@ private:
     sc_core::sc_time route_on_mesh_plane(unsigned plane, sc_core::sc_time now,
                                          uint32_t src_x, uint32_t src_y,
                                          uint32_t dst_x, uint32_t dst_y,
-                                         bool is_read) {
+                                         bool is_read, uint32_t bank,
+                                         uint32_t addr) {
         sc_core::sc_time t = now;
-        t = service_one_cycle(mesh_edge_finish_[plane][is_read ? 0 : 1][src_y], t);
+        auto& edge = mesh_edge_finish_[plane][is_read ? 0 : 1][src_y];
+        const sc_core::sc_time edge_start = (edge > t) ? edge : t;
+        probe_axi_input(edge_start, is_read, bank, addr);
+        t = service_one_cycle(edge, t);
 
         uint32_t x = src_x;
         uint32_t y = src_y;
@@ -301,14 +339,98 @@ private:
         return service_one_cycle(mesh_router_out_finish_[plane][node_id(x, y)][DIR_LOCAL], t);
     }
 
+    static const char* engine_id_from_process() {
+        const auto h = sc_core::sc_get_current_process_handle();
+        if (!h.valid()) return "host";
+        const char* n = h.name();
+        if (!n) return "unknown";
+        if (std::strstr(n, "conv")) return "conv";
+        if (std::strstr(n, "requant")) return "requant";
+        if (std::strstr(n, "ewe")) return "ewe";
+        if (std::strstr(n, "pool")) return "pool";
+        if (std::strstr(n, "udma")) return "udma";
+        if (std::strstr(n, "host")) return "host";
+        return n;
+    }
+
+    static const char* ordinal(unsigned i) {
+        static thread_local char buf[8];
+        const unsigned n = i + 1;
+        const unsigned mod100 = n % 100;
+        const char* suffix = "th";
+        if (mod100 < 11 || mod100 > 13) {
+            switch (n % 10) {
+            case 1: suffix = "st"; break;
+            case 2: suffix = "nd"; break;
+            case 3: suffix = "rd"; break;
+            default: break;
+            }
+        }
+        std::snprintf(buf, sizeof(buf), "%u%s", n, suffix);
+        return buf;
+    }
+
+    void open_axi_probe(const char* path) {
+        axi_probe_.open(path);
+        if (!axi_probe_) {
+            std::cerr << "warning: cannot open MDLA7_L1_AXI_PROBE path: "
+                      << path << "\n";
+            return;
+        }
+        axi_probe_rows_.clear();
+        axi_probe_ << "cycle";
+        for (unsigned i = 0; i < AXI_INPUTS; ++i) {
+            axi_probe_ << ',' << ordinal(i) << " axi (engineid) addr";
+        }
+        axi_probe_ << '\n';
+    }
+
+    void flush_axi_probe_row() {
+        if (!axi_probe_) return;
+        for (const auto& [cycle, cells] : axi_probe_rows_) {
+            axi_probe_ << cycle;
+            for (const auto& cell : cells) {
+                axi_probe_ << ',' << cell;
+            }
+            axi_probe_ << '\n';
+        }
+        axi_probe_.flush();
+        axi_probe_rows_.clear();
+    }
+
+    static uint64_t cycle_of(sc_core::sc_time t) {
+        return static_cast<uint64_t>(t.to_seconds() * 1.0e9 + 0.5);
+    }
+
+    void probe_axi_input(sc_core::sc_time now, bool is_read,
+                         uint32_t bank, uint32_t addr) {
+        if (!axi_probe_) return;
+        const uint64_t cyc = cycle_of(now);
+        const unsigned lane = (is_read ? 0u : N_BANKS) + (bank % N_BANKS);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "(%s) 0x%08x",
+                      engine_id_from_process(), addr);
+        auto& cells = axi_probe_rows_[cyc];
+        if (!axi_probe_rows_initialized_.count(cyc)) {
+            cells.fill(std::string{});
+            axi_probe_rows_initialized_.insert(cyc);
+        }
+        if (!cells[lane].empty())
+            cells[lane] += "|";
+        cells[lane] += buf;
+    }
+
     L1TimingMode timing_mode_;
     std::vector<uint8_t> mem;
-    sc_core::sc_time read_bank_finish_ [N_BANKS];
-    sc_core::sc_time write_bank_finish_[N_BANKS];
+    sc_core::sc_time sram_bank_finish_[N_BANKS];
     sc_core::sc_time mesh_edge_finish_[MESH_PLANES][2][MESH_H];
     sc_core::sc_time mesh_router_out_finish_[MESH_PLANES][N_BANKS][5];
     sc_core::sc_time mesh_hlink_finish_[MESH_PLANES][MESH_H][MESH_W - 1][2];
     sc_core::sc_time mesh_vlink_finish_[MESH_PLANES][MESH_H - 1][MESH_W][2];
+    static constexpr unsigned AXI_INPUTS = 32;
+    std::ofstream axi_probe_;
+    std::map<uint64_t, std::array<std::string, AXI_INPUTS>> axi_probe_rows_;
+    std::set<uint64_t> axi_probe_rows_initialized_;
 };
 
 class Dram : public sc_core::sc_module {
@@ -407,6 +529,8 @@ private:
 // ingress; CONV ACT/WGT reads bypass it through direct L1Mesh AXI_R paths.
 class L1Manager : public sc_core::sc_module {
 public:
+    using AccessTicket = L1Mesh::AccessTicket;
+
     SC_HAS_PROCESS(L1Manager);
     L1Manager(sc_core::sc_module_name nm, L1Mesh& mesh, Dram& dram)
       : sc_module(nm), mesh_(mesh), dram_(dram) {}
@@ -432,6 +556,23 @@ public:
         if (addr_in_l1mesh(addr)) mesh_.write(addr, src, raw_n);
         else if (addr_in_dram(addr)) dram_.write_compressed(addr, src, raw_n, compressed_n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
+    }
+    AccessTicket read_async(uint32_t addr, void* dst, uint32_t n) {
+        if (addr_in_l1mesh(addr)) return mesh_.read_async(addr, dst, n);
+        read(addr, dst, n);
+        return AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket write_async(uint32_t addr, const void* src, uint32_t n) {
+        if (addr_in_l1mesh(addr)) return mesh_.write_async(addr, src, n);
+        write(addr, src, n);
+        return AccessTicket{sc_core::sc_time_stamp()};
+    }
+    static void wait_ticket(const AccessTicket& t) { L1Mesh::wait_ticket(t); }
+    static void wait_all(std::initializer_list<AccessTicket> tickets) {
+        sc_core::sc_time done = sc_core::sc_time_stamp();
+        for (const auto& t : tickets)
+            if (t.done > done) done = t.done;
+        wait_ticket(AccessTicket{done});
     }
 
 private:
