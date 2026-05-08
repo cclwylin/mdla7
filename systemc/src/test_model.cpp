@@ -100,6 +100,13 @@ uint8_t encode_stride_pair(uint8_t s_h, uint8_t s_w) {
     return uint8_t(enc(s_h) | (enc(s_w) << 2));
 }
 
+uint8_t encode_conv_stride_pair(uint8_t s_h, uint8_t s_w) {
+    auto enc = [](uint8_t s) -> uint8_t {
+        return (s >= 16) ? 0 : (s & 0x0F);
+    };
+    return uint8_t(enc(s_h) | (enc(s_w) << 4));
+}
+
 Descriptor make_udma(uint32_t src, uint32_t dst, uint32_t bytes,
                      uint8_t direction, uint8_t signal_tag,
                      uint8_t wait_a = 0, uint8_t wait_b = 0) {
@@ -1462,7 +1469,7 @@ int sc_main(int argc, char* argv[]) {
                     cb.out_c = A.out_c;
                     cb.k_h = A.k_h;
                     cb.k_w = A.k_w;
-                    cb.stride_dilation = encode_stride_pair(A.s_h, A.s_w);
+                    cb.stride_dilation = encode_conv_stride_pair(A.s_h, A.s_w);
                     cb.pad_tb = uint8_t(((out_lo == 0 ? A.p_t : 0) & 7)
                                       | (((out_hi == A.out_h ? A.p_b : 0) & 7) << 3));
                     cb.pad_lr = uint8_t((A.p_l & 7) | ((A.p_r & 7) << 3));
@@ -1796,7 +1803,7 @@ int sc_main(int argc, char* argv[]) {
                     cb.out_c = A.out_c;
                     cb.k_h = A.k_h;
                     cb.k_w = A.k_w;
-                    cb.stride_dilation = encode_stride_pair(A.s_h, A.s_w);
+                    cb.stride_dilation = encode_conv_stride_pair(A.s_h, A.s_w);
                     cb.pad_tb = uint8_t((pad_t_tile & 7) | ((pad_b_tile & 7) << 3));
                     cb.pad_lr = uint8_t((A.p_l & 7) | ((A.p_r & 7) << 3));
                     cb.group = A.group ? A.group : 1;
@@ -2024,7 +2031,7 @@ int sc_main(int argc, char* argv[]) {
                 cb.out_c = A.out_c;
                 cb.k_h = A.k_h;
                 cb.k_w = A.k_w;
-                cb.stride_dilation = encode_stride_pair(A.s_h, A.s_w);
+                cb.stride_dilation = encode_conv_stride_pair(A.s_h, A.s_w);
                 cb.pad_tb = uint8_t((((oh_done == 0) ? A.p_t : 0) & 7)
                                   | (((is_last_h ? A.p_b : 0) & 7) << 3));
                 cb.pad_lr = uint8_t((A.p_l & 7) | ((A.p_r & 7) << 3));
@@ -2350,7 +2357,7 @@ int sc_main(int argc, char* argv[]) {
                 cb.out_c = B.out_c;
                 cb.k_h = B.k_h;
                 cb.k_w = B.k_w;
-                cb.stride_dilation = encode_stride_pair(B.s_h, B.s_w);
+                cb.stride_dilation = encode_conv_stride_pair(B.s_h, B.s_w);
                 cb.pad_tb = uint8_t((((padded_input && oh_done == 0) ? 1 : B.p_t) & 7)
                                   | ((((padded_input && is_last_h) ? 1 : B.p_b) & 7) << 3));
                 cb.pad_lr = padded_input
@@ -2590,7 +2597,7 @@ int sc_main(int argc, char* argv[]) {
                 cb.out_c = A.out_c;
                 cb.k_h = A.k_h;
                 cb.k_w = A.k_w;
-                cb.stride_dilation = encode_stride_pair(A.s_h, A.s_w);
+                cb.stride_dilation = encode_conv_stride_pair(A.s_h, A.s_w);
                 cb.pad_tb = uint8_t((((oh_done == 0) ? A.p_t : 0) & 7)
                                   | (((is_last_h ? A.p_b : 0) & 7) << 3));
                 cb.pad_lr = uint8_t((A.p_l & 7) | ((A.p_r & 7) << 3));
@@ -3334,7 +3341,7 @@ int sc_main(int argc, char* argv[]) {
                     cb.in_h = uint16_t(this_in_h); cb.in_w = L.in_w;
                     cb.in_c = L.in_c;              cb.out_c = uint16_t(this_oc);
                     cb.k_h  = L.k_h;               cb.k_w   = L.k_w;
-                    cb.stride_dilation = encode_stride_pair(L.s_h, L.s_w);
+                    cb.stride_dilation = encode_conv_stride_pair(L.s_h, L.s_w);
                     cb.pad_tb = uint8_t((pad_t_tile & 7) | ((pad_b_tile & 7) << 3));
                     cb.pad_lr = uint8_t((L.p_l    & 7) | ((L.p_r    & 7) << 3));
                     cb.group  = L.group ? L.group : 1;

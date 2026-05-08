@@ -614,12 +614,15 @@ def pool_int8_ref(in_i8, k_h, k_w, s_h, s_w, pad, mode, count_include_pad):
     pT, pB, pL, pR = pad
     OH = (H + pT + pB - k_h) // s_h + 1
     OW = (W + pL + pR - k_w) // s_w + 1
-    out = np.zeros((OH, OW, C), dtype=np.int8)
+    out_dtype = np.int16 if in_i8.dtype == np.int16 else np.int8
+    min_v = -32768 if out_dtype == np.int16 else -128
+    max_v =  32767 if out_dtype == np.int16 else  127
+    out = np.zeros((OH, OW, C), dtype=out_dtype)
     for oh in range(OH):
         for ow in range(OW):
             for c in range(C):
                 if mode == OP_MAX_POOL:
-                    best = -128
+                    best = min_v
                     for kh in range(k_h):
                         ih = oh * s_h + kh - pT
                         if not (0 <= ih < H): continue
@@ -642,8 +645,8 @@ def pool_int8_ref(in_i8, k_h, k_w, s_h, s_w, pad, mode, count_include_pad):
                     # round-to-nearest, half away from zero
                     if s >= 0:  q = (s + div // 2) // div
                     else:       q = -((-s + div // 2) // div)
-                    if q > 127: q = 127
-                    if q < -128: q = -128
+                    if q > max_v: q = max_v
+                    if q < min_v: q = min_v
                     out[oh, ow, c] = q
     return out
 
@@ -926,8 +929,15 @@ def main():
         elem_size   = 2 if (is_int16 or is_fp_input) else 1
         np_in_dt    = np.float16 if is_fp_input else (np.int16 if is_int16 else np.int8)
 
-        # v4.1 limitation: only CONV / DEPTHWISE_CONV in int16 path so far.
-        if is_int16 and opname not in ("CONV_2D", "DEPTHWISE_CONV_2D"):
+        # v9.3: int16 path is implemented for conv-class, pool, binary EWE,
+        # reshape/concat byte movement, and spatial MEAN via AVG_POOL.
+        int16_supported_ops = {
+            "CONV_2D", "DEPTHWISE_CONV_2D",
+            "ADD", "MUL", "SUB",
+            "AVERAGE_POOL_2D", "MAX_POOL_2D", "MEAN",
+            "RESHAPE", "CONCATENATION",
+        }
+        if is_int16 and opname not in int16_supported_ops:
             print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
                   f"skipped (int16 {opname} not yet supported in v4.1)")
             continue
@@ -1011,15 +1021,11 @@ def main():
                 op_kind = OP_CONV
                 pad_enum = co.Padding()
             s_h = int(co.StrideH()); s_w = int(co.StrideW())
-            # v8.27: sim's stride encoding is 2-bit log2 (1, 2, 4, 8). Strides
-            # like 3, 5, 6, 7 silently alias to a wrong value and produce
-            # garbage output. microisp_float / pynet_v2_float use stride=3
-            # for downsampling. Skip cleanly with a clear reason; downstream
-            # layers fall back to fresh rng for their input chain.
-            if s_h not in (1, 2, 4, 8) or s_w not in (1, 2, 4, 8):
+            # v9.3: sim CONV stride is 4-bit direct encoding (0=>16), covering
+            # ETHZ_V6 stride=3 downsamplers and stride=16 ViT patchify convs.
+            if not (1 <= s_h <= 16 and 1 <= s_w <= 16):
                 print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
-                      f"skipped (stride={s_h}x{s_w} not in {{1,2,4,8}}; "
-                      f"sim's 2-bit stride encoding can't represent it)")
+                      f"skipped (stride={s_h}x{s_w} outside 1..16 encoding range)")
                 last_output_arr = None
                 continue
             # v8: some models (mobilenet_v3_fp16 first CONV) store a placeholder
@@ -1658,7 +1664,7 @@ def main():
             raw = sa.astype(np.int64) + sb.astype(np.int64)
             raw = np.clip(raw, -(1 << 31), (1 << 31) - 1).astype(np.int32)
             out = multiply_by_quantized_multiplier_np(raw, mq_o, sh_o) + zp_o_eff
-            ref = np.clip(out, act_min, act_max).astype(np.int8)
+            ref = np.clip(out, act_min, act_max).astype(np.int16 if is_int16 else np.int8)
             op_kind = OP_ADD
             OH, OW, OC = H, W, Cin              # ADD preserves shape (no broadcast yet)
             ref_b = ref.tobytes(order="C")
@@ -1762,12 +1768,15 @@ def main():
             act_max = min(DT_MAX, act_max)
             r_mult_o = scale_a * scale_b / scale_o
             mq_o, sh_o = quantize_multiplier(r_mult_o)
-            in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            if is_int16:
+                in_b_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
+            else:
+                in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
             a_v = in_arr.astype(np.int32) - zp_a_eff
             b_v = in_b_arr.astype(np.int32) - zp_b_eff
             raw = a_v * b_v
             out = multiply_by_quantized_multiplier_np(raw, mq_o, sh_o) + zp_o_eff
-            ref = np.clip(out, act_min, act_max).astype(np.int8)
+            ref = np.clip(out, act_min, act_max).astype(np.int16 if is_int16 else np.int8)
             op_kind = OP_MUL
             OH, OW, OC = H, W, Cin
             ref_b = ref.tobytes(order="C")
@@ -1831,7 +1840,10 @@ def main():
             mq_a, sh_a = quantize_multiplier(r_mult_a)
             mq_b, sh_b = quantize_multiplier(r_mult_b)
             mq_o, sh_o = quantize_multiplier(r_mult_o)
-            in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            if is_int16:
+                in_b_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
+            else:
+                in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
             a_v = (in_arr.astype(np.int32) - zp_a_eff) << left_shift
             b_v = (in_b_arr.astype(np.int32) - zp_b_eff) << left_shift
             sa = multiply_by_quantized_multiplier_np(a_v, mq_a, sh_a)
@@ -1839,7 +1851,7 @@ def main():
             raw = sa.astype(np.int64) - sb.astype(np.int64)
             raw = np.clip(raw, -(1 << 31), (1 << 31) - 1).astype(np.int32)
             out = multiply_by_quantized_multiplier_np(raw, mq_o, sh_o) + zp_o_eff
-            ref = np.clip(out, act_min, act_max).astype(np.int8)
+            ref = np.clip(out, act_min, act_max).astype(np.int16 if is_int16 else np.int8)
             op_kind = OP_SUB
             OH, OW, OC = H, W, Cin
             ref_b = ref.tobytes(order="C")
@@ -1963,7 +1975,7 @@ def main():
                 else:
                     ref = pool_int8_ref(in_i8, Kh, Kw, s_h, s_w,
                                         (pT, pB, pL, pR), op_kind, count_include_pad)
-                    ref_b = ref.astype(np.int8).tobytes(order="C")
+                    ref_b = ref.astype(np.int16 if is_int16 else np.int8).tobytes(order="C")
 
         elif opname in ("AVERAGE_POOL_2D", "MAX_POOL_2D"):
             po = fb.Pool2DOptions(); po.Init(opt_table.Bytes, opt_table.Pos)
@@ -1993,7 +2005,7 @@ def main():
             else:
                 ref = pool_int8_ref(in_i8, Kh, Kw, s_h, s_w,
                                     (pT, pB, pL, pR), op_kind, count_include_pad)
-                ref_b = ref.astype(np.int8).tobytes(order="C")
+                ref_b = ref.astype(np.int16 if is_int16 else np.int8).tobytes(order="C")
 
         elif opname == "SOFTMAX":
             op_kind = OP_SOFTMAX

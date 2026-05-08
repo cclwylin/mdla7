@@ -108,6 +108,49 @@ SC_MODULE(EweEngine) {
         L1Manager::wait_ticket(prev_write);
     }
 
+    template <typename T, typename Fn>
+    void run_binary_int_chunked_t(const EweBody& e, uint64_t elems, Fn&& fn) {
+        static constexpr uint64_t CHUNK_ELEMS = 1024;
+        std::vector<T> a_buf(CHUNK_ELEMS), b_buf(CHUNK_ELEMS), out_buf(CHUNK_ELEMS);
+        L1Manager::AccessTicket prev_write{};
+        for (uint64_t base = 0; base < elems; base += CHUNK_ELEMS) {
+            const uint64_t n64 = std::min<uint64_t>(CHUNK_ELEMS, elems - base);
+            const uint32_t n = uint32_t(n64);
+            const uint32_t off = uint32_t(base * sizeof(T));
+            auto ta = l1mgr.read_async(uint32_t(e.in_a_addr + off), a_buf.data(), n * sizeof(T));
+            auto tb = l1mgr.read_async(uint32_t(e.in_b_addr + off), b_buf.data(), n * sizeof(T));
+            L1Manager::wait_all({ta, tb});
+            for (uint32_t i = 0; i < n; ++i)
+                out_buf[i] = fn(a_buf[i], b_buf[i]);
+            prev_write = l1mgr.write_async(uint32_t(e.out_addr + off), out_buf.data(), n * sizeof(T));
+        }
+        L1Manager::wait_ticket(prev_write);
+    }
+
+    void run_add_int16(const EweBody& e, uint64_t elems) {
+        int32_t p[12];
+        l1mgr.read(e.lut_addr, p, sizeof(p));
+        const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
+        const int32_t mult_a = p[3], shift_a = p[4];
+        const int32_t mult_b = p[5], shift_b = p[6];
+        const int32_t mult_o = p[7], shift_o = p[8];
+        const int32_t left_shift = p[9];
+        const int32_t act_min = p[10], act_max = p[11];
+        run_binary_int_chunked_t<int16_t>(e, elems, [&](int16_t av, int16_t bv) {
+            int32_t a = (int32_t(av) - zp_a) << left_shift;
+            int32_t b = (int32_t(bv) - zp_b) << left_shift;
+            int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
+            int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
+            int64_t raw = int64_t(sa) + int64_t(sb);
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
+            if (v < act_min) v = act_min;
+            if (v > act_max) v = act_max;
+            return int16_t(v);
+        });
+    }
+
     void run_add_old_unused(const EweBody& e, uint64_t elems) {
         std::vector<int8_t> a_buf(elems), b_buf(elems), out_buf(elems);
         l1mgr.read(e.in_a_addr, a_buf.data(), elems);
@@ -187,6 +230,25 @@ SC_MODULE(EweEngine) {
         });
     }
 
+    void run_mul_int16(const EweBody& e, uint64_t elems) {
+        int32_t p[12];
+        l1mgr.read(e.lut_addr, p, sizeof(p));
+        const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
+        const int32_t mult_o = p[7], shift_o = p[8];
+        const int32_t act_min = p[10], act_max = p[11];
+        run_binary_int_chunked_t<int16_t>(e, elems, [&](int16_t av, int16_t bv) {
+            const int64_t a = int64_t(av) - zp_a;
+            const int64_t b = int64_t(bv) - zp_b;
+            int64_t raw = a * b;
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
+            if (v < act_min) v = act_min;
+            if (v > act_max) v = act_max;
+            return int16_t(v);
+        });
+    }
+
     // v8.30: TFLite int8 SUB. Same shape as run_add but with sb negated.
     //   sa = MBQM((a - zp_a) << ls, mult_a, shift_a)
     //   sb = MBQM((b - zp_b) << ls, mult_b, shift_b)
@@ -212,6 +274,30 @@ SC_MODULE(EweEngine) {
             if (v < act_min) v = act_min;
             if (v > act_max) v = act_max;
             return int8_t(v);
+        });
+    }
+
+    void run_sub_int16(const EweBody& e, uint64_t elems) {
+        int32_t p[12];
+        l1mgr.read(e.lut_addr, p, sizeof(p));
+        const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
+        const int32_t mult_a = p[3], shift_a = p[4];
+        const int32_t mult_b = p[5], shift_b = p[6];
+        const int32_t mult_o = p[7], shift_o = p[8];
+        const int32_t left_shift = p[9];
+        const int32_t act_min = p[10], act_max = p[11];
+        run_binary_int_chunked_t<int16_t>(e, elems, [&](int16_t av, int16_t bv) {
+            int32_t a = (int32_t(av) - zp_a) << left_shift;
+            int32_t b = (int32_t(bv) - zp_b) << left_shift;
+            int32_t sa = multiply_by_quantized_multiplier(a, mult_a, shift_a);
+            int32_t sb = multiply_by_quantized_multiplier(b, mult_b, shift_b);
+            int64_t raw = int64_t(sa) - int64_t(sb);
+            if (raw < -(1ll << 31)) raw = -(1ll << 31);
+            if (raw >  ((1ll << 31) - 1)) raw =  (1ll << 31) - 1;
+            int32_t v = multiply_by_quantized_multiplier(int32_t(raw), mult_o, shift_o) + zp_out;
+            if (v < act_min) v = act_min;
+            if (v > act_max) v = act_max;
+            return int16_t(v);
         });
     }
 
@@ -255,6 +341,9 @@ SC_MODULE(EweEngine) {
             const EweBody& e = body.ewe;
             uint64_t elems = uint64_t(e.h) * e.w * e.c;
             const bool fp = is_fp_dtype(last_dtype);
+            const bool int16 = (last_dtype == DT_INT16x4
+                             || last_dtype == DT_INT16x8
+                             || last_dtype == DT_INT16x16);
             const uint64_t lanes = ewe_lanes_for_dtype(last_dtype);
             // v8.30: binary ADD/MUL/SUB share the same dispatch shape (two
             // input tensors + 48-byte params) — only the math differs. Unary
@@ -270,6 +359,10 @@ SC_MODULE(EweEngine) {
                         const uint8_t op = (e.subtype == ES_MUL) ? 1
                                          : (e.subtype == ES_SUB) ? 2 : 0;
                         run_binary_fp(e, elems, op);
+                    } else if (int16) {
+                        if      (e.subtype == ES_MUL) run_mul_int16(e, elems);
+                        else if (e.subtype == ES_SUB) run_sub_int16(e, elems);
+                        else                          run_add_int16(e, elems);
                     } else {
                         if      (e.subtype == ES_MUL) run_mul(e, elems);
                         else if (e.subtype == ES_SUB) run_sub(e, elems);

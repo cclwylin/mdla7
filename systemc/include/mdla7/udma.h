@@ -20,9 +20,9 @@
 //   ACT_DECOMP_COPY: DRAM compressed activation -> L1 raw activation.
 //                    length=raw bytes, src_stride=compressed bytes,
 //                    dst_stride=metadata/header bytes.
-//   ACT_COMP_COPY  : L1 raw activation -> DRAM compressed activation.
-//                    Functional DRAM image stays raw for verification; timing
-//                    uses src_stride compressed bytes + dst_stride metadata.
+//   ACT_COMP_COPY  : L1 raw activation -> DRAM raw activation.
+//                    DRAM write compression is disabled for now, so timing
+//                    charges raw bytes even if compressed metadata is present.
 
 #include <systemc>
 #include <cstring>
@@ -49,6 +49,7 @@ SC_MODULE(Udma) {
     std::vector<std::pair<uint64_t, uint64_t>> tasks_read;
     std::vector<std::pair<uint64_t, uint64_t>> tasks_write;
     static constexpr uint32_t UDMA_READ_OUTSTANDING = 2;
+    static constexpr bool ACT_COMP_WRITE_ENABLE = false;
 
     SC_HAS_PROCESS(Udma);
     Udma(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -263,11 +264,16 @@ SC_MODULE(Udma) {
         std::vector<uint8_t> buf(raw_bytes);
         l1mgr.read(u.src_addr, buf.data(), raw_bytes);
         wait_act_codec(raw_bytes);
-        // Functional DRAM remains raw; timing charges compressed payload +
-        // metadata so final output verification can keep reading raw bytes.
-        l1mgr.write_compressed(u.dst_addr, buf.data(), raw_bytes,
-                               comp_bytes + meta_bytes);
-        wait_bytes(comp_bytes + meta_bytes);
+        if constexpr (ACT_COMP_WRITE_ENABLE) {
+            // Functional DRAM remains raw; timing charges compressed payload +
+            // metadata so final output verification can keep reading raw bytes.
+            l1mgr.write_compressed(u.dst_addr, buf.data(), raw_bytes,
+                                   comp_bytes + meta_bytes);
+            wait_bytes(comp_bytes + meta_bytes);
+        } else {
+            l1mgr.write(u.dst_addr, buf.data(), raw_bytes);
+            wait_bytes(raw_bytes);
+        }
     }
 };
 

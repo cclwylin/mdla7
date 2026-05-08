@@ -23,10 +23,10 @@
 namespace mdla7 {
 
 inline uint32_t decode_stride(uint8_t enc) {
-    // 2-bit log2 encoding: 0→1, 1→2, 2→4, 3→8 (v8: extended for conv1d-style
-    // s=8 audio models; previously enc=3 silently aliased to s=4).
-    static const uint32_t lut[4] = {1, 2, 4, 8};
-    return lut[enc & 0x3];
+    // v9.3 CONV uses 4-bit direct stride encoding so ETHZ_V6 stride=3
+    // downsamplers and stride=16 ViT patchify convs are representable.
+    // Nibble 0 is reserved for stride 16.
+    return enc ? uint32_t(enc) : 16u;
 }
 
 // Cycle count via bit-mult invariant (spec §5.3 v1):
@@ -79,8 +79,8 @@ SC_MODULE(ConvEngine) {
             const ConvBody& c = body.conv;
             DType dt = static_cast<DType>(last_dtype);
 
-            uint32_t s_h   = decode_stride(c.stride_dilation & 0x3);
-            uint32_t s_w   = decode_stride((c.stride_dilation >> 2) & 0x3);
+            uint32_t s_h   = decode_stride(c.stride_dilation & 0x0F);
+            uint32_t s_w   = decode_stride((c.stride_dilation >> 4) & 0x0F);
             uint32_t pad_t = c.pad_tb & 7;
             uint32_t pad_b = (c.pad_tb >> 3) & 7;
             uint32_t pad_l = c.pad_lr & 7;

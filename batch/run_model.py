@@ -1020,6 +1020,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   <g id="gantt-layers"></g>
   <g id="gantt-scope-hi"></g>
   <g id="gantt-bars"></g>
+  <g id="gantt-anchor"></g>
   <g id="gantt-axis"></g>
   <rect id="gantt-selrect" x="0" y="0" width="0" height="0"
         fill="rgba(66,135,245,0.18)" stroke="#4287f5" stroke-width="1"
@@ -1049,6 +1050,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   const gLayers = document.getElementById('gantt-layers');
   const gScope  = document.getElementById('gantt-scope-hi');
   const gBars   = document.getElementById('gantt-bars');
+  const gAnchor = document.getElementById('gantt-anchor');
   const gAxis   = document.getElementById('gantt-axis');
   const selRect = document.getElementById('gantt-selrect');
   const tip     = document.getElementById('gantt-tip');
@@ -1065,13 +1067,20 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   const LANE_H = 56, LANE_PAD = 8, LEFT = 72, RIGHT = 12, TOP = 8, AXIS_H = 32;
   const OP_ROW_H = 34;
   const total = Math.max(1, data.total | 0);
+  const CYCLES_PER_MS = 1.9e6;
 
   // viewState: visible cycle window.
   let view0 = 0, view1 = total;
   // scope highlight: which layer (if any) is currently focused.
   let highlight = null;       // {{start, end, id, op}} or null
+  let anchorCycle = null;      // left-click anchor for cycle/ms delta readout
 
   function fmt(n) {{ return n.toLocaleString(); }}
+  function fmtSigned(n) {{ return (n >= 0 ? '+' : '-') + fmt(Math.abs(n)); }}
+  function fmtSignedMs(n) {{
+    const v = n / CYCLES_PER_MS;
+    return (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(6);
+  }}
   function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
   function esc(s) {{
     return String(s).replace(/[&<>"']/g, ch => ({{
@@ -1195,6 +1204,18 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     }}
     gBars.innerHTML = bars;
 
+    let anchor = '';
+    if (anchorCycle !== null && anchorCycle >= view0 && anchorCycle <= view1) {{
+      const ax = x(anchorCycle);
+      const y0 = Y_OPS;
+      const y1 = Y_ENG + N_LANES * LANE_H;
+      anchor += `<line x1="${{ax}}" y1="${{y0}}" x2="${{ax}}" y2="${{y1}}" `
+             + `stroke="#111" stroke-width="1.5" stroke-dasharray="4,3" pointer-events="none"/>`;
+      anchor += `<text x="${{Math.min(ax + 5, W - RIGHT - 90)}}" y="${{Y_OPS + 11}}" `
+             + `font-size="10" fill="#111" pointer-events="none">anchor ${{fmt(anchorCycle)}}</text>`;
+    }}
+    gAnchor.innerHTML = anchor;
+
     // X-axis ticks.
     let axis = '';
     const yAx = Y_ENG + N_LANES * LANE_H;
@@ -1254,6 +1275,23 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   let mode = 'idle';   // 'select' | 'pan'
   let startX = 0, startView0 = 0;
 
+  function updateCursor(px, W) {{
+    const cyc = Math.round(pxToCyc(px, W));
+    let text = 'cycle: ' + fmt(cyc);
+    if (anchorCycle !== null) {{
+      const d = cyc - anchorCycle;
+      text += ' | anchor: ' + fmt(anchorCycle)
+           + ' | Δ ' + fmtSigned(d) + ' cyc / ' + fmtSignedMs(d) + ' ms';
+    }}
+    cursorInfo.textContent = text;
+  }}
+
+  function setAnchor(px, W) {{
+    anchorCycle = Math.round(clamp(pxToCyc(px, W), 0, total));
+    updateCursor(px, W);
+    render();
+  }}
+
   function showSel(x0, x1) {{
     const yy = TOP, hh = OP_ROW_H + N_LANES * LANE_H;
     const left = Math.min(x0, x1), w = Math.abs(x1 - x0);
@@ -1304,7 +1342,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     }}
 
     if (px >= LEFT && px <= W - RIGHT) {{
-      cursorInfo.textContent = 'cycle: ' + fmt(Math.round(pxToCyc(px, W)));
+      updateCursor(px, W);
     }}
   }});
 
@@ -1320,6 +1358,8 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         const c0 = clamp(pxToCyc(x0, W), 0, total);
         const c1 = clamp(pxToCyc(x1, W), 0, total);
         if (c1 - c0 >= 1) {{ view0 = c0; view1 = c1; render(); }}
+      }} else {{
+        setAnchor(endX, W);
       }}
       selRect.style.display = 'none';
     }}

@@ -150,7 +150,7 @@ struct ConvBody {
     uint16_t in_h, in_w, in_c, out_c;
     uint8_t  k_h;            // 1..11
     uint8_t  k_w;            // 1..11
-    uint8_t  stride_dilation;// [1:0]=s_h, [3:2]=s_w, [5:4]=d_h, [7:6]=d_w (enum 0=>1, 1=>2, 2=>4)
+    uint8_t  stride_dilation;// CONV stride: [3:0]=s_h, [7:4]=s_w direct, 0=>16
     uint8_t  pad_tb;         // [2:0]=pad_t, [5:3]=pad_b
     uint8_t  pad_lr;         // [2:0]=pad_l, [5:3]=pad_r
     uint8_t  _r0;
