@@ -2162,6 +2162,11 @@ int sc_main(int argc, char* argv[]) {
             if (!padded_input && !exact_input) return false;
             if (B.out_c <= 4 && B.out_h >= 256 && B.out_w >= 256)
                 return false;
+            // Large full-resolution image enhancement tails keep too much
+            // producer state live across the EWE->CONV wavefront for 2-slot
+            // ping-pong. Keep the older single-slot stream for this shape.
+            const bool large_image_tail =
+                A.out_h >= 512 && A.out_w >= 768 && A.out_c >= 64;
 
             const uint32_t elem = 1;
             const uint64_t pure_wgt = conv_pure_weight_bytes(B);
@@ -2179,7 +2184,8 @@ int sc_main(int argc, char* argv[]) {
             if (!row_bytes_a || !row_bytes_b) return false;
 
             const uint64_t safety = 65536;
-            constexpr uint32_t STREAM_SLOTS = 1;
+            constexpr uint32_t STREAM_SLOTS_MAX = 2;
+            const uint32_t stream_slots = large_image_tail ? 1u : STREAM_SLOTS_MAX;
             uint32_t tile_oh = std::min<uint32_t>(64, H);
             const uint64_t fixed_bytes =
                 align64(48u) +
@@ -2193,9 +2199,9 @@ int sc_main(int argc, char* argv[]) {
                        align64(uint32_t(conv_out));
             };
             while (tile_oh > 1 &&
-                   fixed_bytes + STREAM_SLOTS * slot_bytes_for(tile_oh) + safety > L1_BUDGET)
+                   fixed_bytes + stream_slots * slot_bytes_for(tile_oh) + safety > L1_BUDGET)
                 --tile_oh;
-            if (fixed_bytes + STREAM_SLOTS * slot_bytes_for(tile_oh) + safety > L1_BUDGET)
+            if (fixed_bytes + stream_slots * slot_bytes_for(tile_oh) + safety > L1_BUDGET)
                 return false;
             if (tile_oh >= H)
                 return false;
@@ -2243,7 +2249,7 @@ int sc_main(int argc, char* argv[]) {
             ++udma_count_so_far;
             last_udma[i] = udma_count_so_far;
 
-            uint8_t slot_done[STREAM_SLOTS] = {0};
+            uint8_t slot_done[STREAM_SLOTS_MAX] = {0};
             uint8_t ewe_done = 0;
             uint8_t conv_done = 0;
             bool conv_blob_loaded = false;
@@ -2262,7 +2268,7 @@ int sc_main(int argc, char* argv[]) {
 
                 Microblock mb{};
                 mb.id = tile_id;
-                mb.slot = uint8_t(tile_id % STREAM_SLOTS);
+                mb.slot = uint8_t(tile_id % stream_slots);
                 mb.elem_off = uint64_t(oh_done) * W * B.out_c;
                 mb.rows = this_oh;
                 mb.elems = this_oh * W * B.out_c;
