@@ -32,7 +32,8 @@ public:
 
     // Architectural Payload lane scaffold. The current functional engines
     // still call L1Manager::read/write; these channels pin down the agreed
-    // Engine↔L1 and CONV↔L1Mesh port counts for the beat-level model.
+    // Engine↔L1 and the two dedicated CONV↔L1Mesh ACT_R/WGT_R port counts
+    // for the beat-level model.
     std::array<std::unique_ptr<sc_core::sc_fifo<Payload>>, PayloadPortCount::REQUANT_R> requant_payload_r;
     std::array<std::unique_ptr<sc_core::sc_fifo<Payload>>, PayloadPortCount::REQUANT_W> requant_payload_w;
     std::array<std::unique_ptr<sc_core::sc_fifo<Payload>>, PayloadPortCount::EWE_R> ewe_payload_r;

@@ -10,10 +10,10 @@
                 <mxCell id="l1n_note" value="2 x 4x4 mesh planes share one 16-bank SRAM backend. Each bank = 16 x 768x16B macros = 192KB; total = 3MB. Per plane edge capacity = 16R + 16W; aggregate NoC edge capacity = 32R + 32W. SRAM backend bandwidth is not doubled." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
                     <mxGeometry x="50" y="85" width="1540" height="58" as="geometry"/>
                 </mxCell>
-                <mxCell id="l1n_act" value="CONV ACT_R&lt;br/&gt;32 x 128b direct ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="l1n_act" value="CONV ACT_R&lt;br/&gt;32 x 16B dedicated link" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="70" y="380" width="220" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="l1n_wgt" value="CONV WGT_R&lt;br/&gt;32 x 128b direct ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="l1n_wgt" value="CONV WGT_R&lt;br/&gt;32 x 16B dedicated link" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="70" y="500" width="220" height="70" as="geometry"/>
                 </mxCell>
                 <mxCell id="l1n_mgr" value="L1_Manager&lt;br/&gt;non-CONV R/W ingress&lt;br/&gt;16R + 16W" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" parent="1" vertex="1">
@@ -25,10 +25,10 @@
                 <mxCell id="l1n_meshtitle" value="Two 4x4 NoC planes sharing one 16-bank SRAM array" style="text;html=1;fontSize=16;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=#ffffff;" parent="1" vertex="1">
                     <mxGeometry x="600" y="200" width="560" height="30" as="geometry"/>
                 </mxCell>
-                <mxCell id="l1n_edge_top" value="Top edge&lt;br/&gt;4R + 4W&lt;br/&gt;WGT_R ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="l1n_edge_top" value="Top edge&lt;br/&gt;4R + 4W&lt;br/&gt;WGT_R dedicated ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="690" y="250" width="220" height="55" as="geometry"/>
                 </mxCell>
-                <mxCell id="l1n_edge_left" value="Left edge&lt;br/&gt;4R + 4W&lt;br/&gt;ACT_R ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="l1n_edge_left" value="Left edge&lt;br/&gt;4R + 4W&lt;br/&gt;ACT_R dedicated ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="400" y="370" width="105" height="110" as="geometry"/>
                 </mxCell>
                 <mxCell id="l1n_edge_right" value="Right edge&lt;br/&gt;4R + 4W&lt;br/&gt;L1Mgr_R" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" parent="1" vertex="1">
@@ -93,10 +93,10 @@
                 <mxCell id="arb_title" value="L1Mesh Request Arbitration" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
                     <mxGeometry x="50" y="35" width="700" height="40" as="geometry"/>
                 </mxCell>
-                <mxCell id="arb_act" value="CONV ACT_R&lt;br/&gt;direct ingress&lt;br/&gt;highest read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="arb_act" value="CONV ACT_R&lt;br/&gt;dedicated direct ingress&lt;br/&gt;highest read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="80" y="180" width="260" height="90" as="geometry"/>
                 </mxCell>
-                <mxCell id="arb_wgt" value="CONV WGT_R&lt;br/&gt;direct ingress&lt;br/&gt;second read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="arb_wgt" value="CONV WGT_R&lt;br/&gt;dedicated direct ingress&lt;br/&gt;second read priority" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="80" y="330" width="260" height="90" as="geometry"/>
                 </mxCell>
                 <mxCell id="arb_l1r" value="L1Manager_R&lt;br/&gt;Requant / EWE / POOL / TNPS / UDMA" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" parent="1" vertex="1">

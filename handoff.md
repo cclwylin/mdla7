@@ -17,6 +17,8 @@ service, 8 perimeter edge queues per read/write direction, bank swizzle, and
 fixed simulator scheduling chunks. Payload carries no burst metadata; `tid` +
 `last` mark the logical transaction. Per-lane profile tables now report
 avg/max latency, wait, service, accesses, and KB for Payload R/W lanes 0..15.
+CONV ACT_R and WGT_R are two dedicated CONV-facing direct links into L1Mesh;
+they bypass L1Manager and do not share the same ingress with each other.
 
 Latest Hotspot rerun after this change brought `mesh/fast` close to 1.0. High
 `max_latency` values can still appear when many large FC transfer chunks queue

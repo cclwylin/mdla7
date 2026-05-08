@@ -35,7 +35,8 @@ l1mgr.write(addr, src, bytes);
 
 ## 12.2 L1Manager design
 
-硬體 spec 上，CONV ACT/WGT Payload R 直接接 L1Mesh，不經過 L1Manager。
+硬體 spec 上，CONV ACT_R / WGT_R Payload R 各有專線到 CONV Engine，
+直接接 L1Mesh，不經過 L1Manager。
 這條 direct path 讓 CONV read 取得最高服務優先權，目標是讓 CONV cluster
 不被 EWE / POOL / UDMA background traffic 餓住。
 
@@ -94,8 +95,8 @@ NoC edge ports 採四邊分流，每個 mesh plane 都有：
 
 | Edge | Ports | Primary traffic |
 |---|---:|---|
-| left | 4R + 4W | CONV ACT_R direct ingress |
-| top | 4R + 4W | CONV WGT_R direct ingress |
+| left | 4R + 4W | CONV ACT_R dedicated direct ingress |
+| top | 4R + 4W | CONV WGT_R dedicated direct ingress |
 | right | 4R + 4W | L1Manager_R |
 | bottom | 4R + 4W | L1Manager_W |
 

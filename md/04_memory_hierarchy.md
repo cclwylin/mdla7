@@ -31,7 +31,7 @@ L1Manager
 UDMA 也透過 L1Manager 搬資料
 ```
 
-CONV ACT/WGT read 是 direct L1Mesh path；其他 engine / UDMA 透過
+CONV ACT_R / WGT_R read 各有專線到 CONV Engine，是 direct L1Mesh path；其他 engine / UDMA 透過
 [`L1Manager`](../systemc/include/mdla7/memory.h)。這讓大部分 memory latency
 入口集中，同時保留 CONV read 的最高服務優先權：
 
@@ -139,10 +139,10 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 | route to L1Mesh / DRAM | implemented |
 | out-of-range error | implemented |
 | Non-CONV entrance arbitration | spec defined; simulator simplified |
-| QoS / priority | CONV ACT/WGT read bypasses L1Manager via direct L1Mesh path |
+| QoS / priority | CONV ACT_R / WGT_R bypass L1Manager via two dedicated direct L1Mesh paths |
 | cache coherency | not relevant，這裡是 scratchpad |
 
-換句話說，HW spec 有 CONV direct path + L1Manager non-CONV arbitration；
+換句話說，HW spec 有 CONV ACT_R / WGT_R dedicated direct paths + L1Manager non-CONV arbitration；
 目前 simulator 還不是完整 port-accurate interconnect model。真正的 latency
 主要在 L1Mesh / DRAM 裡 imposing wait。
 
@@ -267,6 +267,7 @@ ingress   = 高速公路交流道入口
 ```text
 CONV 要讀 activation。
 這些 read request 不走 L1Manager。
+ACT_R 是 CONV Engine 專用線，不和 WGT_R 或 L1Manager_R 共用同一組入口。
 它們從 L1Mesh 左邊的入口進入 NoC。
 進去後再沿著其中一個 4x4 mesh plane 路由到目標 bank。
 ```
@@ -282,6 +283,7 @@ WGT_R top-edge ingress
 ```text
 CONV 要讀 weight。
 這些 read request 也不走 L1Manager。
+WGT_R 是另一組 CONV Engine 專用線，不和 ACT_R 共用。
 它們從 L1Mesh 上方的入口進入 NoC。
 ```
 
@@ -290,8 +292,8 @@ CONV 要讀 weight。
 traffic 一開始就分散：
 
 ```text
-left   edge -> ACT_R
-top    edge -> WGT_R
+left   edge -> ACT_R dedicated CONV link
+top    edge -> WGT_R dedicated CONV link
 right  edge -> L1Manager_R
 bottom edge -> L1Manager_W
 ```
@@ -403,7 +405,7 @@ per plane   : 16R + 16W
 aggregate   : 32R + 32W across 2 planes
 ```
 
-這代表 NoC 邊界有很多入口/出口，讓 traffic 比較容易進出 mesh。dual-plane
+其中 left/top edge 分別對應 ACT_R / WGT_R 到 CONV Engine 的專用線。這代表 NoC 邊界有很多入口/出口，讓 traffic 比較容易進出 mesh。dual-plane
 model 會把每個 16B flit 放到較不忙的 mesh plane，但最後仍然進同一個
 SRAM bank backend。
 

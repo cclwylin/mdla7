@@ -2,11 +2,11 @@
 
 // L1Mesh + DRAM + L1_Manager
 //
-// HW spec: CONV ACT/WGT Payload reads connect directly to L1Mesh, bypassing
-// L1Manager, so CONV reads get the highest service priority. L1Manager
-// arbitrates non-CONV Engine/UDMA ingress. The current SystemC L1Manager below
-// is still a simplified pass-through router; full priority contention is a
-// future refinement.
+// HW spec: CONV ACT_R and WGT_R Payload reads have separate dedicated links
+// into L1Mesh, bypassing L1Manager, so CONV reads get the highest service
+// priority. L1Manager arbitrates non-CONV Engine/UDMA ingress. The current
+// SystemC L1Manager below is still a simplified pass-through router; full
+// priority contention is a future refinement.
 //
 // v2.1 / v3.2: L1Mesh has 16 banks (256-byte interleave) — concurrent
 //       accesses to different banks proceed in parallel, only same-bank
@@ -647,7 +647,8 @@ private:
 };
 
 // v0: simplified pass-through. HW L1_Manager arbitrates non-CONV Engine/UDMA
-// ingress; CONV ACT/WGT reads bypass it through direct L1Mesh Payload paths.
+// ingress; CONV ACT_R/WGT_R reads bypass it through two dedicated direct
+// L1Mesh Payload paths.
 class L1Manager : public sc_core::sc_module {
 public:
     using AccessTicket = L1Mesh::AccessTicket;

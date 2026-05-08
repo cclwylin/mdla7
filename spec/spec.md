@@ -78,20 +78,20 @@ opcode = READ_REQ / READ_RESP / WRITE_REQ / WRITE_ACK
 | POOL | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | **TNPS** | — | — | **8** | **8** | R: **128 B/cyc**；W: **128 B/cyc**（讀寫對稱：每個 element 一進一出） |
 
-- CONV ACT/WGT read **直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT + 32 組 WGT，全部都是 Payload R）。
+- CONV ACT/WGT read **各自有 CONV 專用線直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT_R + 32 組 WGT_R，兩組 Payload R lane 彼此獨立）。
 - CONV 的輸出（INT32 partial sum）**不直接寫回 L1**；推測有專用 chain 路徑串到 Requant Engine（路徑形式 `[TBD]`，見 §6.2）。
 - Requant / EWE / POOL / TNPS：保留 Payload R + Payload W，partial sum / output / 重排後 tensor 透過 L1_Manager 仲裁進出 L1Mesh。
 - TNPS 純做 data movement（讀 → 重新 index → 寫），不參與 MAC；R/W 條數設成對稱（8+8）反映 1:1 流量；BW 設成 EWE/POOL 的一半，因為 transpose 多半發生在 attention 相關的 small-tensor reshape，不是 throughput-critical 路徑。
 
 L1_Manager 入口有 arbiter，但 CONV ACT/WGT read 不進 L1_Manager。
-CONV read 以 direct L1Mesh path 取得最高服務優先權，避免 compute cluster starvation。
+CONV read 以 ACT_R / WGT_R 兩組 dedicated L1Mesh path 取得最高服務優先權，避免 compute cluster starvation。
 L1_Manager 入口 priority 目前定義為：
 
 1. Requant writeback / parameter read。
 2. EWE / POOL / TNPS。
 3. UDMA background load/store。
 
-CONV direct read 與 L1_Manager traffic 最後都受 L1Mesh 後端 banked SRAM service 限制。
+ACT_R / WGT_R 對 CONV Engine 是兩組專線；進入 L1Mesh 後仍會依 address 路由到目標 bank，最後與 L1_Manager traffic 共同受 L1Mesh 後端 banked SRAM service 限制。
 
 ### 3.2 L1_Manager 邊界（藍線）
 
@@ -163,10 +163,10 @@ Ingress paths：
 Each 4x4 mesh plane exposes 4 R/W edge ports per side:
 
 ```
-top edge    : 4R + 4W  -> WGT_R ingress
+top edge    : 4R + 4W  -> CONV WGT_R dedicated ingress
 right edge  : 4R + 4W  -> L1Manager_R ingress
 bottom edge : 4R + 4W  -> L1Manager_W ingress
-left edge   : 4R + 4W  -> ACT_R ingress
+left edge   : 4R + 4W  -> CONV ACT_R dedicated ingress
 per plane   : 16R + 16W edge injection/ejection
 aggregate   : 32R + 32W across 2 mesh planes
 ```
@@ -207,9 +207,9 @@ write slot:
   L1Manager_W
 ```
 
-CONV ACT/WGT frontend and the dual mesh fabric are intentionally wider than the
-16-bank SRAM backend. The direct path bypasses L1_Manager arbitration, but it
-does not bypass bank conflicts or per-bank read service limits. With 16 banks
+CONV ACT_R / WGT_R frontend and the dual mesh fabric are intentionally wider than the
+16-bank SRAM backend. ACT_R and WGT_R are dedicated CONV-facing links that bypass
+L1_Manager arbitration, but they do not bypass bank conflicts or per-bank read service limits. With 16 banks
 and one 16B read beat per bank per SRAM cycle, raw L1Mesh read peak remains
 `256 B/SRAM-cycle` aggregate across read and write combined. The `32R + 32W`
 aggregate edge ports are therefore NoC ingress/ejection capacity, while the
@@ -319,7 +319,7 @@ CONV array 是 **bit-decomposable**：固定矽面積、可依 operand 精度重
 
 ### 3A.3 BW vs Compute 平衡（CONV）
 
-CONV 對 L1Mesh 的 direct R 介面（**ACT/WGT read 不經 L1_Manager，沒有 W path**）：
+CONV 對 L1Mesh 的 direct R 介面（**ACT_R / WGT_R 各有專線到 CONV Engine，不經 L1_Manager，沒有 W path**）：
 
 | 來源 | 條數 | bytes/cycle @ 128b | bytes/sec @ 1.9 GHz |
 |---|---|---|---|
@@ -956,10 +956,10 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 - **Host → Command Engine（白線, 1T descriptor）**：v0 用 `sc_fifo<descriptor_t>`，host 把 descriptor `write()` 進去，CmdEngine 用 `read()` 取出。v1 改成 `simple_initiator_socket`（AXI-Lite stub）後可掛 RISC-V ISS。
 - **Command Engine → Engine config（白線, 1T payload）**：用 `sc_signal<descriptor_t>` 或自定 `sc_fifo<>`(depth=1)，1 cycle latch 即可，**不需要 TLM socket**。
-- **CONV ↔ L1Mesh direct（藍線, Payload 16B × N）**：ACT/WGT read 不經 L1_Manager。
+- **CONV ↔ L1Mesh direct（藍線, Payload 16B × N）**：ACT_R / WGT_R 各自是 CONV 專用線，不經 L1_Manager，兩者也不是同一組 shared R port。
 - **Non-CONV Engine ↔ L1_Manager（藍線, Payload 16B × N）**：內部 `Payload {engineid, tid, opcode, addr, data[16B], last}`；N 條並列在 v0 可先合併成「N×16B / cycle」單條模型，等 contention 模型上線再展開。
 - **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 16> chain;` 連 CONV partial sums，每 lane depth=2；timing 上 Requant 是 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
-- **L1_Manager 內部 arbiter**：Non-CONV Engine / UDMA → L1_Manager 入口 arbitration；CONV ACT/WGT read 是 direct L1Mesh path，不進此 arbiter。其他 engine / UDMA 依固定 priority 或 aging policy 排程 `[TBD]`。
+- **L1_Manager 內部 arbiter**：Non-CONV Engine / UDMA → L1_Manager 入口 arbitration；CONV ACT_R / WGT_R 是兩組 dedicated direct L1Mesh path，不進此 arbiter。其他 engine / UDMA 依固定 priority 或 aging policy 排程 `[TBD]`。
 - **DRAM latency**：用 `wait()` 模 fixed latency，第一版不模 DDR controller。
 
 ### 5.3 Cycle accuracy
@@ -975,7 +975,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
   - 1.9 GHz 換算：wall time = cycle 數 / 1.9 GHz ≈ cycle 數 × 0.526 ns
   - **SystemC 介面**：CONV Engine config descriptor 必須帶 `dtype` + `output_channel_group_id` (per cluster) 欄位，模型查表決定 cycle 數
 - **v2**：L1_Manager arbitration + bandwidth contention
-  - CONV ACT/WGT direct L1Mesh read 與 L1_Manager traffic 的後端 SRAM service contention
+  - CONV ACT_R / WGT_R dedicated L1Mesh read 與 L1_Manager traffic 的後端 SRAM service contention
   - Non-CONV Engine / UDMA 同時想存取 L1Mesh 時，對 16R/16W 後端 service 的收斂 stall 模型
 - **v3**：DRAM controller（page hit/miss、refresh）`[TBD]`，視 UDMA 是否成 bottleneck 再決定要不要做。
 
@@ -1016,7 +1016,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~POOL 模式~~ → **max / avg / global**；avg 帶 `count_include_pad` flag；無 dilation；見 §3A.7
 
 ### 6.4 Memory
-- [x] ~~L1Mesh SRAM 的 bank 切法、port 數~~ → **3MB, 4x4 NoC, 16 banks, 256 x 768x16B macros, 4R/4W edge ports per side, CONV ACT/WGT direct ingress**
+- [x] ~~L1Mesh SRAM 的 bank 切法、port 數~~ → **3MB, 4x4 NoC, 16 banks, 256 x 768x16B macros, 4R/4W edge ports per side, CONV ACT_R / WGT_R dedicated direct ingress**
 - [x] ~~DRAM 規格~~ → **LPDDR5X-10667**（JEDEC LPDDR5X，10.667 Gbps/pin）
 - [x] ~~channel 數 / bus width~~ → **dual-channel x32**，peak BW **85.3 GB/s**（@ 1.9 GHz core ≈ 44.9 B/cyc → 模型用 48 B/cyc）
 - [ ] L1_Manager 的 arbitration policy
