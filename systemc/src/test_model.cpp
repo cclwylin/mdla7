@@ -1048,6 +1048,25 @@ int sc_main(int argc, char* argv[]) {
                 producer_no_store[k] = true;
         }
 
+        // Token embedding lookup can be followed by a pure shape barrier
+        // before CONCAT.  If element count/bytes are unchanged, the gather
+        // output DRAM copy is still just an intermediate checkpoint.
+        for (uint32_t k = 0; k + 1 < N; ++k) {
+            const auto& L = metas[k];
+            const auto& S = metas[k + 1];
+            const auto& G = graph_metas[k];
+            const bool gather_to_metadata =
+                L.op_kind == OK_GATHER &&
+                (S.op_kind == OK_RESHAPE || S.op_kind == OK_MATERIALIZE) &&
+                G.consumer_count > 0 &&
+                G.last_consumer_layer > int32_t(k) &&
+                L.dtype == S.dtype &&
+                L.ref_size == S.in_size &&
+                L.ref_size == S.ref_size;
+            if (gather_to_metadata)
+                producer_no_store[k] = true;
+        }
+
         // Hotspot transient compute producers.  If GraphMeta says a
         // CONV-class / unary EWE output has a later consumer, it is an
         // intermediate activation, not the slice output.  The consumer's
