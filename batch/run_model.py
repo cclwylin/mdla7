@@ -820,15 +820,15 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                 )
             return "".join(rows)
         l1mesh_lane_tables = f"""
-<h2>L1Mesh AXI lane latency</h2>
+<h2>L1Mesh Payload lane latency</h2>
 <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
   <div>
-    <h3 style="font-size:13px; margin:0 0 6px;">AXI_R lanes</h3>
+    <h3 style="font-size:13px; margin:0 0 6px;">Payload R lanes</h3>
     <table class="sortable"><thead><tr><th>lane</th><th>accesses</th><th>KB</th><th>avg cyc</th><th>avg wait</th><th>avg service</th><th>max cyc</th><th>max wait</th><th>max service</th></tr></thead>
     <tbody>{_lane_table_rows('read_lanes')}</tbody></table>
   </div>
   <div>
-    <h3 style="font-size:13px; margin:0 0 6px;">AXI_W lanes</h3>
+    <h3 style="font-size:13px; margin:0 0 6px;">Payload W lanes</h3>
     <table class="sortable"><thead><tr><th>lane</th><th>accesses</th><th>KB</th><th>avg cyc</th><th>avg wait</th><th>avg service</th><th>max cyc</th><th>max wait</th><th>max service</th></tr></thead>
     <tbody>{_lane_table_rows('write_lanes')}</tbody></table>
   </div>

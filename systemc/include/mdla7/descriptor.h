@@ -4,6 +4,7 @@
 // 64 byte total: 16 byte common header + 48 byte op-specific body union.
 
 #include <cstdint>
+#include <array>
 #include <ostream>
 #include <type_traits>
 
@@ -44,6 +45,52 @@ enum PoolMode : uint8_t {
     PM_MAX    = 0,
     PM_AVG    = 1,
     PM_GLOBAL = 2,
+};
+
+enum EngineId : uint8_t {
+    EID_HOST      = 0,
+    EID_CONV      = 1,
+    EID_REQUANT   = 2,
+    EID_EWE       = 3,
+    EID_POOL      = 4,
+    EID_TNPS      = 5,
+    EID_UDMA      = 6,
+    EID_L1MANAGER = 7,
+    EID_L1MESH    = 8,
+};
+
+enum PayloadOpcode : uint8_t {
+    PL_READ_REQ  = 0,
+    PL_READ_RESP = 1,
+    PL_WRITE_REQ = 2,
+    PL_WRITE_ACK = 3,
+};
+
+constexpr unsigned PAYLOAD_BYTES = 16;
+
+struct Payload {
+    uint8_t engineid;
+    uint8_t tid;
+    uint8_t opcode;
+    uint8_t last;
+    uint32_t addr;
+    std::array<uint8_t, PAYLOAD_BYTES> data;
+};
+static_assert(sizeof(Payload) == 24, "Payload must be 24 bytes");
+
+struct PayloadPortCount {
+    static constexpr unsigned REQUANT_R = 8;
+    static constexpr unsigned REQUANT_W = 8;
+    static constexpr unsigned EWE_R = 16;
+    static constexpr unsigned EWE_W = 8;
+    static constexpr unsigned POOL_R = 16;
+    static constexpr unsigned POOL_W = 8;
+    static constexpr unsigned TNPS_R = 8;
+    static constexpr unsigned TNPS_W = 8;
+    static constexpr unsigned L1MESH_R = 16;
+    static constexpr unsigned L1MESH_W = 16;
+    static constexpr unsigned CONV_ACT_R = 32;
+    static constexpr unsigned CONV_WGT_R = 32;
 };
 
 // EWE engine subtypes (v6) — distinguishes softmax vs binary ADD vs other elwise ops.
@@ -200,6 +247,13 @@ inline std::ostream& operator<<(std::ostream& os, const DescriptorBody&) {
 }
 inline std::ostream& operator<<(std::ostream& os, const Descriptor& d) {
     return os << "<Descriptor op_class=" << int(d.hdr.op_class()) << ">";
+}
+inline std::ostream& operator<<(std::ostream& os, const Payload& p) {
+    return os << "<Payload engineid=" << int(p.engineid)
+              << " tid=" << int(p.tid)
+              << " opcode=" << int(p.opcode)
+              << " addr=0x" << std::hex << p.addr << std::dec
+              << " last=" << int(p.last) << ">";
 }
 
 // Address-space helpers — see spec §3A.10

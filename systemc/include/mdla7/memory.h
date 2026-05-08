@@ -2,7 +2,7 @@
 
 // L1Mesh + DRAM + L1_Manager
 //
-// HW spec: CONV ACT/WGT AXI_R connects directly to L1Mesh, bypassing
+// HW spec: CONV ACT/WGT Payload reads connect directly to L1Mesh, bypassing
 // L1Manager, so CONV reads get the highest service priority. L1Manager
 // arbitrates non-CONV Engine/UDMA ingress. The current SystemC L1Manager below
 // is still a simplified pass-through router; full priority contention is a
@@ -10,11 +10,12 @@
 //
 // v2.1 / v3.2: L1Mesh has 16 banks (256-byte interleave) — concurrent
 //       accesses to different banks proceed in parallel, only same-bank
-//       accesses serialize.  Each SRAM macro port = 16 byte / cycle (one AXI
-//       128b lane) and is 1R/W, not independent 1R+1W.  16 banks × 16 byte =
+//       accesses serialize.  Each SRAM macro port = one 16-byte Payload beat
+//       per SRAM cycle and is 1R/W, not independent 1R+1W.  16 banks × 16 byte =
 //       256 B / cycle peak aggregate backend bandwidth
-//       (matches spec §3.2 L1_Manager↔L1Mesh = 16 R + 16 W lanes).
-//       AXI bursts use 16 beats × 16 B = 256 B as the transaction granularity.
+//       (matches spec §3.2 L1_Manager↔L1Mesh = 16R + 16W Payload lanes).
+//       Payload is an internal per-beat protocol; tid + last groups beats into
+//       a logical transaction and no burst metadata is carried.
 //       The NoC fabric is modeled as two parallel 4x4 mesh planes sharing this
 //       same 16-bank SRAM backend.
 //       Router input FIFO depth is provisionally 2 flits; current timing only
@@ -80,7 +81,7 @@ public:
         uint64_t accesses = 0;
         uint64_t bytes = 0;
         uint64_t stripes = 0;
-        uint64_t bursts = 0;
+        uint64_t chunks = 0;
         double edge_wait_ns = 0.0, edge_service_ns = 0.0;
         double router_wait_ns = 0.0, router_service_ns = 0.0;
         double link_wait_ns = 0.0, link_service_ns = 0.0;
@@ -100,11 +101,13 @@ public:
            std::size_t bytes = L1MESH_BYTES,
            L1TimingMode timing_mode = L1TimingMode::FastEstimate)
       : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {
-        if (const char* p = std::getenv("MDLA7_L1_AXI_PROBE")) {
-            if (*p) open_axi_probe(p);
+        if (const char* p = std::getenv("MDLA7_L1_PAYLOAD_PROBE")) {
+            if (*p) open_payload_probe(p);
+        } else if (const char* p = std::getenv("MDLA7_L1_AXI_PROBE")) {
+            if (*p) open_payload_probe(p);
         }
     }
-    ~L1Mesh() override { flush_axi_probe_row(); }
+    ~L1Mesh() override { flush_payload_probe_row(); }
 
     void read(uint32_t offset, void* dst, uint32_t n) {
         AccessTicket t = read_async(offset, dst, n);
@@ -136,16 +139,17 @@ public:
 
 private:
     static constexpr unsigned N_BANKS         = 16;
-    // 16-byte stripe = one AXI 128b beat. Sequential access fans out across
+    // 16-byte stripe = one Payload beat. Sequential access fans out across
     // all 16 banks → 256 B/cycle peak (matches spec §3.2).
-    static constexpr unsigned AXI_BEAT_BYTES  = 16;
-    static constexpr unsigned AXI_BURST_BEATS = 16;
-    static constexpr unsigned AXI_BURST_BYTES = AXI_BURST_BEATS * AXI_BEAT_BYTES;
-    static constexpr unsigned BANK_STRIDE     = AXI_BEAT_BYTES;
-    static constexpr unsigned BYTES_PER_CYCLE = 16;    // per-bank AXI 128b lane
-    static constexpr unsigned AXI_MAX_BURST_BEATS = 16;
-    static constexpr unsigned AXI_AGGREGATE_BURST_BYTES =
-        N_BANKS * BYTES_PER_CYCLE * AXI_MAX_BURST_BEATS;
+    static constexpr unsigned PAYLOAD_BEAT_BYTES = PAYLOAD_BYTES;
+    static constexpr unsigned PAYLOAD_FAST_WINDOW_BYTES =
+        PayloadPortCount::L1MESH_R * PAYLOAD_BEAT_BYTES;
+    static constexpr unsigned PAYLOAD_SCHED_CHUNK_BEATS = 16;
+    static constexpr unsigned PAYLOAD_SCHED_CHUNK_BYTES =
+        PayloadPortCount::L1MESH_R * PAYLOAD_BEAT_BYTES *
+        PAYLOAD_SCHED_CHUNK_BEATS;
+    static constexpr unsigned BANK_STRIDE     = PAYLOAD_BEAT_BYTES;
+    static constexpr unsigned BYTES_PER_CYCLE = PAYLOAD_BEAT_BYTES; // per-bank SRAM macro
     static constexpr double   CORE_CLOCK_GHZ  = 1.9;
     static constexpr double   SRAM_CLOCK_GHZ  = 1.3;
 
@@ -166,7 +170,7 @@ private:
     // Fast mode: aggregate-bandwidth estimate. It preserves the 16-bank
     // sequential peak but skips per-stripe finish-array conflict accounting.
     sc_core::sc_time schedule_fast_latency(uint32_t bytes) {
-        const uint32_t aggregate_bpc = AXI_BURST_BYTES;
+        const uint32_t aggregate_bpc = PAYLOAD_FAST_WINDOW_BYTES;
         const double beats = double((bytes + aggregate_bpc - 1) / aggregate_bpc);
         const sc_core::sc_time access(
             beats * (CORE_CLOCK_GHZ / SRAM_CLOCK_GHZ),
@@ -193,7 +197,7 @@ private:
                 sc_core::SC_NS);
             const sc_core::sc_time start =
                 (sram_bank_finish_[bank] > now) ? sram_bank_finish_[bank] : now;
-            probe_axi_input(start, is_read, bank, a);
+            probe_payload_input(start, is_read, bank, a);
             const sc_core::sc_time finish = start + access;
             sram_bank_finish_[bank] = finish;
             if (finish > max_finish) max_finish = finish;
@@ -249,7 +253,7 @@ private:
 
     static uint32_t swizzled_bank(uint32_t stripe) {
         // Rotate each 256B super-stripe across the 4x4 physical mesh. Linear
-        // 16B striping already uses all banks inside one 256B burst; the XOR
+        // 16B striping already uses all banks inside one Payload window; the XOR
         // term prevents repeated transformer slices with matching offsets from
         // hammering the same physical row/column every block.
         return (stripe ^ (stripe >> 4)) & (N_BANKS - 1);
@@ -317,9 +321,10 @@ private:
     // That was intentionally conservative, but it made small transformer-like
     // slices pay packet startup cost over and over.
     //
-    // Current model is a transparent burst NoC:
-    //   * long accesses are chopped into AXI bursts. Each 128b lane has
-    //     AxLEN<=15 (16 beats), so one 16-lane aggregate burst is 4096B;
+    // Current model is a transparent Payload NoC:
+    //   * long blocking API calls are internally chopped into fixed simulator
+    //     chunks so timing can reserve ingress/router/link/SRAM resources;
+    //     this is not protocol burst information and is not carried in Payload;
     //   * bank SRAM ports remain the throughput limiter;
     //   * edge/router/link/local resources are reserved for contention stats;
     //   * resource service time is pipelined and only prior contention delays
@@ -334,44 +339,44 @@ private:
                                            bool is_read) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
         const uint32_t end = offset + bytes;
-        sc_core::sc_time burst_now = now;
+        sc_core::sc_time chunk_now = now;
 
         stats_.accesses += 1;
         stats_.bytes += bytes;
         const bool optimistic = timing_mode_ == L1TimingMode::MeshOptimistic;
 
-        for (uint32_t burst_off = offset; burst_off < end; ) {
-            const uint32_t burst_end = std::min<uint32_t>(
-                end, burst_off + AXI_AGGREGATE_BURST_BYTES);
+        for (uint32_t chunk_off = offset; chunk_off < end; ) {
+            const uint32_t chunk_end = std::min<uint32_t>(
+                end, chunk_off + PAYLOAD_SCHED_CHUNK_BYTES);
             std::array<uint32_t, N_BANKS> bank_bytes{};
             std::array<uint32_t, N_BANKS> bank_addr{};
             std::array<bool, N_BANKS> bank_seen{};
-            uint64_t burst_stripes = 0;
-            for (uint32_t a = burst_off; a < burst_end; ) {
+            uint64_t chunk_stripes = 0;
+            for (uint32_t a = chunk_off; a < chunk_end; ) {
                 const uint32_t stripe = a / BANK_STRIDE;
                 const uint32_t bank = swizzled_bank(stripe);
                 const uint32_t next_stripe = ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
-                const uint32_t chunk = std::min(burst_end, next_stripe) - a;
-                bank_bytes[bank] += chunk;
+                const uint32_t beat_chunk = std::min(chunk_end, next_stripe) - a;
+                bank_bytes[bank] += beat_chunk;
                 if (!bank_seen[bank]) {
                     bank_seen[bank] = true;
                     bank_addr[bank] = a;
                 }
-                ++burst_stripes;
-                a += chunk;
+                ++chunk_stripes;
+                a += beat_chunk;
             }
 
-            stats_.stripes += burst_stripes;
-            stats_.bursts += 1;
+            stats_.stripes += chunk_stripes;
+            stats_.chunks += 1;
 
-            const uint32_t burst_bytes = burst_end - burst_off;
+            const uint32_t chunk_bytes = chunk_end - chunk_off;
             const uint32_t aggregate_beats =
-                ceil_div(burst_bytes, N_BANKS * BYTES_PER_CYCLE);
+                ceil_div(chunk_bytes, N_BANKS * BYTES_PER_CYCLE);
 
-            sc_core::sc_time ingress_ready = burst_now;
+            sc_core::sc_time ingress_ready = chunk_now;
             if (!optimistic) {
                 // Four row ingress lanes per side and direction. Pick the
-                // earliest perimeter lane for this chopped AXI burst.
+                // earliest perimeter lane for this scheduling chunk.
                 sc_core::sc_time best_start;
                 bool have_best = false;
                 unsigned best_plane = 0;
@@ -383,7 +388,7 @@ private:
                         for (unsigned row = 0; row < MESH_H; ++row) {
                             const sc_core::sc_time finish = mesh_edge_finish_[plane][rw][side][row];
                             const sc_core::sc_time start =
-                                (finish > burst_now) ? finish : burst_now;
+                                (finish > chunk_now) ? finish : chunk_now;
                             if (!have_best || start < best_start) {
                                 best_start = start;
                                 best_plane = plane;
@@ -395,15 +400,15 @@ private:
                     }
                 }
                 ingress_ready = reserve_resource(
-                    mesh_edge_finish_[best_plane][rw][best_side][best_row], burst_now,
+                    mesh_edge_finish_[best_plane][rw][best_side][best_row], chunk_now,
                     aggregate_beats, stats_.edge_wait_ns, stats_.edge_service_ns);
             }
 
-            sc_core::sc_time burst_finish = burst_now;
+            sc_core::sc_time chunk_finish = chunk_now;
             for (uint32_t bank = 0; bank < N_BANKS; ++bank) {
-                const uint32_t chunk = bank_bytes[bank];
-                if (!chunk) continue;
-                const uint32_t beats = ceil_div(chunk, BYTES_PER_CYCLE);
+                const uint32_t bank_chunk = bank_bytes[bank];
+                if (!bank_chunk) continue;
+                const uint32_t beats = ceil_div(bank_chunk, BYTES_PER_CYCLE);
                 const uint32_t dst_x = bank % MESH_W;
                 const uint32_t dst_y = bank / MESH_W;
                 sc_core::sc_time ready = ingress_ready;
@@ -413,20 +418,20 @@ private:
                     const uint32_t east_dist = (MESH_W - 1) - dst_x;
                     const uint32_t src_x = (west_dist <= east_dist) ? 0 : (MESH_W - 1);
                     const uint32_t src_y = dst_y;
-                    const unsigned plane = (bank + stats_.bursts) % MESH_PLANES;
+                    const unsigned plane = (bank + stats_.chunks) % MESH_PLANES;
                     reserve_route(src_x, src_y, dst_x, dst_y, beats,
-                                  burst_now, plane, ready);
+                                  chunk_now, plane, ready);
                 }
 
                 const double sram_service_before = stats_.sram_service_ns;
-                probe_axi_input(ready, is_read, bank, bank_addr[bank]);
-                sc_core::sc_time t = service_sram_beat(sram_bank_finish_[bank], ready, chunk);
+                probe_payload_input(ready, is_read, bank, bank_addr[bank]);
+                sc_core::sc_time t = service_sram_beat(sram_bank_finish_[bank], ready, bank_chunk);
                 const double lane_service = stats_.sram_service_ns - sram_service_before;
                 Stats::Lane& lane = is_read ? stats_.read_lane[bank]
                                             : stats_.write_lane[bank];
                 lane.accesses += 1;
-                lane.bytes += chunk;
-                const double latency = ns(t - burst_now);
+                lane.bytes += bank_chunk;
+                const double latency = ns(t - chunk_now);
                 const double lane_wait = std::max(0.0, latency - lane_service);
                 lane.latency_ns += latency;
                 lane.wait_ns += lane_wait;
@@ -434,13 +439,13 @@ private:
                 if (latency > lane.max_latency_ns) lane.max_latency_ns = latency;
                 if (lane_wait > lane.max_wait_ns) lane.max_wait_ns = lane_wait;
                 if (lane_service > lane.max_service_ns) lane.max_service_ns = lane_service;
-                if (t > burst_finish) burst_finish = t;
+                if (t > chunk_finish) chunk_finish = t;
             }
-            burst_now = burst_finish;
-            burst_off = burst_end;
+            chunk_now = chunk_finish;
+            chunk_off = chunk_end;
         }
-        stats_.imposed_wait_ns += ns(burst_now - now);
-        return burst_now;
+        stats_.imposed_wait_ns += ns(chunk_now - now);
+        return chunk_now;
     }
 
     static constexpr unsigned MESH_PLANES = 2;
@@ -484,50 +489,50 @@ private:
         return buf;
     }
 
-    void open_axi_probe(const char* path) {
-        axi_probe_.open(path);
-        if (!axi_probe_) {
-            std::cerr << "warning: cannot open MDLA7_L1_AXI_PROBE path: "
+    void open_payload_probe(const char* path) {
+        payload_probe_.open(path);
+        if (!payload_probe_) {
+            std::cerr << "warning: cannot open MDLA7_L1_PAYLOAD_PROBE path: "
                       << path << "\n";
             return;
         }
-        axi_probe_rows_.clear();
-        axi_probe_ << "cycle";
-        for (unsigned i = 0; i < AXI_INPUTS; ++i) {
-            axi_probe_ << ',' << ordinal(i) << " axi (engineid) addr";
+        payload_probe_rows_.clear();
+        payload_probe_ << "cycle";
+        for (unsigned i = 0; i < PAYLOAD_INPUTS; ++i) {
+            payload_probe_ << ',' << ordinal(i) << " payload (engineid) addr";
         }
-        axi_probe_ << '\n';
+        payload_probe_ << '\n';
     }
 
-    void flush_axi_probe_row() {
-        if (!axi_probe_) return;
-        for (const auto& [cycle, cells] : axi_probe_rows_) {
-            axi_probe_ << cycle;
+    void flush_payload_probe_row() {
+        if (!payload_probe_) return;
+        for (const auto& [cycle, cells] : payload_probe_rows_) {
+            payload_probe_ << cycle;
             for (const auto& cell : cells) {
-                axi_probe_ << ',' << cell;
+                payload_probe_ << ',' << cell;
             }
-            axi_probe_ << '\n';
+            payload_probe_ << '\n';
         }
-        axi_probe_.flush();
-        axi_probe_rows_.clear();
+        payload_probe_.flush();
+        payload_probe_rows_.clear();
     }
 
     static uint64_t cycle_of(sc_core::sc_time t) {
         return static_cast<uint64_t>(t.to_seconds() * 1.0e9 + 0.5);
     }
 
-    void probe_axi_input(sc_core::sc_time now, bool is_read,
-                         uint32_t bank, uint32_t addr) {
-        if (!axi_probe_) return;
+    void probe_payload_input(sc_core::sc_time now, bool is_read,
+                             uint32_t bank, uint32_t addr) {
+        if (!payload_probe_) return;
         const uint64_t cyc = cycle_of(now);
         const unsigned lane = (is_read ? 0u : N_BANKS) + (bank % N_BANKS);
         char buf[64];
         std::snprintf(buf, sizeof(buf), "(%s) 0x%08x",
                       engine_id_from_process(), addr);
-        auto& cells = axi_probe_rows_[cyc];
-        if (!axi_probe_rows_initialized_.count(cyc)) {
+        auto& cells = payload_probe_rows_[cyc];
+        if (!payload_probe_rows_initialized_.count(cyc)) {
             cells.fill(std::string{});
-            axi_probe_rows_initialized_.insert(cyc);
+            payload_probe_rows_initialized_.insert(cyc);
         }
         if (!cells[lane].empty())
             cells[lane] += "|";
@@ -542,10 +547,11 @@ private:
     sc_core::sc_time mesh_router_out_finish_[MESH_PLANES][N_BANKS][5];
     sc_core::sc_time mesh_hlink_finish_[MESH_PLANES][MESH_H][MESH_W - 1][2];
     sc_core::sc_time mesh_vlink_finish_[MESH_PLANES][MESH_H - 1][MESH_W][2];
-    static constexpr unsigned AXI_INPUTS = 32;
-    std::ofstream axi_probe_;
-    std::map<uint64_t, std::array<std::string, AXI_INPUTS>> axi_probe_rows_;
-    std::set<uint64_t> axi_probe_rows_initialized_;
+    static constexpr unsigned PAYLOAD_INPUTS =
+        PayloadPortCount::L1MESH_R + PayloadPortCount::L1MESH_W;
+    std::ofstream payload_probe_;
+    std::map<uint64_t, std::array<std::string, PAYLOAD_INPUTS>> payload_probe_rows_;
+    std::set<uint64_t> payload_probe_rows_initialized_;
 };
 
 class Dram : public sc_core::sc_module {
@@ -641,7 +647,7 @@ private:
 };
 
 // v0: simplified pass-through. HW L1_Manager arbitrates non-CONV Engine/UDMA
-// ingress; CONV ACT/WGT reads bypass it through direct L1Mesh AXI_R paths.
+// ingress; CONV ACT/WGT reads bypass it through direct L1Mesh Payload paths.
 class L1Manager : public sc_core::sc_module {
 public:
     using AccessTicket = L1Mesh::AccessTicket;

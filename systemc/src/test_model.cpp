@@ -4155,7 +4155,7 @@ int sc_main(int argc, char* argv[]) {
                << "\"accesses\": " << l1_stats.accesses
                << ", \"bytes\": " << l1_stats.bytes
                << ", \"stripes\": " << l1_stats.stripes
-               << ", \"bursts\": " << l1_stats.bursts
+               << ", \"chunks\": " << l1_stats.chunks
                << ", \"imposed_wait_cycles\": " << uint64_t(l1_stats.imposed_wait_ns + 0.5)
                << ", \"edge_wait_cycles\": " << uint64_t(l1_stats.edge_wait_ns + 0.5)
                << ", \"router_wait_cycles\": " << uint64_t(l1_stats.router_wait_ns + 0.5)

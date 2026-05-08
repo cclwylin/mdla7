@@ -35,7 +35,7 @@ l1mgr.write(addr, src, bytes);
 
 ## 12.2 L1Manager design
 
-硬體 spec 上，CONV ACT/WGT AXI_R 直接接 L1Mesh，不經過 L1Manager。
+硬體 spec 上，CONV ACT/WGT Payload R 直接接 L1Mesh，不經過 L1Manager。
 這條 direct path 讓 CONV read 取得最高服務優先權，目標是讓 CONV cluster
 不被 EWE / POOL / UDMA background traffic 餓住。
 

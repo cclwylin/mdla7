@@ -1,6 +1,6 @@
 # MDLA7 Handoff
 
-**Current date:** 2026-05-07
+**Current date:** 2026-05-08
 **Repo:** `/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 **Branch:** `main`
 **Last pushed commit:** `d743c5c Add L1 timing modes and conflict profiles`
@@ -10,17 +10,17 @@ history for old checkpoints.
 
 ## Next Priority
 
-The L1Mesh mesh / NoC overhead pass is implemented. `MeshConflict` now uses a
-transparent burst NoC model with per-bank SRAM service, 8 perimeter edge queues
-per read/write direction, bank swizzle, and AXI burst chopping. AXI burst max is
-16 beats on a 128b lane, so one lane burst is 256B and one 16-lane aggregate
-burst chunk is 4096B. Per-lane profile tables now report avg/max latency,
-wait, service, accesses, and KB for `AXI_R0..15` and `AXI_W0..15`.
+The L1Mesh mesh / NoC overhead pass is implemented. Internal Engine/L1 traffic
+now uses `Payload {engineid, tid, opcode, addr, data[16B], last}` rather than
+AXI. `MeshConflict` uses a transparent Payload NoC model with per-bank SRAM
+service, 8 perimeter edge queues per read/write direction, bank swizzle, and
+fixed simulator scheduling chunks. Payload carries no burst metadata; `tid` +
+`last` mark the logical transaction. Per-lane profile tables now report
+avg/max latency, wait, service, accesses, and KB for Payload R/W lanes 0..15.
 
-Latest Hotspot rerun after this change brought `mesh/fast` close to 1.0. A
-focused GPT2 check shows `max_service` per lane is now ~23 cycles for a
-16-beat burst; high `max_latency` values can still appear when many chopped
-bursts from a large FC transfer queue behind earlier bursts.
+Latest Hotspot rerun after this change brought `mesh/fast` close to 1.0. High
+`max_latency` values can still appear when many large FC transfer chunks queue
+behind earlier chunks.
 
 Hotspot compile coverage was also cleaned up. The previous 73 Hotspot
 `skipped` compile-log rows now lower to a `matrlz` fallback layer, so the
@@ -131,18 +131,17 @@ Mode relationship:
 
 ```text
 mesh = port-conflict SRAM bank timing + transparent NoC resource contention
-mesh-opt = mesh-style burst chopping + SRAM bank timing, skipping NoC resource reservations
+mesh-opt = mesh-style Payload chunking + SRAM bank timing, skipping NoC resource reservations
 ```
 
 So `mesh/conflict` isolates the extra NoC overhead, while `conflict/fast`
 isolates the SRAM bank/port conflict overhead. In the current model, `mesh`
-also chops long accesses into AXI bursts:
+also chops long blocking calls into simulator scheduling chunks:
 
 ```text
-AXI lane width = 128b = 16B
-max burst      = 16 beats
-per-lane burst = 256B
-16-lane chunk  = 4096B
+Payload lane width = 16B
+Payload protocol   = no burst metadata
+transaction group  = tid + last
 ```
 
 Aliases still exist:
@@ -206,11 +205,11 @@ spec/l1mesh.drawio
 L1Mesh-4x4-NoC
 L1Mesh-Arbitration
 L1Mesh-Bank-Tile
-L1Mesh-AXI-Edge-Map
+L1Mesh-Payload-Edge-Map
 ```
 
-`L1Mesh-AXI-Edge-Map` shows the 16 `AXI_R` and 16 `AXI_W` lanes mapped onto
-the 8 logical W/E perimeter edges. `spec/mdla7.drawio` keeps the top-level
+`L1Mesh-Payload-Edge-Map` shows the 16 Payload R and 16 Payload W lanes mapped
+onto the 8 logical W/E perimeter edges. `spec/mdla7.drawio` keeps the top-level
 MDLA7 diagrams. The user has manually modified the `L1Mesh-4x4-NoC` diagram;
 future diagram edits should read and modify the current file in place, not
 redraw from an old base.
@@ -248,7 +247,7 @@ matrlz fallback rows: 73
 
 All passed.
 
-Recently verified after L1Mesh AXI burst/lane-stat updates:
+Recently verified after L1Mesh Payload interface/lane-stat updates:
 
 ```bash
 python3 -m py_compile batch/run_model.py batch/run_mdla6_pattern.py batch/run_hotspot.py
@@ -256,9 +255,9 @@ make -C systemc -s
 ./batch/run_hotspot.py --filter gpt2 --limit 1 --rerun-all
 ```
 
-The GPT2 mesh profile now reports per-lane `max_service` around 23 cycles for
-16-beat AXI bursts. `max_latency` can remain much larger because it includes
-queue wait across many chopped bursts in large FC transfers.
+The mesh profile reports per-lane Payload R/W latency. `max_latency` can remain
+much larger than `max_service` because it includes queue wait across many chunks
+in large FC transfers.
 
 ## Git Notes
 

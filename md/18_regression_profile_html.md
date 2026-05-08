@@ -153,9 +153,9 @@ batch/profile_hotspot.html
 
 `profile_hotspot.html` 是 Hotspot micro-pattern index，不顯示 `cx` /
 `myms/cx`，預設用 `mesh/fast` 排序，適合看 L1Mesh / NoC timing overhead。
-目前 L1Mesh mesh model 已加入 transparent NoC contention、AXI 16-beat burst
-chopping，以及 `AXI_R0..15` / `AXI_W0..15` lane latency table。看單一
-model 的 `.mesh.html` 時，`max service` 代表單一 chopped burst 的服務時間；
+目前 L1Mesh mesh model 已加入 transparent NoC contention、Payload scheduling
+chunk，以及 Payload R/W lane latency table。看單一
+model 的 `.mesh.html` 時，`max service` 代表單一 scheduling chunk 的服務時間；
 `max latency` 則包含 queue wait。
 
 ---
@@ -215,7 +215,7 @@ batch/profile_hotspot.html
 
 Hotspot 沒有 MDLA6 `cx` baseline，所以報表不顯示 `cx` 欄位。
 
-最近 L1Mesh AXI burst/lane-stat update 後，Hotspot 的 `mesh/fast` 已接近
+最近 L1Mesh Payload/lane-stat update 後，Hotspot 的 `mesh/fast` 已接近
 `1.0`。若之後調整 edge mapping 或 NoC resource model，請用：
 
 ```bash

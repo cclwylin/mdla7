@@ -221,15 +221,15 @@
             </root>
         </mxGraphModel>
     </diagram>
-    <diagram name="L1Mesh-AXI-Edge-Map" id="mdla7-l1mesh-axi-edge-map">
+    <diagram name="L1Mesh-Payload-Edge-Map" id="mdla7-l1mesh-payload-edge-map">
         <mxGraphModel dx="747" dy="720" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
-                <mxCell id="aem_title" value="L1Mesh 4x4 AXI_R / AXI_W Edge Mapping" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
+                <mxCell id="aem_title" value="L1Mesh 4x4 Payload R / Payload W Edge Mapping" style="text;html=1;fontSize=24;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
                     <mxGeometry x="50" y="30" width="900" height="40" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_note" value="16 AXI_R lanes and 16 AXI_W lanes use the same logical bank-to-edge map. Read and write queues are independent resources. Each edge serves two adjacent banks on one mesh row." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
+                <mxCell id="aem_note" value="16 Payload R lanes and 16 Payload W lanes use the same logical bank-to-edge map. Read and write ingress queues are independent resources, while the SRAM backend is shared 1R/W. Each edge serves two adjacent banks on one mesh row." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
                     <mxGeometry x="50" y="85" width="1540" height="58" as="geometry"/>
                 </mxCell>
                 <mxCell id="aem_grid_title" value="4x4 bank mesh" style="text;html=1;fontSize=18;fontStyle=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
@@ -286,37 +286,37 @@
                 <mxCell id="aem_b15" value="B15" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=16;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="980" y="650" width="80" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_w0" value="W0 edge&lt;br/&gt;AXI_R0,R1&lt;br/&gt;AXI_W0,W1&lt;br/&gt;to B0,B1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_w0" value="W0 edge&lt;br/&gt;Payload R0,R1&lt;br/&gt;Payload W0,W1&lt;br/&gt;to B0,B1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="430" y="290" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_w1" value="W1 edge&lt;br/&gt;AXI_R4,R5&lt;br/&gt;AXI_W4,W5&lt;br/&gt;to B4,B5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_w1" value="W1 edge&lt;br/&gt;Payload R4,R5&lt;br/&gt;Payload W4,W5&lt;br/&gt;to B4,B5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="430" y="410" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_w2" value="W2 edge&lt;br/&gt;AXI_R8,R9&lt;br/&gt;AXI_W8,W9&lt;br/&gt;to B8,B9" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_w2" value="W2 edge&lt;br/&gt;Payload R8,R9&lt;br/&gt;Payload W8,W9&lt;br/&gt;to B8,B9" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="430" y="530" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_w3" value="W3 edge&lt;br/&gt;AXI_R12,R13&lt;br/&gt;AXI_W12,W13&lt;br/&gt;to B12,B13" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_w3" value="W3 edge&lt;br/&gt;Payload R12,R13&lt;br/&gt;Payload W12,W13&lt;br/&gt;to B12,B13" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="430" y="650" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_e0" value="E0 edge&lt;br/&gt;AXI_R2,R3&lt;br/&gt;AXI_W2,W3&lt;br/&gt;to B2,B3" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_e0" value="E0 edge&lt;br/&gt;Payload R2,R3&lt;br/&gt;Payload W2,W3&lt;br/&gt;to B2,B3" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1115" y="290" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_e1" value="E1 edge&lt;br/&gt;AXI_R6,R7&lt;br/&gt;AXI_W6,W7&lt;br/&gt;to B6,B7" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_e1" value="E1 edge&lt;br/&gt;Payload R6,R7&lt;br/&gt;Payload W6,W7&lt;br/&gt;to B6,B7" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1115" y="410" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_e2" value="E2 edge&lt;br/&gt;AXI_R10,R11&lt;br/&gt;AXI_W10,W11&lt;br/&gt;to B10,B11" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_e2" value="E2 edge&lt;br/&gt;Payload R10,R11&lt;br/&gt;Payload W10,W11&lt;br/&gt;to B10,B11" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1115" y="530" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_e3" value="E3 edge&lt;br/&gt;AXI_R14,R15&lt;br/&gt;AXI_W14,W15&lt;br/&gt;to B14,B15" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="aem_e3" value="E3 edge&lt;br/&gt;Payload R14,R15&lt;br/&gt;Payload W14,W15&lt;br/&gt;to B14,B15" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1115" y="650" width="125" height="70" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_r_table" value="AXI_R lanes&lt;br/&gt;R0,R1 -&gt; W0 -&gt; B0,B1&lt;br/&gt;R2,R3 -&gt; E0 -&gt; B2,B3&lt;br/&gt;R4,R5 -&gt; W1 -&gt; B4,B5&lt;br/&gt;R6,R7 -&gt; E1 -&gt; B6,B7&lt;br/&gt;R8,R9 -&gt; W2 -&gt; B8,B9&lt;br/&gt;R10,R11 -&gt; E2 -&gt; B10,B11&lt;br/&gt;R12,R13 -&gt; W3 -&gt; B12,B13&lt;br/&gt;R14,R15 -&gt; E3 -&gt; B14,B15" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#eef7ff;strokeColor=#6c8ebf;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
+                <mxCell id="aem_r_table" value="Payload R lanes&lt;br/&gt;R0,R1 -&gt; W0 -&gt; B0,B1&lt;br/&gt;R2,R3 -&gt; E0 -&gt; B2,B3&lt;br/&gt;R4,R5 -&gt; W1 -&gt; B4,B5&lt;br/&gt;R6,R7 -&gt; E1 -&gt; B6,B7&lt;br/&gt;R8,R9 -&gt; W2 -&gt; B8,B9&lt;br/&gt;R10,R11 -&gt; E2 -&gt; B10,B11&lt;br/&gt;R12,R13 -&gt; W3 -&gt; B12,B13&lt;br/&gt;R14,R15 -&gt; E3 -&gt; B14,B15" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#eef7ff;strokeColor=#6c8ebf;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
                     <mxGeometry x="50" y="240" width="330" height="275" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_w_table" value="AXI_W lanes&lt;br/&gt;W0,W1 -&gt; W0 edge -&gt; B0,B1&lt;br/&gt;W2,W3 -&gt; E0 edge -&gt; B2,B3&lt;br/&gt;W4,W5 -&gt; W1 edge -&gt; B4,B5&lt;br/&gt;W6,W7 -&gt; E1 edge -&gt; B6,B7&lt;br/&gt;W8,W9 -&gt; W2 edge -&gt; B8,B9&lt;br/&gt;W10,W11 -&gt; E2 edge -&gt; B10,B11&lt;br/&gt;W12,W13 -&gt; W3 edge -&gt; B12,B13&lt;br/&gt;W14,W15 -&gt; E3 edge -&gt; B14,B15" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
+                <mxCell id="aem_w_table" value="Payload W lanes&lt;br/&gt;W0,W1 -&gt; W0 edge -&gt; B0,B1&lt;br/&gt;W2,W3 -&gt; E0 edge -&gt; B2,B3&lt;br/&gt;W4,W5 -&gt; W1 edge -&gt; B4,B5&lt;br/&gt;W6,W7 -&gt; E1 edge -&gt; B6,B7&lt;br/&gt;W8,W9 -&gt; W2 edge -&gt; B8,B9&lt;br/&gt;W10,W11 -&gt; E2 edge -&gt; B10,B11&lt;br/&gt;W12,W13 -&gt; W3 edge -&gt; B12,B13&lt;br/&gt;W14,W15 -&gt; E3 edge -&gt; B14,B15" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;align=left;verticalAlign=middle;spacingLeft=12;" parent="1" vertex="1">
                     <mxGeometry x="1270" y="240" width="330" height="275" as="geometry"/>
                 </mxCell>
-                <mxCell id="aem_cap" value="Per edge: 2 x AXI_R + 2 x AXI_W lanes. Across 8 edges: 16 AXI_R + 16 AXI_W. Each lane is 128b / 16B; per-bank SRAM service remains 16B read beat + 16B write beat per SRAM cycle." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=14;align=left;verticalAlign=middle;spacingLeft=14;" parent="1" vertex="1">
+                <mxCell id="aem_cap" value="Per edge: 2 x Payload R + 2 x Payload W lanes. Across 8 edges: 16 Payload R + 16 Payload W. Each lane is 16B per beat; per-bank SRAM service remains one 16B read-or-write beat per SRAM cycle." style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;fontSize=14;align=left;verticalAlign=middle;spacingLeft=14;" parent="1" vertex="1">
                     <mxGeometry x="430" y="800" width="780" height="88" as="geometry"/>
                 </mxCell>
                 <mxCell id="aem_e_w0" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;" parent="1" source="aem_w0" target="aem_b0" edge="1">

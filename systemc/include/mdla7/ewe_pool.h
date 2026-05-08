@@ -7,11 +7,11 @@
 //   POOL: dtype-scaled pipelined engine:
 //         INT8=64 lanes, INT16=32 lanes, FP=32 lanes.
 //         cycle = ceil(out_elem/lanes) * max(K_h*K_w, 1)
-//         + AXI fill (length / 128b) + drain (16 cycle).
+//         + Payload fill (length / 16B) + drain (16 cycle).
 //   EWE: dtype-scaled element-wise engine:
 //        INT8=64 lanes, INT16=32 lanes, FP=32 lanes.
 //   EWE softmax: 3-pass exp+reduce_sum+div;
-//         cycle = ceil(elem/lanes) * 3 + AXI fill/drain.
+//         cycle = ceil(elem/lanes) * 3 + Payload fill/drain.
 
 #include <systemc>
 #include <iostream>

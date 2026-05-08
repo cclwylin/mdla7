@@ -53,25 +53,34 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 | 線條樣式 | 語意 | 寬度 |
 |---|---|---|
-| **藍色線** | **AXI bus** | 每條 **128 bits = 16 bytes**，含完整 AXI handshake |
+| **藍色線** | **Payload lane** | 每條 beat **128 bits = 16 bytes**，內部自訂 handshake |
 | **白色線** | **單拍 (1T) payload**，無 AXI 協議 | 視 payload 大小，假設一個 cycle 寫完 |
-| 線旁邊的數字 | **該方向 AXI bus 的條數**（並列度） | **暫定值，後續會評估修改** |
+| 線旁邊的數字 | **該方向 Payload lane 的條數**（並列度） | **暫定值，後續會評估修改** |
 
-→ 同一條 link 的「總頻寬 = 條數 × 128 bits/cycle」。下表的數字都是「條數」。
+→ 同一條 link 的「總頻寬 = 條數 × 16 bytes/cycle」。下表的數字都是「條數」。
 
-### 3.1 各 Engine memory interface（藍線 = AXI 128b × N）
+### 3.1 各 Engine memory interface（藍線 = Payload 16B × N）
 
-| Engine | AXI_R (ACT) | AXI_R (WGT) | AXI_R | AXI_W | Peak BW @ 1.9 GHz |
+Payload format:
+
+```cpp
+Payload { engineid, tid, opcode, addr, data[16B], last }
+opcode = READ_REQ / READ_RESP / WRITE_REQ / WRITE_ACK
+```
+
+`tid` + `last` 用來標記同一筆 logical internal transaction；Payload 本身不帶 burst information。
+
+| Engine | Payload R (ACT) | Payload R (WGT) | Payload R | Payload W | Peak BW @ 1.9 GHz |
 |---|---|---|---|---|---|
-| CONV → L1Mesh direct | **32** | **32** | — | — | R: 64 × 16B = **1024 B/cyc** = 1.024 TB/s；**無 AXI_W** |
-| Requant | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
+| CONV → L1Mesh direct | **32** | **32** | — | — | R: 64 × 16B = **1024 B/cyc** = 1.024 TB/s；**無 W** |
+| Requant | — | — | **8** | **8** | R: **128 B/cyc**；W: **128 B/cyc** |
 | EWE | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | POOL | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | **TNPS** | — | — | **8** | **8** | R: **128 B/cyc**；W: **128 B/cyc**（讀寫對稱：每個 element 一進一出） |
 
-- CONV ACT/WGT read **直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT + 32 組 WGT，全部都是 AXI_R）。
+- CONV ACT/WGT read **直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT + 32 組 WGT，全部都是 Payload R）。
 - CONV 的輸出（INT32 partial sum）**不直接寫回 L1**；推測有專用 chain 路徑串到 Requant Engine（路徑形式 `[TBD]`，見 §6.2）。
-- Requant / EWE / POOL / TNPS：保留 AXI_R + AXI_W，partial sum / output / 重排後 tensor 透過 L1_Manager 仲裁進出 L1Mesh。
+- Requant / EWE / POOL / TNPS：保留 Payload R + Payload W，partial sum / output / 重排後 tensor 透過 L1_Manager 仲裁進出 L1Mesh。
 - TNPS 純做 data movement（讀 → 重新 index → 寫），不參與 MAC；R/W 條數設成對稱（8+8）反映 1:1 流量；BW 設成 EWE/POOL 的一半，因為 transpose 多半發生在 attention 相關的 small-tensor reshape，不是 throughput-critical 路徑。
 
 L1_Manager 入口有 arbiter，但 CONV ACT/WGT read 不進 L1_Manager。
@@ -86,16 +95,14 @@ CONV direct read 與 L1_Manager traffic 最後都受 L1Mesh 後端 banked SRAM s
 
 ### 3.2 L1_Manager 邊界（藍線）
 
-| 對端 | 介面 | 條數 × 128b |
+| 對端 | 介面 | 條數 × 16B Payload |
 |---|---|---|
-| L1Mesh SRAM | `AXI_R` 雙向各一組 | 16 + 16 @ **1.3 GHz SRAM clock**（peak 等效 core-cycle BW 乘 1.3/1.9） |
-| UDMA | `AXI_R` + `AXI_W` | 16 + 16 |
+| L1Mesh SRAM | Payload R + Payload W | 16 + 16 @ **1.3 GHz SRAM clock**（peak 等效 core-cycle BW 乘 1.3/1.9） |
+| UDMA | Payload R + Payload W | 16 + 16 |
 
-AXI burst length is modeled as **16 beats**. With the 128-bit / 16-byte AXI
-beat used throughout this spec, one burst covers **256 B**. The simulator
-charges DRAM accesses by the 256B burst windows they touch, so unaligned or
-small DRAM transfers can consume a full burst even when the useful payload is
-smaller.
+Internal Engine/L1 traffic is per-beat Payload and carries no burst metadata.
+The DRAM timing model separately charges external DRAM accesses by 256B windows
+for first-order row/bandwidth behavior; that is not the Engine Payload protocol.
 
 ### 3.2b L1Mesh 3MB dual-4x4 NoC SRAM organization
 
@@ -126,8 +133,7 @@ SRAM macro 與容量：
 | Macros per bank | `16` |
 | Bank capacity | `192 KB` |
 | Stripe / beat | `16 B` |
-| AXI burst length | `16 beats` |
-| AXI burst bytes | `256 B` |
+| Payload transaction grouping | `tid + last` |
 | SRAM macro port | `1R/W` shared read-or-write |
 | Router input FIFO depth | `2 flits` provisional |
 
@@ -143,7 +149,7 @@ row_addr        = bank_line % 768      // 0..767
 
 Ingress paths：
 
-| Logical edge | Banks | AXI_R lanes | AXI_W lanes |
+| Logical edge | Banks | Payload R lanes | Payload W lanes |
 |---|---|---|---|
 | W0 | B0, B1 | R0, R1 | W0, W1 |
 | E0 | B2, B3 | R2, R3 | W2, W3 |
@@ -165,7 +171,7 @@ per plane   : 16R + 16W edge injection/ejection
 aggregate   : 32R + 32W across 2 mesh planes
 ```
 
-`spec/l1mesh.drawio` page `L1Mesh-AXI-Edge-Map` shows the same logical lane
+`spec/l1mesh.drawio` page `L1Mesh-Payload-Edge-Map` shows the same logical lane
 mapping.
 
 The two mesh planes reduce NoC injection/router/link hot spots and give each
@@ -179,10 +185,10 @@ timing records edge/router-output/link finish times; it does not yet model
 input FIFO occupancy or upstream backpressure, so this depth is documented as an
 architecture parameter before it becomes a timing-sensitive knob.
 
-Set `MDLA7_L1_AXI_PROBE=<csv path>` to dump the L1Mesh 32 AXI input lanes:
+Set `MDLA7_L1_PAYLOAD_PROBE=<csv path>` to dump the L1Mesh 32 Payload input lanes:
 
 ```text
-cycle,1st axi (engineid) addr,2nd axi (engineid) addr,...,32nd axi (engineid) addr
+cycle,1st payload (engineid) addr,2nd payload (engineid) addr,...,32nd payload (engineid) addr
 ```
 
 Columns 1..16 are read lanes, columns 17..32 are write lanes. Each cell records
@@ -215,8 +221,8 @@ Simulator timing modes:
 |---|---|---|
 | Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
 | Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read, write/write, and read/write to the same bank serialize through one shared bank finish array, so cycles can increase when traffic collides. |
-| Mesh conflict | `--l1-timing=mesh` | Transparent dual-4x4 NoC contention model plus per-bank shared 1R/W SRAM service. Long L1 accesses are chopped into AXI bursts: 128b lane × 16 beats = 256B per lane, or 4096B across 16 lanes. |
-| Mesh optimistic | `--l1-timing=mesh-opt` | Same AXI burst chopping and SRAM service, but skips NoC resource reservation. |
+| Mesh conflict | `--l1-timing=mesh` | Transparent dual-4x4 NoC contention model plus per-bank shared 1R/W SRAM service. Long blocking simulator calls are internally chopped into scheduling chunks; Payload carries only beat data plus `tid/last`. |
+| Mesh optimistic | `--l1-timing=mesh-opt` | Same Payload scheduling chunk and SRAM service model, but skips NoC resource reservation. |
 
 The fast mode is intended for regular model sweeps. The conflict and mesh modes
 are for architecture studies where L1 bank/port contention and NoC routing hot
@@ -238,7 +244,7 @@ spots matter more than simulation wall time.
 
 - `W` 標記 = 單拍 (1T) 寫入 payload，**不走 AXI**。
 - 假設：每下一個 micro-op／descriptor，Command Engine 在一個 cycle 內把整包 config 推給 target Engine（target 內部 latch）。
-- Payload 結構（descriptor 欄位）`[TBD]`。
+- Command config payload 結構（descriptor 欄位）`[TBD]`；不同於 §3.1 的 Engine↔L1 Payload。
 - 是否要 back-pressure / ack `[TBD]`（單純 1T fire-and-forget 的話，需在 Command Engine 端保證 target 已就緒）。
 
 ### 3.6 其他白線
@@ -313,12 +319,12 @@ CONV array 是 **bit-decomposable**：固定矽面積、可依 operand 精度重
 
 ### 3A.3 BW vs Compute 平衡（CONV）
 
-CONV 對 L1Mesh 的 direct R 介面（**ACT/WGT read 不經 L1_Manager，沒有 AXI_W**）：
+CONV 對 L1Mesh 的 direct R 介面（**ACT/WGT read 不經 L1_Manager，沒有 W path**）：
 
 | 來源 | 條數 | bytes/cycle @ 128b | bytes/sec @ 1.9 GHz |
 |---|---|---|---|
-| AXI_R (ACT) | 32 | 512 | **973 GB/s** |
-| AXI_R (WGT) | 32 | 512 | **973 GB/s** |
+| Payload R (ACT) | 32 | 512 | **973 GB/s** |
+| Payload R (WGT) | 32 | 512 | **973 GB/s** |
 | 合計 R | 64 | 1024 | **1.946 TB/s** |
 
 **單位 cycle 的 operand 需求（理論上限，未計 reuse）：**
@@ -335,7 +341,7 @@ CONV 對 L1Mesh 的 direct R 介面（**ACT/WGT read 不經 L1_Manager，沒有 
 - 16 cluster 合計 → 512 B ACT + 512 B WGT per cycle
 - ACT_R 可用 512 B/cyc、WGT_R 可用 512 B/cyc → **剛好飽和**（無 BW 餘裕；要 double buffer 需在 cluster 內部開 buffer）
 
-→ 32 + 32 條 AXI 設計剛好對應 16 cluster 的穩態餵料。
+→ 32 + 32 條 Payload R 設計剛好對應 16 cluster 的穩態餵料。
 → 若 dataflow 是 weight-stationary，WGT_R 只在 tile load 時忙碌，可拿來預取下一 tile 的權重。
 
 > 真正的 dataflow（OS / WS / IS / row-stationary）`[TBD]`。
@@ -384,7 +390,7 @@ L3 array        : 16 cluster
 
 ## 3A.5 CONV → Requant Chain（推薦組合，已決定）
 
-CONV 沒有 AXI_W，partial sum 不寫回 L1Mesh。改走 **per-cluster Requant lane chain**：
+CONV 沒有 Payload W，partial sum 不寫回 L1Mesh。改走 **per-cluster Requant lane chain**：
 
 ```
                         per-cluster INT32 chain
@@ -393,7 +399,7 @@ CONV cluster 1  ──INT32──▶ Requant lane 1  ──┤
 ...                                          ├── merge
 CONV cluster 15 ──INT32──▶ Requant lane 15 ──┘
                                               ▼
-                                        8 條 AXI_W ──▶ L1_Manager ──▶ L1Mesh
+                                        8 條 Payload W ──▶ L1_Manager ──▶ L1Mesh
 ```
 
 ### Chain 介面
@@ -417,18 +423,18 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 - **(scale, shift, zp) per output channel**：每條 lane 帶自己的 LUT，layer 開始時由 Command Engine config 灌入。
 - → **per-output-channel quantization 天然支援**（modern NN 標準需求）。
 
-### Merge → AXI_W
+### Merge → Payload W
 
-16 條 INT8 輸出在 Requant Engine 末端 merge，走 **8 條 AXI_W**（Requant ↔ L1_Manager）寫回 L1Mesh：
+16 條 INT8 輸出在 Requant Engine 末端 merge，走 **8 條 Payload W**（Requant ↔ L1_Manager）寫回 L1Mesh：
 
-- 16 lane × 1 byte/cycle = **16 byte/cycle 穩態** = 1 AXI 128b lane 即可
-- 8 條 AXI_W 大量 over-provision → 用於 burst 寫、多 layer fused 模式 `[TBD]`。
+- 16 lane × 1 byte/cycle = **16 byte/cycle 穩態** = 1 Payload lane 即可
+- 8 條 Payload W 大量 over-provision → 用於多 layer fused 模式 `[TBD]`。
 
 ### SystemC 介面
 
 - **CONV cluster ↔ Requant lane**：`sc_fifo<int32_t> chain[16]`，depth=2（cycle latch + 1 cushion）
 - **Requant lane 內 LUT**：`sc_signal<requant_param_t>`，由 CommandEngine 在 layer 啟動時 set
-- **merge → AXI_W**：Requant Engine 內部 collector → `simple_initiator_socket`
+- **merge → Payload W**：Requant Engine 內部 collector → L1_Manager Payload ingress
 - **Accumulator**：`sc_signal<sc_int<48>>` 或 `int64_t` 簡化版（v0 用 int64 即可，v1 改成嚴格 sc_int<48> 模 saturation）
 
 ---
@@ -581,8 +587,8 @@ replacement for the EWE/POOL arithmetic described above.
 
 | 參數 | 值 |
 |---|---|
-| AXI_R 條數 | **8** × 128 b = **128 B/cyc** |
-| AXI_W 條數 | **8** × 128 b = **128 B/cyc** |
+| Payload R 條數 | **8** × 16 B = **128 B/cyc** |
+| Payload W 條數 | **8** × 16 B = **128 B/cyc** |
 | Throughput | 一 cycle 搬 128 B（讀 → permute index 計算 → 寫，1:1 流量） |
 | 最不利 stride pattern | dst-side scatter 跨多個 L1 bank → 受 L1Mesh write port 仲裁限制（見 §3.2） |
 
@@ -939,7 +945,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 |---|---|---|
 | Host (RISC-V) | `sc_module Host` | v0：descriptor stream 產生器 stub（讀測試 input → 推 descriptor）；v1+：可換成 RISC-V ISS（如 Spike / etiss / RVV-capable model） |
 | Command Engine | `sc_module CommandEngine` | target（對 Host）+ initiator（對 Engine config socket） |
-| CONV | `sc_module ConvEngine` | direct L1Mesh AXI_R initiator + target（對 Command Engine config） |
+| CONV | `sc_module ConvEngine` | direct L1Mesh Payload R initiator + target（對 Command Engine config） |
 | Requant / EWE / POOL | `sc_module XxxEngine` | initiator（對 L1_Manager）+ target（對 Command Engine config） |
 | L1_Manager | `sc_module L1Manager` | multi-port target / arbiter |
 | L1Mesh SRAM | `sc_module L1Mesh` | target（plain memory） |
@@ -950,8 +956,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 
 - **Host → Command Engine（白線, 1T descriptor）**：v0 用 `sc_fifo<descriptor_t>`，host 把 descriptor `write()` 進去，CmdEngine 用 `read()` 取出。v1 改成 `simple_initiator_socket`（AXI-Lite stub）後可掛 RISC-V ISS。
 - **Command Engine → Engine config（白線, 1T payload）**：用 `sc_signal<descriptor_t>` 或自定 `sc_fifo<>`(depth=1)，1 cycle latch 即可，**不需要 TLM socket**。
-- **CONV ↔ L1Mesh direct（藍線, AXI 128b × N）**：ACT/WGT read 不經 L1_Manager。
-- **Non-CONV Engine ↔ L1_Manager（藍線, AXI 128b × N）**：`tlm_utils::simple_initiator_socket` / `simple_target_socket`，AXI-like payload；N 條並列在 v0 可先合併成「N×16B / cycle」單條 socket，等 contention 模型上線再展開。
+- **CONV ↔ L1Mesh direct（藍線, Payload 16B × N）**：ACT/WGT read 不經 L1_Manager。
+- **Non-CONV Engine ↔ L1_Manager（藍線, Payload 16B × N）**：內部 `Payload {engineid, tid, opcode, addr, data[16B], last}`；N 條並列在 v0 可先合併成「N×16B / cycle」單條模型，等 contention 模型上線再展開。
 - **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 16> chain;` 連 CONV partial sums，每 lane depth=2；timing 上 Requant 是 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
 - **L1_Manager 內部 arbiter**：Non-CONV Engine / UDMA → L1_Manager 入口 arbitration；CONV ACT/WGT read 是 direct L1Mesh path，不進此 arbiter。其他 engine / UDMA 依固定 priority 或 aging policy 排程 `[TBD]`。
 - **DRAM latency**：用 `wait()` 模 fixed latency，第一版不模 DDR controller。
@@ -980,14 +986,14 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 下列項目決定後，spec.md 會升級到 v1。
 
 ### 6.1 系統參數
-- [x] ~~介面寬度 `32 / 16 / 8` 是 byte width / channel / 其他？~~ → **是 AXI 128b bus 的條數（暫定值，後續會評估）**
+- [x] ~~介面寬度 `32 / 16 / 8` 是 byte width / channel / 其他？~~ → **是 Payload 16B lane 的條數（暫定值，後續會評估）**
 - [x] ~~系統時脈頻率？~~ → **1.9 GHz**（v8.25 起；原 1 GHz baseline 已升至 1.9 GHz 對齊 LPDDR5X-10667 BW）
 - [x] ~~CONV throughput target？~~ → **62.3 TOPS @ INT8**（由 16384 MAC × 2 × 1.9 GHz 推得）
 - [ ] 介面條數的最終值何時凍結？哪些是會調整的熱點？
 
 ### 6.2 CONV Engine
 - [x] ~~PE array 形狀~~ → **65,536 base 4×4 cell，組成 16 cluster**（見 §3A.4）
-- [x] ~~CONV ↔ L1_Manager 介面~~ → **CONV ACT/WGT AXI_R 直接接 L1Mesh，不經 L1_Manager；32 AXI_R (ACT) + 32 AXI_R (WGT)，無 AXI_W**
+- [x] ~~CONV ↔ L1_Manager 介面~~ → **CONV ACT/WGT Payload R 直接接 L1Mesh，不經 L1_Manager；32 Payload R (ACT) + 32 Payload R (WGT)，無 Payload W**
 - [x] ~~支援的 datatype~~ → **Hybrid INT + Hybrid FP**（見 §3A.2）
 - [x] ~~CONV → Requant 的 chain 路徑~~ → **16 條 INT32 per-cluster lane，1T 同步**（見 §3A.5）
 - [x] ~~"ring" 拓樸 / 4 ring 工作切分軸~~ → **改成 16 cluster + reduce tree，無 ring**；output channel 切分跨 cluster（每 cluster 對應 16 個 output channel group）
