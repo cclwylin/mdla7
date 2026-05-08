@@ -1030,6 +1030,24 @@ int sc_main(int argc, char* argv[]) {
                 producer_no_store[k] = true;
         }
 
+        // BERT embedding masks lower as GATHER -> same-shape EWE.  The
+        // consumer has compiler-materialized input bytes today, so the gather
+        // DRAM store is only an intermediate checkpoint.
+        for (uint32_t k = 0; k + 1 < N; ++k) {
+            const auto& L = metas[k];
+            const auto& S = metas[k + 1];
+            const auto& G = graph_metas[k];
+            const bool gather_to_same_shape_ewe =
+                L.op_kind == OK_GATHER &&
+                (S.op_kind == OK_ADD || S.op_kind == OK_MUL || S.op_kind == OK_SUB) &&
+                G.consumer_count > 0 &&
+                G.last_consumer_layer > int32_t(k) &&
+                L.dtype == S.dtype &&
+                L.out_h == S.in_h && L.out_w == S.in_w && L.out_c == S.in_c;
+            if (gather_to_same_shape_ewe)
+                producer_no_store[k] = true;
+        }
+
         // Hotspot transient compute producers.  If GraphMeta says a
         // CONV-class / unary EWE output has a later consumer, it is an
         // intermediate activation, not the slice output.  The consumer's
@@ -4687,6 +4705,12 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
                 layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                if (i + 1 < N &&
+                    L.out_h == metas[i + 1].in_h &&
+                    L.out_w == metas[i + 1].in_w &&
+                    L.out_c == metas[i + 1].in_c &&
+                    L.dtype == metas[i + 1].dtype)
+                    mark_flow_edge(i, i + 1);
                 break;
             }
             // Pure DRAM→DRAM passthrough; bytes already in their final layout.
