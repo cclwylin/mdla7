@@ -156,9 +156,9 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 
 ## 4.5 L1Mesh 的基本 spec
 
-L1Mesh 是 3 MB SRAM scratchpad，採 4x4 banked NoC。CONV ACT/WGT read
-直接接 L1Mesh，不經過 L1Manager；L1Manager 負責 non-CONV engine / UDMA
-traffic。
+L1Mesh 是 3 MB SRAM scratchpad，採 2 個 parallel 4x4 banked NoC plane。
+兩個 mesh plane 共用同一組 16-bank SRAM backend。CONV ACT/WGT read 直接接
+L1Mesh，不經過 L1Manager；L1Manager 負責 non-CONV engine / UDMA traffic。
 
 目前 model：
 
@@ -166,18 +166,20 @@ traffic。
 |---|---:|
 | 容量 | 3 MB |
 | bank 數 | 16 |
-| NoC topology | 4x4 mesh |
+| NoC topology | 2 x 4x4 mesh planes |
 | SRAM macro | 768 x 16B = 12 KB |
 | macro 總數 | 256 |
 | 每 bank macro | 16 |
 | 每 bank 容量 | 192 KB |
 | stripe | 16 bytes |
+| AXI burst length | 16 beats |
+| AXI burst bytes | 256 bytes |
 | per-bank bandwidth | 16 B/cycle |
 | sequential peak | 16 banks × 16 B/cycle = 256 B/cycle |
 | SRAM clock | 1.3 GHz |
 | core clock axis | 1.9 GHz |
 
-NoC edge ports：
+NoC edge ports per mesh plane：
 
 | Edge | Ports | Primary traffic |
 |---|---:|---|
@@ -186,9 +188,10 @@ NoC edge ports：
 | right | 4R + 4W | L1Manager_R |
 | bottom | 4R + 4W | L1Manager_W |
 
-四邊合計是 16R + 16W edge injection/ejection。這是在降低 NoC 邊界 hot spot，
-不是把 SRAM backend bandwidth 乘四；真正的 per-bank service 仍是每 bank
-每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
+單一 mesh plane 四邊合計是 16R + 16W edge injection/ejection；2 個 plane
+合計是 32R + 32W。這是在降低 NoC 邊界/router/link hot spot，不是把 SRAM
+backend bandwidth 乘二；真正的 per-bank service 仍是每 bank 每 SRAM cycle
+一個 16B read beat / 一個 16B write beat。
 
 ### 4.5.1 怎麼讀 `L1Mesh-4x4-NoC` 圖
 
@@ -201,10 +204,10 @@ NoC edge ports：
   mesh 邊界入口 ingress
         |
         v
-  4x4 router grid
+  2 x 4x4 router grid plane
         |
         v
-  目標 bank 的 SRAM macro port
+  shared 目標 bank 的 SRAM macro port
 ```
 
 圖上的每個名詞可以這樣拆：
@@ -238,7 +241,7 @@ ingress   = 高速公路交流道入口
 CONV 要讀 activation。
 這些 read request 不走 L1Manager。
 它們從 L1Mesh 左邊的入口進入 NoC。
-進去後再沿著 4x4 mesh 路由到目標 bank。
+進去後再沿著其中一個 4x4 mesh plane 路由到目標 bank。
 ```
 
 同理：
@@ -377,10 +380,13 @@ top edge    : 4R + 4W
 right edge  : 4R + 4W
 bottom edge : 4R + 4W
 left edge   : 4R + 4W
-aggregate   : 16R + 16W
+per plane   : 16R + 16W
+aggregate   : 32R + 32W across 2 planes
 ```
 
-這代表 NoC 邊界有很多入口/出口，讓 traffic 比較容易進出 mesh。
+這代表 NoC 邊界有很多入口/出口，讓 traffic 比較容易進出 mesh。dual-plane
+model 會把每個 16B flit 放到較不忙的 mesh plane，但最後仍然進同一個
+SRAM bank backend。
 
 但 SRAM backend 是另一回事。最後每個 bank 還是：
 
@@ -502,7 +508,7 @@ Simulator 提供三種 L1 timing mode：
 |---|---|---|
 | fast estimate | `--l1-timing=fast` | 預設。用 aggregate bandwidth 估算，不逐 bank 計算 port conflict，適合 regression sweep。 |
 | port conflict | `--l1-timing=conflict` | 逐 bank finish-array 模型，read/read 和 write/write 同 bank 會 serialize，適合架構分析。 |
-| mesh conflict | `--l1-timing=mesh` | 在 bank port conflict 之外，加入 4x4 mesh edge ingress、XY router/link arbitration，再進 SRAM macro port，適合找 NoC hotspot。 |
+| mesh conflict | `--l1-timing=mesh` | 在 bank port conflict 之外，加入 dual-4x4 mesh edge ingress、XY router/link arbitration，再進 shared SRAM macro port，適合找 NoC hotspot。 |
 
 明確地說，`mesh` 不是取代 `conflict`，而是：
 
@@ -652,6 +658,8 @@ sc_core::sc_time write_bank_finish_[N_BANKS];
 | row size | 8 KB |
 | banks | 16 |
 | bandwidth | 48 B/cycle |
+| AXI burst length | 16 beats |
+| AXI burst bytes | 256 B |
 | row miss penalty | 50 cycles |
 | refresh period | 7800 cycles |
 | refresh stall | 200 cycles |
@@ -666,6 +674,10 @@ round to 48 B/cycle
 ```
 
 所以 DRAM sequential access 的理想 bandwidth 是 48 B/cycle，比 L1Mesh sequential peak 256 B/cycle 小很多。
+
+DRAM timing 以 AXI burst window 收費：一個 beat 是 128b = 16B，burst
+length 是 16 beats，所以一個 burst 是 256B。未對齊或很小的 transfer
+會被 round 到它碰到的 256B burst window；跨兩個 window 就收兩個 burst。
 
 這也是為什麼 NPU performance 很重視：
 
@@ -779,10 +791,10 @@ start = max(last_finish_, now)
 |---|---|
 | 沒有多 request overlap | 對高併發 DRAM workload 較保守 |
 | row hit / row miss 有建模 | 對 access locality 有區分 |
-| fixed 48 B/cycle | 對 burst efficiency 做簡化 |
+| fixed 48 B/cycle + 256B burst window | 保留 burst length / alignment penalty 的一階效果 |
 | refresh 有建模 | 對長時間 bandwidth 有 overhead |
 
-對目前 SystemC simulator，這是合理的一階模型。未來若要更接近 DRAM controller，可加入 per-bank finish time、read/write turnaround、burst length、outstanding queue。
+對目前 SystemC simulator，這是合理的一階模型。未來若要更接近 DRAM controller，可加入 per-bank finish time、read/write turnaround、outstanding queue。
 
 ---
 

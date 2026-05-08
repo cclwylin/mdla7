@@ -41,7 +41,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 | Compute | **POOL Engine** | — | Max / Avg pooling `[TBD]` |
 | Compute | **TNPS Engine** | — | Tensor 軸重排 / transpose（permute、dim swap、NHWC↔NCHW、attention Q/K/V 重排）；data-movement only，不做 MAC `[TBD]` |
 | Mem ctrl | **L1_Manager** | non-CONV 中央仲裁 | Requant / EWE / POOL / TNPS + UDMA + L1Mesh SRAM 之間的 traffic arbiter；CONV ACT/WGT read bypass |
-| On-chip mem | **L1Mesh SRAM** | **3 MB @ 1.3 GHz** | 4x4 banked SRAM NoC 工作 buffer（activation / weight tile） |
+| On-chip mem | **L1Mesh SRAM** | **3 MB @ 1.3 GHz** | 2 x 4x4 banked SRAM NoC 工作 buffer（activation / weight tile）；dual mesh fabric shares one 16-bank SRAM backend |
 | DMA | **UDMA** | 5 op modes | DRAM ↔ on-chip 搬運；含 LINEAR / STRIDED_2D / INDEXED_GATHER / SCATTER_CONCAT / STRIDED_SLICE（見 §3A.9） |
 | Off-chip | **DRAM (LPDDR5X-10667)** | **4 GB** | host shared / model weight / activation tensor；JEDEC LPDDR5X，10.667 Gbps/pin，dual-channel x32 → 85.3 GB/s peak |
 
@@ -91,9 +91,17 @@ CONV direct read 與 L1_Manager traffic 最後都受 L1Mesh 後端 banked SRAM s
 | L1Mesh SRAM | `AXI_R` 雙向各一組 | 16 + 16 @ **1.3 GHz SRAM clock**（peak 等效 core-cycle BW 乘 1.3/1.9） |
 | UDMA | `AXI_R` + `AXI_W` | 16 + 16 |
 
-### 3.2b L1Mesh 3MB 4x4 NoC SRAM organization
+AXI burst length is modeled as **16 beats**. With the 128-bit / 16-byte AXI
+beat used throughout this spec, one burst covers **256 B**. The simulator
+charges DRAM accesses by the 256B burst windows they touch, so unaligned or
+small DRAM transfers can consume a full burst even when the useful payload is
+smaller.
 
-L1Mesh 採 4x4 banked SRAM NoC。每個 mesh tile 擁有一個 SRAM bank：
+### 3.2b L1Mesh 3MB dual-4x4 NoC SRAM organization
+
+L1Mesh 採 **2 個 parallel 4x4 mesh plane**，共用同一組 16-bank SRAM
+backend。每個 logical bank 在兩個 mesh plane 上都有 ingress/router/link
+路徑，但最後都 arbitration 到同一個 SRAM bank port：
 
 ```
       B0  - B1  - B2  - B3
@@ -114,9 +122,12 @@ SRAM macro 與容量：
 | Total capacity | `3 MB` |
 | Total macro count | `256` |
 | Bank count | `16` |
+| Mesh planes | `2 x 4x4` |
 | Macros per bank | `16` |
 | Bank capacity | `192 KB` |
 | Stripe / beat | `16 B` |
+| AXI burst length | `16 beats` |
+| AXI burst bytes | `256 B` |
 
 Address mapping：
 
@@ -137,19 +148,20 @@ Ingress paths：
 | Right edge 4R/4W | L1Manager_R ingress for non-CONV / UDMA reads | Yes |
 | Bottom edge 4R/4W | L1Manager_W ingress for non-CONV / UDMA writes | Yes |
 
-The 4x4 mesh exposes 4 R/W edge ports per side:
+Each 4x4 mesh plane exposes 4 R/W edge ports per side:
 
 ```
 top edge    : 4R + 4W  -> WGT_R ingress
 right edge  : 4R + 4W  -> L1Manager_R ingress
 bottom edge : 4R + 4W  -> L1Manager_W ingress
 left edge   : 4R + 4W  -> ACT_R ingress
-aggregate   : 16R + 16W edge injection/ejection
+per plane   : 16R + 16W edge injection/ejection
+aggregate   : 32R + 32W across 2 mesh planes
 ```
 
-These edge ports reduce NoC injection hot spots and give each traffic class a
-clean physical side of the mesh. They do **not** multiply SRAM bank service
-bandwidth by four.
+The two mesh planes reduce NoC injection/router/link hot spots and give each
+traffic class a clean physical side of each mesh. They do **not** duplicate the
+SRAM macro backend and do **not** multiply SRAM bank service bandwidth.
 
 Per-bank service target：
 
@@ -163,13 +175,14 @@ write slot:
   L1Manager_W
 ```
 
-CONV ACT/WGT frontend is intentionally wider than the 16-bank SRAM backend.
-The direct path bypasses L1_Manager arbitration, but it does not bypass bank
-conflicts or per-bank read service limits. With 16 banks and one 16B read beat
-per bank per SRAM cycle, raw L1Mesh read peak remains `256 B/SRAM-cycle`;
-write peak is also `256 B/SRAM-cycle` if read/write are independent.
-The 16R/16W edge ports are therefore NoC ingress/ejection capacity, while the
-per-bank SRAM ports remain the hard backend bandwidth limiter.
+CONV ACT/WGT frontend and the dual mesh fabric are intentionally wider than the
+16-bank SRAM backend. The direct path bypasses L1_Manager arbitration, but it
+does not bypass bank conflicts or per-bank read service limits. With 16 banks
+and one 16B read beat per bank per SRAM cycle, raw L1Mesh read peak remains
+`256 B/SRAM-cycle`; write peak is also `256 B/SRAM-cycle` if read/write are
+independent. The `32R + 32W` aggregate edge ports are therefore NoC
+ingress/ejection capacity, while the per-bank SRAM ports remain the hard backend
+bandwidth limiter.
 
 Simulator timing modes:
 
@@ -177,7 +190,7 @@ Simulator timing modes:
 |---|---|---|
 | Fast estimate | `--l1-timing=fast` | Aggregate bandwidth estimate, using 16 banks × 16B/cycle without per-bank finish-array conflict accounting. This is the default regression mode. |
 | Port conflict | `--l1-timing=conflict` | Per-bank SRAM port conflict model. Read/read and write/write to the same bank serialize through bank finish arrays, so cycles can increase when traffic collides. |
-| Mesh conflict | `--l1-timing=mesh` | Starts from the same per-bank SRAM port conflict model as `conflict`, then adds a 4x4 mesh approximation: every 16B beat enters from an edge port, uses deterministic XY routing through one-flit/cycle router/link resources, then arbitrates for the SRAM macro port. |
+| Mesh conflict | `--l1-timing=mesh` | Starts from the same per-bank SRAM port conflict model as `conflict`, then adds a dual-4x4 mesh approximation: every 16B beat enters from an edge port, chooses the less busy mesh plane, uses deterministic XY routing through one-flit/cycle router/link resources, then arbitrates for the shared SRAM macro port. |
 
 The fast mode is intended for regular model sweeps. The conflict and mesh modes
 are for architecture studies where L1 bank/port contention and NoC routing hot

@@ -76,18 +76,20 @@ non-CONV traffic 的 contention。
 
 ## 12.3 L1Mesh storage
 
-L1Mesh 是 3 MB 4x4 banked SRAM NoC：
+L1Mesh 是 3 MB dual-4x4 banked SRAM NoC。兩個 mesh plane 共用同一組
+16-bank SRAM backend：
 
 | Item | Value |
 |---|---:|
 | banks | 16 |
+| mesh planes | 2 x 4x4 |
 | macro | 768 x 16B = 12 KB |
 | macros per bank | 16 |
 | bank capacity | 192 KB |
 | total macros | 256 |
 | total capacity | 3 MB |
 
-NoC edge ports 採四邊分流：
+NoC edge ports 採四邊分流，每個 mesh plane 都有：
 
 | Edge | Ports | Primary traffic |
 |---|---:|---|
@@ -96,8 +98,9 @@ NoC edge ports 採四邊分流：
 | right | 4R + 4W | L1Manager_R |
 | bottom | 4R + 4W | L1Manager_W |
 
-這些 edge ports 是 NoC injection/ejection capacity；每個 bank 的 SRAM
-backend service 仍是每 SRAM cycle 一個 16B read beat / 一個 16B write beat。
+單一 plane 是 16R + 16W；兩個 plane 合計是 32R + 32W NoC
+injection/ejection capacity。每個 bank 的 SRAM backend service 仍是每
+SRAM cycle 一個 16B read beat / 一個 16B write beat。
 
 目前 SystemC functional storage 仍用：
 
