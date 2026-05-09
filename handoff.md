@@ -26,7 +26,7 @@ Branch：`main`
   - Binary EWE chain -> store/forward
   - Binary EWE chain -> D2SPACE
   - CONV/Requant -> binary EWE -> unary EWE(HARD_SWISH/GELU) -> store/forward
-  - CONV/Requant -> EWE -> POOL/TNPS consumer（POOL tail code path exists；tested corpus 尚未 hit）
+  - CONV/Requant -> EWE -> POOL/TNPS consumer（synthetic coverage 已 hit；tested corpus 尚未 hit）
   - POOL -> unary/binary EWE/TNPS consumer
   - TNPS/layout -> compute consumer handoff for safe GraphMeta boundaries
   - producer tile -> multiple consumers / concat fanout safe subset
@@ -57,6 +57,8 @@ git diff --check
 - `llama2_quant_L35_L74`: `43/43 PASS`
 - `mobilenet_v3_quant`: `123/123 PASS`
 - `gpt2_quant_L24_L63`: `42/42 PASS`
+- `path7_pool_tail_synth`: `3/3 PASS`，`CONV -> ADD -> MAX_POOL`
+  觸發 Path 7 pool_tail，三層皆 `tiles=12x1`
 
 ## GPT2 L2 結論
 
@@ -87,8 +89,10 @@ Path 7-10 已完成 conservative implementation。下一步若要再加強，可
    `CONV/DW/FC -> binary EWE -> POOL` layer-order candidate；
    `profiles_with_stream_pool_meta=11` 都是 standalone POOL streaming/tiling
    path（例如 `unet_*`、`inception_v3_*`），不是 Path 7 pool_tail。
-   需要補 synthetic/cut model 驗證 `CONV -> ADD/MUL/SUB -> MAX/AVG_POOL`，
-   且 tensor 要大到不能整層塞進 L1，才會真的觸發 row microblock path。
+   已補 `systemc/scripts/gen_path7_pool_tail_synth.py` 產生
+   `CONV -> ADD -> MAX_POOL` synthetic MDL7 program，tensor 大到不能整層塞進 L1；
+   驗證 `3/3 PASS`，profile `task_meta` 顯示 pool layer 2 有 mb stream flags。
+   Real corpus 仍需要等自然模型/切片覆蓋這個 topology。
 
 1. True TNPS tiled kernels
    目前 `TRANSPOSE/PACK/UNPACK/SPLIT` 對 GraphMeta-confirmed intermediate boundary 會做 no-store handoff；任意 layout permute 的真正 tile kernel仍是後續工作。
