@@ -206,7 +206,7 @@ switch (body.udma.mode):
     do_gather
     do_concat
     do_slice
-    do_depth_to_space
+    do_depth_to_space     // legacy/debug fallback; D2SPACE main path is TNPS or Requant final-store
 done_tag_out.write(0)
 ```
 
@@ -260,7 +260,7 @@ wait(16, SC_NS)
 
 ## 12.10 Data transform correctness
 
-UDMA 不只 copy，也做 layout transform：
+UDMA 不只 copy，也保留 legacy layout transform mode。主路徑上，tensor layout 類 op 已移到 TNPS；`CONV -> final D2SPACE` 會併入 Requant final-store。
 
 | Mode | 風險 |
 |---|---|
@@ -268,9 +268,17 @@ UDMA 不只 copy，也做 layout transform：
 | INDEXED_GATHER | index table dtype / location |
 | SCATTER_CONCAT | concat axis layout assumption |
 | STRIDED_SLICE | column offset 是 byte offset |
-| DEPTH_TO_SPACE | NHWC mapping 和 element size |
+| DEPTH_TO_SPACE | legacy fallback；主路徑請先看 Requant final-store / TNPS 分工 |
 
-layout op fail 時，先看 UDMA mode 欄位，再看 compiler reference 是否同一 mapping。
+layout op fail 時，先判斷它實際走哪個 engine：
+
+| Pattern | 先看哪裡 |
+|---|---|
+| `CONV -> final D2SPACE` | Requant descriptor 的 store mode / final DRAM address |
+| intermediate / standalone D2SPACE | TNPS `TM_DEPTH_TO_SPACE` descriptor |
+| legacy fallback | UDMA `UM_DEPTH_TO_SPACE` descriptor |
+
+確認 engine 後，再看 compiler reference 是否同一 mapping。
 
 ---
 

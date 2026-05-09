@@ -6,7 +6,7 @@
 
 - EWE engine 如何支援 binary、unary、softmax。
 - POOL engine 如何支援 max / avg / global。
-- DEPTH_TO_SPACE 為什麼目前在 UDMA 裡做。
+- DEPTH_TO_SPACE 何時由 Requant final-store、TNPS、或 legacy UDMA fallback 執行。
 - 這些 non-CONV op 如何和 L1 handoff / streaming scheduler 互動。
 - 常見模型 tail op 的 debug 方法。
 
@@ -24,7 +24,7 @@
 | spatial reduction | AVG_POOL、MAX_POOL、MEAN |
 | layout transform | RESHAPE、CONCAT、GATHER、DEPTH_TO_SPACE |
 
-MDLA7 simulator 把其中一部分放在 EWE / POOL，一部分用 UDMA data movement 實作。
+MDLA7 simulator 把其中一部分放在 EWE / POOL；layout transform 主路徑由 TNPS 處理，`CONV -> final DEPTH_TO_SPACE` 則可直接併入 Requant final-store。
 
 ---
 
@@ -169,7 +169,14 @@ Large pool 也可能 height tiled。注意：
 
 ## 13.8 DEPTH_TO_SPACE
 
-DEPTH_TO_SPACE 目前由 UDMA `UM_DEPTH_TO_SPACE` 執行。
+DEPTH_TO_SPACE 是 NHWC pixel-shuffle layout transform。現在的分工是：
+
+| Pattern | 執行位置 |
+|---|---|
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE` 且 D2SPACE 是 final output | Requant final-store D2SPACE swizzle |
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer` | TNPS tiled streaming path |
+| 非 CONV producer 或 standalone D2SPACE | TNPS `TM_DEPTH_TO_SPACE` |
+| legacy / debug fallback | UDMA `UM_DEPTH_TO_SPACE` |
 
 NHWC mapping：
 
@@ -183,6 +190,8 @@ output [ih*block + bh, iw*block + bw, oc]
 ```
 
 它看似 reshape，但在 memory layout 中需要 byte reorder。
+
+Final-output special case 不需要先把 Requant output 線性寫到 L1，再由 TNPS 重排；Requant drain CONV chain 時直接用上面的 mapping 寫 final DRAM address。Profile 仍保留 D2SPACE layer 的 final DRAM W 統計，但 D2SPACE/TNPS cycles 會是 0。
 
 ---
 
@@ -201,7 +210,7 @@ CONV -> DEPTH_TO_SPACE -> ADD
 - ADD 可能還需要另一個 branch input。
 - store barrier 要保護 tail output。
 
-所以 scheduler 對 channel-changing tail 會比 plain conv chain 更保守。
+所以 scheduler 對 channel-changing tail 會比 plain conv chain 更保守。只有當 D2SPACE 是 final output 時，才可改用 Requant final-store swizzle；若後面還有 ADD/consumer，仍要讓 TNPS 產生正確的 consumer tile layout。
 
 ---
 
@@ -252,6 +261,7 @@ graph node、timing movement、PASS/FAIL verification，但不表示 EWE/POOL/CO
 |---|---|
 | EWE 只是 ADD | EWE 包含 binary、unary、softmax |
 | DEPTH_TO_SPACE 是 no-op reshape | NHWC 下通常要搬 bytes |
+| D2SPACE 都從 TNPS 移走 | 只有 `CONV -> final D2SPACE` 併入 Requant final-store；intermediate / standalone 仍由 TNPS 做 |
 | MEAN 必須有專屬 engine | 目前可 route via avg-pool-like path |
 | CONCAT 一定只是 pointer alias | 多數情況需要 materialize 或 barrier |
 | softmax cycle 很小 | 大 tensor softmax 是三 pass，可能很重 |

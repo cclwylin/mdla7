@@ -231,6 +231,7 @@ Requant descriptor 的重要欄位：
 | `oh_start` | height tile global offset |
 | `corr_addr` | correction map address |
 | `corr_per_oc` | correction map layout |
+| `reserved/store_mode` | `RQ_STORE_LINEAR` 或 `RQ_STORE_D2SPACE` final-store swizzle |
 
 OH/OC tiling 同時存在時，Requant 需要知道 global offsets 才能讀正確 correction map slice。
 
@@ -311,6 +312,29 @@ Requant 最後寫 L1 output：
 | fp16 | `std::vector<uint16_t>` | `total * 2` |
 
 後續 UDMA store 的 length 必須等於這個 byte count。
+
+例外是 `CONV/FC/DWCONV -> final DEPTH_TO_SPACE`。這時 Requant descriptor 會使用 `RQ_STORE_D2SPACE`：
+
+```text
+CONV chain order: [oh, ow, ic]
+q       = ic / Cout
+oc      = ic % Cout
+bh      = q / block
+bw      = q % block
+out_h   = oh * block + bh
+out_w   = ow * block + bw
+DRAM idx = (out_h * (OW * block) + out_w) * Cout + oc
+```
+
+這條 path 的意思是 Requant drain CONV chain 後，直接把 quantized value scatter 到 final D2SPACE layout。它不先寫線性 L1 tile，也不啟動 TNPS，所以 profile 會看到：
+
+```text
+D2SPACE layer cycles = 0
+TNPS busy            = 0
+D2SPACE DRAM W       = final output bytes
+```
+
+只有 final-output D2SPACE 走這條。若 D2SPACE 後面還有 ADD / EWE / CONV consumer，仍由 TNPS tiled streaming path 產生 consumer 需要的 tile。
 
 ---
 

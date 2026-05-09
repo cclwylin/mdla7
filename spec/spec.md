@@ -568,7 +568,7 @@ replacement for the EWE/POOL arithmetic described above.
 - **Attention path**：`[B, S, H, D]` → `[B, H, S, D]`（split heads），以及 Q·Kᵀ 之前的 `[B, H, S, D]` → `[B, H, D, S]`。
 - **Layout 轉換**：NHWC ↔ NCHW（外部 framework 偶爾要求 NCHW 輸出）。
 - **Conv → FC 銜接**：`[B, H, W, C]` flatten 前的維度重排（多數情況 RESHAPE 即可，但若有 channel-last 排序需求則走 TNPS）。
-- **Pixel shuffle 類 op**：`DEPTH_TO_SPACE` / `SPACE_TO_DEPTH`。
+- **Pixel shuffle 類 op**：`DEPTH_TO_SPACE` / `SPACE_TO_DEPTH`。其中 `CONV/FC/DWCONV -> final DEPTH_TO_SPACE` 可走 Requant final-store swizzle，不佔 TNPS。
 - **Tensor movement op**：`SLICE` / `STRIDED_SLICE` / `CONCAT` / `PACK` / `UNPACK` / `TILE` 等由 TNPS lane 計 cycle；其中部分先以 materialized layout path 保 functional correctness。
 
 設計 rationale：把 transpose 從 UDMA 的 STRIDED_SLICE / SCATTER_CONCAT path 拆出來成獨立 engine，避免 UDMA 在 transformer block 內被 attention reshape 拖到 DRAM round-trip。TNPS 走 L1↔L1，純 on-chip。
@@ -577,13 +577,26 @@ replacement for the EWE/POOL arithmetic described above.
 
 | OP | TNPS 實作狀態 |
 |---|---|
-| `DEPTH_TO_SPACE` | 真 TNPS kernel |
+| `DEPTH_TO_SPACE` | 真 TNPS kernel；若是 `CONV/FC/DWCONV -> final D2SPACE`，由 Requant final-store address swizzle 直接寫 final DRAM layout，TNPS 只保留 fallback / intermediate path |
 | `SPACE_TO_DEPTH` | 真 TNPS kernel |
 | `TRANSPOSE` | metadata-driven TNPS kernel，支援最多 6D |
 | `SLICE` / `STRIDED_SLICE` | metadata-driven TNPS kernel，支援 begin/end/stride |
 | `RESHAPE` / `SQUEEZE` / `EXPAND_DIMS` | metadata-only 能 fuse 時不寫 DRAM；需要 materialize 時走 TNPS linear path |
 | `CONCATENATION` | 目前由 compiler 產生 packed tensor，runtime 走 TNPS materialized layout path；multi-source descriptor 尚未保存 |
 | `PAD` / `PACK` / `UNPACK` / `TILE` / `SPLIT` | 先走 TNPS materialized layout path |
+
+### D2SPACE 放在哪裡做
+
+`DEPTH_TO_SPACE` 的硬體分工如下：
+
+| Pattern | 執行位置 | 說明 |
+|---|---|---|
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE` 且 D2SPACE 是 final output | **Requant final-store swizzle** | Requant drain CONV chain 後直接用 D2SPACE address mapping 寫 final DRAM；profile 上 D2SPACE layer 保留 DRAM W 統計，但 TNPS cycles 為 0 |
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer` | **TNPS tiled streaming path** | CONV/Requant tile 先產生 L1 tile，TNPS 做 D2SPACE 後交給後續 consumer，可和 CONV overlap |
+| 非 CONV producer 的 `DEPTH_TO_SPACE` 或 standalone layout op | **TNPS Engine** | 走 TNPS `TM_DEPTH_TO_SPACE` 真 kernel |
+| legacy / debug fallback | **UDMA `UM_DEPTH_TO_SPACE`** | 保留 descriptor mode，但不是主路徑 |
+
+這個切法讓 TNPS 保留通用 layout engine；只有 final-output pixel-shuffle 被併入 Requant store path，避免最後一段 TNPS tail，也避免為 final D2SPACE 額外保留 L1 output buffer。
 
 ### 操作模型
 
@@ -793,8 +806,17 @@ scale_lut_addr (32) | scale_count (16) | reserved (16)
 ```
 in_addr (32) | out_addr (32) | n,h,w,c (16×4) |
 scale_lut_addr (32) | scale_count (16) | per_channel_flag (1) |
-shift_global (8) | zp_global (8) | reserved
+shift_global (8) | zp_global (8) |
+oc_start (16) | out_w_layer (16) | oh_start (16) |
+corr_addr (32) | corr_per_oc (8) | reserved / store_mode
 ```
+
+`reserved / store_mode` 目前用於 Requant final-store mode：
+
+| mode | 用途 |
+|---|---|
+| `RQ_STORE_LINEAR` | 一般 Requant output，依 NHWC linear layout 寫 `out_addr` |
+| `RQ_STORE_D2SPACE` | final-output D2SPACE swizzle；`reserved` 同時帶 `block` 與 `out_c`，Requant 將 CONV chain 的 `[OH, OW, Cin]` 直接 scatter 成 `[OH*block, OW*block, Cout]` |
 
 #### EWE body
 

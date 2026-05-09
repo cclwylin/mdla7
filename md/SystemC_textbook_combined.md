@@ -104,11 +104,12 @@ Host
 | Requant Engine | 把 int32 psum 轉成 int8 / int16 / fp output | [`requant_engine.h`](../systemc/include/mdla7/requant_engine.h) |
 | EWE Engine | element-wise ADD / MUL / SUB / activation / SOFTMAX | [`ewe_pool.h`](../systemc/include/mdla7/ewe_pool.h) |
 | POOL Engine | AVG / MAX pooling | [`ewe_pool.h`](../systemc/include/mdla7/ewe_pool.h) |
-| UDMA | DRAM 和 L1 之間搬資料，含 linear / strided / D2SPACE | [`udma.h`](../systemc/include/mdla7/udma.h) |
+| TNPS | tensor transpose / slice / concat / space-depth 類 layout movement | [`tnps.h`](../systemc/include/mdla7/tnps.h) |
+| UDMA | DRAM 和 L1 之間搬資料，含 linear / strided / activation codec；D2SPACE 只保留 legacy fallback | [`udma.h`](../systemc/include/mdla7/udma.h) |
 | L1Manager / L1Mesh | on-chip SRAM 與 arbitration / bank timing | [`memory.h`](../systemc/include/mdla7/memory.h) |
 | DRAM | LPDDR5X-style off-chip memory timing model | [`memory.h`](../systemc/include/mdla7/memory.h) |
 
-這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 16 條 chain，Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。這會在第 11 章詳細走讀。
+這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 16 條 chain，Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。若後面是 final `DEPTH_TO_SPACE`，Requant 也可以直接做 final-store address swizzle。這會在第 11 章詳細走讀。
 
 ---
 
@@ -922,10 +923,10 @@ Host
 | Requant Engine | 把 CONV partial sum 轉成 quantized output |
 | EWE Engine | element-wise op、activation、softmax 類工作 |
 | POOL Engine | max / average pooling |
-| TNPS Engine | tensor transpose / reshape 類 data movement，spec 有規劃，simulator 目前重點仍在其他 engines |
+| TNPS Engine | tensor transpose / slice / concat / space-depth 類 data movement；standalone/intermediate D2SPACE 主路徑 |
 | L1Manager | on-chip memory arbitration |
 | L1Mesh | 2 MB SRAM 工作區 |
-| UDMA | DRAM 和 L1 之間的 DMA |
+| UDMA | DRAM 和 L1 之間的 DMA；D2SPACE 只保留 legacy fallback |
 | DRAM | LPDDR5X-style off-chip memory model |
 
 這些 block 不是各自獨立跑完整 layer。它們靠 descriptor 和 dependency tag 串起來。例如一個 conv layer 可能被拆成：
@@ -5134,16 +5135,16 @@ cycles = ceil(out_elems/lanes) * 64
 
 ---
 
-## 5.31 TNPS 在目前 notebook 的位置
+## 5.31 TNPS / D2SPACE 在目前 notebook 的位置
 
-Spec 裡提到 TNPS engine，目標是處理 transpose / reshape 類 tensor processing。就目前 source 導讀而言，主要可執行 path 集中在：
+TNPS engine 現在是 layout transform 的主路徑之一，負責 transpose / slice / concat / space-depth 類 tensor movement。D2SPACE 要分三種情況看：
 
-- UDMA 的 `DEPTH_TO_SPACE`
-- UDMA 的 `STRIDED_SLICE`
-- UDMA 的 `SCATTER_CONCAT`
-- EWE / POOL 的 tensor op
+- `CONV/FC/DWCONV -> final DEPTH_TO_SPACE`：Requant final-store address swizzle，TNPS cycles 為 0。
+- `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer`：TNPS tiled streaming path。
+- standalone / non-CONV producer D2SPACE：TNPS `TM_DEPTH_TO_SPACE`。
+- UDMA `UM_DEPTH_TO_SPACE`：legacy / debug fallback。
 
-所以本章先把 TNPS 視為 architecture roadmap，不把它列為已完整實作的 compute engine。
+所以本章讀 compute engines 時要記得：D2SPACE 不一定在同一個 module 做；看 producer/consumer pattern 決定。
 
 讀 spec 時要分清楚：
 
@@ -8011,7 +8012,7 @@ Debug memory 問題時，把它拆成：
 
 - EWE engine 如何支援 binary、unary、softmax。
 - POOL engine 如何支援 max / avg / global。
-- DEPTH_TO_SPACE 為什麼目前在 UDMA 裡做。
+- DEPTH_TO_SPACE 何時由 Requant final-store、TNPS、或 legacy UDMA fallback 執行。
 - 這些 non-CONV op 如何和 L1 handoff / streaming scheduler 互動。
 - 常見模型 tail op 的 debug 方法。
 
@@ -8029,7 +8030,7 @@ Debug memory 問題時，把它拆成：
 | spatial reduction | AVG_POOL、MAX_POOL、MEAN |
 | layout transform | RESHAPE、CONCAT、GATHER、DEPTH_TO_SPACE |
 
-MDLA7 simulator 把其中一部分放在 EWE / POOL，一部分用 UDMA data movement 實作。
+MDLA7 simulator 把其中一部分放在 EWE / POOL；layout transform 主路徑由 TNPS 處理，`CONV -> final DEPTH_TO_SPACE` 則可直接併入 Requant final-store。
 
 ---
 
@@ -8174,7 +8175,14 @@ Large pool 也可能 height tiled。注意：
 
 ## 13.8 DEPTH_TO_SPACE
 
-DEPTH_TO_SPACE 目前由 UDMA `UM_DEPTH_TO_SPACE` 執行。
+DEPTH_TO_SPACE 是 NHWC pixel-shuffle layout transform。現在的分工是：
+
+| Pattern | 執行位置 |
+|---|---|
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE` 且 D2SPACE 是 final output | Requant final-store D2SPACE swizzle |
+| `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer` | TNPS tiled streaming path |
+| 非 CONV producer 或 standalone D2SPACE | TNPS `TM_DEPTH_TO_SPACE` |
+| legacy / debug fallback | UDMA `UM_DEPTH_TO_SPACE` |
 
 NHWC mapping：
 
@@ -10598,7 +10606,7 @@ if (suppressible && G.consumer_count > 0 && G.last_consumer_layer > int32_t(k)) 
 | CONV / DWCONV / FC | path 已有 `suppress_producer_store` |
 | ADD / MUL / SUB | EWE path 已有 barrier / streamed handling |
 | AVG_POOL / MAX_POOL | pool path 已支援 deferred store |
-| D2SPACE | UDMA d2s path 可 skip write 或留下 barrier |
+| D2SPACE | final `CONV -> D2SPACE` 可併入 Requant final-store；intermediate D2SPACE 走 TNPS streaming；UDMA 只作 fallback |
 
 比較需要小心的類別：
 

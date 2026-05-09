@@ -104,11 +104,12 @@ Host
 | Requant Engine | 把 int32 psum 轉成 int8 / int16 / fp output | [`requant_engine.h`](../systemc/include/mdla7/requant_engine.h) |
 | EWE Engine | element-wise ADD / MUL / SUB / activation / SOFTMAX | [`ewe_pool.h`](../systemc/include/mdla7/ewe_pool.h) |
 | POOL Engine | AVG / MAX pooling | [`ewe_pool.h`](../systemc/include/mdla7/ewe_pool.h) |
-| UDMA | DRAM 和 L1 之間搬資料，含 linear / strided / D2SPACE | [`udma.h`](../systemc/include/mdla7/udma.h) |
+| TNPS | tensor transpose / slice / concat / space-depth 類 layout movement | [`tnps.h`](../systemc/include/mdla7/tnps.h) |
+| UDMA | DRAM 和 L1 之間搬資料，含 linear / strided / activation codec；D2SPACE 只保留 legacy fallback | [`udma.h`](../systemc/include/mdla7/udma.h) |
 | L1Manager / L1Mesh | on-chip SRAM 與 arbitration / bank timing | [`memory.h`](../systemc/include/mdla7/memory.h) |
 | DRAM | LPDDR5X-style off-chip memory timing model | [`memory.h`](../systemc/include/mdla7/memory.h) |
 
-這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 16 條 chain，Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。這會在第 11 章詳細走讀。
+這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 16 條 chain，Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。若後面是 final `DEPTH_TO_SPACE`，Requant 也可以直接做 final-store address swizzle。這會在第 11 章詳細走讀。
 
 ---
 

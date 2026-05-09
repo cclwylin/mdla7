@@ -330,7 +330,7 @@ make -s
 - REQUANT：CONV / EWE 共用 512-lane quantize-pack resource，apply TFLite MBQM，write int8/int16/fp output
 - EWE：ADD / MUL / SUB / activation / softmax
 - POOL：AVG / MAX / global-ish pooling
-- D2SPACE：用 UDMA layout op 表達 pixel shuffle
+- D2SPACE：final `CONV -> D2SPACE` 可由 Requant final-store swizzle；intermediate / standalone path 由 TNPS；UDMA 只保留 fallback
 
 要特別教：
 
@@ -869,7 +869,7 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 | POOL | yes | yes | gap for INT16 | yes | Inception / DeepLab |
 | SOFTMAX | yes | yes | gap | FP path exists | Inception / transformer |
 | CONCAT | logical channel concat | yes | gap | yes-ish | Inception / YOLO |
-| D2SPACE | yes | yes | gap | maybe | VSR |
+| D2SPACE | yes | yes | TNPS / Requant final-store / UDMA fallback | yes | VSR / XLSR |
 
 這張表要從最新 code 和 regression 實測更新，不要只照 handoff。
 

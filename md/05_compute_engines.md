@@ -1059,16 +1059,16 @@ cycles = ceil(out_elems/lanes) * 64
 
 ---
 
-## 5.31 TNPS 在目前 notebook 的位置
+## 5.31 TNPS / D2SPACE 在目前 notebook 的位置
 
-Spec 裡提到 TNPS engine，目標是處理 transpose / reshape 類 tensor processing。就目前 source 導讀而言，主要可執行 path 集中在：
+TNPS engine 現在是 layout transform 的主路徑之一，負責 transpose / slice / concat / space-depth 類 tensor movement。D2SPACE 要分三種情況看：
 
-- UDMA 的 `DEPTH_TO_SPACE`
-- UDMA 的 `STRIDED_SLICE`
-- UDMA 的 `SCATTER_CONCAT`
-- EWE / POOL 的 tensor op
+- `CONV/FC/DWCONV -> final DEPTH_TO_SPACE`：Requant final-store address swizzle，TNPS cycles 為 0。
+- `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer`：TNPS tiled streaming path。
+- standalone / non-CONV producer D2SPACE：TNPS `TM_DEPTH_TO_SPACE`。
+- UDMA `UM_DEPTH_TO_SPACE`：legacy / debug fallback。
 
-所以本章先把 TNPS 視為 architecture roadmap，不把它列為已完整實作的 compute engine。
+所以本章讀 compute engines 時要記得：D2SPACE 不一定在同一個 module 做；看 producer/consumer pattern 決定。
 
 讀 spec 時要分清楚：
 

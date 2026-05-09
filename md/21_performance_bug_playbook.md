@@ -275,7 +275,7 @@ if (suppressible && G.consumer_count > 0 && G.last_consumer_layer > int32_t(k)) 
 | CONV / DWCONV / FC | path 已有 `suppress_producer_store` |
 | ADD / MUL / SUB | EWE path 已有 barrier / streamed handling |
 | AVG_POOL / MAX_POOL | pool path 已支援 deferred store |
-| D2SPACE | UDMA d2s path 可 skip write 或留下 barrier |
+| D2SPACE | final `CONV -> D2SPACE` 可併入 Requant final-store；intermediate D2SPACE 走 TNPS streaming；UDMA 只作 fallback |
 
 比較需要小心的類別：
 
@@ -323,7 +323,7 @@ imdn_quant:
   sim time     : 6.656 ms -> 5.088 ms
 ```
 
-剩下的 3 MB 是最後 `D2SPACE` output，這是 final output，不應該省。
+剩下的 3 MB 是最後 `D2SPACE` output，這是 final output，不應該省。若 pattern 是 `CONV -> final D2SPACE`，可優化的是把 D2SPACE address swizzle 併入 Requant final-store，省掉 TNPS tail；final DRAM W bytes 仍然存在。
 
 ---
 

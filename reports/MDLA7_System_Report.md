@@ -21,10 +21,10 @@ Generated PPT: `reports/MDLA7_System_Report.pptx`
 
 ## Slide 5: Module Functions and Throughput
 - CONV: Conv / FC / DWConv MAC; INT8x8: 16,384 MAC/cyc; 62.3 TOPS @1.9GHz
-- Requant: INT32/FP post-processing, clamp, scale/shift; 16 CONV-chain lanes; Payload W 128 B/cyc
+- Requant: INT32/FP post-processing, clamp, scale/shift; 16 CONV-chain lanes; Payload W 128 B/cyc; optional final D2SPACE store swizzle
 - EWE: Add/Mul/Sub/activation/math/softmax pieces; 64 elem/cyc; R 256 B/cyc, W 128 B/cyc
 - POOL: Max/Avg/Global pooling; R 256 B/cyc, W 128 B/cyc
-- TNPS: Transpose/Slice/Space-depth/Layout materialize; 128 B/cyc read + 128 B/cyc write
+- TNPS: Transpose/Slice/Space-depth/Layout materialize; 128 B/cyc read + 128 B/cyc write; handles intermediate/standalone D2SPACE
 - UDMA: DRAM↔L1 copy, prefetch, store, ACT codec; LPDDR model peak ≈85.3 GB/s external
 - L1Mesh: 3 MB banked scratchpad / routing fabric; 16 banks x 16B per SRAM cycle backend
 
@@ -37,7 +37,8 @@ Generated PPT: `reports/MDLA7_System_Report.pptx`
 - 3. Tiling and microblocks: Conv/FC/EWE/POOL handoff through L1; reduce intermediate DRAM R/W.
 - 4. Overlap scheduling: Allow different engines to run concurrently when dependencies permit.
 - 5. Layout offload: Moved transpose/slice/concat/space-depth style ops to TNPS lane.
-- 6. PAD→CONV fold: Eliminated PAD materialization before 3x3 CONV; sd_decoder slice improved 18.1%.
+- 6. Final D2SPACE store: CONV/Requant can write final pixel-shuffle layout directly, removing TNPS tail.
+- 7. PAD→CONV fold: Eliminated PAD materialization before 3x3 CONV; sd_decoder slice improved 18.1%.
 
 ## Slide 8: Case Study: sd_decoder_quant_L152_L191
 - Before 0.456 ms; after 0.373 ms; L16 PAD now 0 cycles / 0 DRAM.

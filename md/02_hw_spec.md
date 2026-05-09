@@ -63,10 +63,10 @@ Host
 | Requant Engine | 把 CONV partial sum 轉成 quantized output |
 | EWE Engine | element-wise op、activation、softmax 類工作 |
 | POOL Engine | max / average pooling |
-| TNPS Engine | tensor transpose / reshape 類 data movement，spec 有規劃，simulator 目前重點仍在其他 engines |
+| TNPS Engine | tensor transpose / slice / concat / space-depth 類 data movement；standalone/intermediate D2SPACE 主路徑 |
 | L1Manager | on-chip memory arbitration |
 | L1Mesh | 2 MB SRAM 工作區 |
-| UDMA | DRAM 和 L1 之間的 DMA |
+| UDMA | DRAM 和 L1 之間的 DMA；D2SPACE 只保留 legacy fallback |
 | DRAM | LPDDR5X-style off-chip memory model |
 
 這些 block 不是各自獨立跑完整 layer。它們靠 descriptor 和 dependency tag 串起來。例如一個 conv layer 可能被拆成：
