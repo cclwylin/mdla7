@@ -833,6 +833,8 @@ int sc_main(int argc, char* argv[]) {
     // suppressed as producer->consumer intermediate boundaries.
     std::vector<size_t> ewe_count_at_layer_end(N, 0);
     size_t ewe_count_so_far = 0;
+    std::vector<size_t> pool_count_at_layer_end(N, 0);
+    size_t pool_count_so_far = 0;
     std::vector<size_t> tnps_count_at_layer_end(N, 0);
     size_t tnps_count_so_far = 0;
 
@@ -2097,6 +2099,12 @@ int sc_main(int argc, char* argv[]) {
             auto is_binary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_ADD || L.op_kind == OK_MUL || L.op_kind == OK_SUB;
             };
+            auto is_unary_ewe = [](const LayerMeta& L) {
+                return L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU;
+            };
+            auto is_pool = [](const LayerMeta& L) {
+                return L.op_kind == OK_AVG_POOL || L.op_kind == OK_MAX_POOL;
+            };
             const auto& B0 = metas[i + 1];
             if (!conv_class || !is_binary_ewe(B0)) return false;
             if (!producer_no_store[i]) return false;
@@ -2160,6 +2168,59 @@ int sc_main(int argc, char* argv[]) {
                 }
                 return true;
             }();
+            const uint32_t unary_tail_idx =
+                (!d2s_tail && ewe_end + 1 < N && is_unary_ewe(metas[ewe_end + 1]))
+                    ? (ewe_end + 1) : N;
+            const bool unary_tail = [&]() -> bool {
+                if (unary_tail_idx >= N) return false;
+                const auto& P = metas[ewe_end];
+                const auto& U = metas[unary_tail_idx];
+                if (U.dtype != P.dtype) return false;
+                if (U.in_h != P.out_h || U.in_w != P.out_w || U.in_c != P.out_c)
+                    return false;
+                if (U.in_h != U.out_h || U.in_w != U.out_w || U.in_c != U.out_c)
+                    return false;
+                if (U.wgt_size == 0) return false;
+                if (graph_metas) {
+                    const auto& GP = graph_metas[ewe_end];
+                    const auto& GU = graph_metas[unary_tail_idx];
+                    if (GP.consumer_count != 1 ||
+                        GP.first_consumer_layer != int32_t(unary_tail_idx) ||
+                        GP.last_consumer_layer  != int32_t(unary_tail_idx))
+                        return false;
+                    if (GU.producer0_layer != int32_t(ewe_end))
+                        return false;
+                }
+                return true;
+            }();
+            const uint32_t pool_tail_idx =
+                (!d2s_tail && !unary_tail && ewe_end + 1 < N && is_pool(metas[ewe_end + 1]))
+                    ? (ewe_end + 1) : N;
+            const bool pool_tail = [&]() -> bool {
+                if (pool_tail_idx >= N) return false;
+                const auto& P = metas[ewe_end];
+                const auto& Q = metas[pool_tail_idx];
+                if (Q.dtype != P.dtype) return false;
+                if (Q.in_h != P.out_h || Q.in_w != P.out_w || Q.in_c != P.out_c)
+                    return false;
+                if (Q.out_h != Q.in_h || Q.out_w != Q.in_w || Q.out_c != Q.in_c)
+                    return false;
+                if (Q.k_h != 1 || Q.k_w != 1 || Q.s_h != 1 || Q.s_w != 1)
+                    return false;
+                if (Q.p_t || Q.p_b || Q.p_l || Q.p_r)
+                    return false;
+                if (graph_metas) {
+                    const auto& GP = graph_metas[ewe_end];
+                    const auto& GQ = graph_metas[pool_tail_idx];
+                    if (GP.consumer_count != 1 ||
+                        GP.first_consumer_layer != int32_t(pool_tail_idx) ||
+                        GP.last_consumer_layer  != int32_t(pool_tail_idx))
+                        return false;
+                    if (GQ.producer0_layer != int32_t(ewe_end))
+                        return false;
+                }
+                return true;
+            }();
 
             const unsigned elem =
                 (A.dtype == DT_INT16x16 || A.dtype == DT_INT16x8) ? 2u : 1u;
@@ -2170,9 +2231,12 @@ int sc_main(int argc, char* argv[]) {
                 (uint64_t(A.wgt_size) > pure_wgt + scale_lut_size)
                 ? (uint64_t(A.wgt_size) - pure_wgt - scale_lut_size) : 0;
             const uint64_t params_blob = scale_lut_size + corr_size;
+            const uint64_t unary_params_size =
+                unary_tail ? uint64_t(metas[unary_tail_idx].wgt_size) : 0;
             const uint64_t safety = 65536;
             const uint32_t STREAM_SLOTS = 2;
-            if (pure_wgt + params_blob + 48 + safety >= L1_BUDGET) return false;
+            if (pure_wgt + params_blob + 48 + unary_params_size + safety >= L1_BUDGET)
+                return false;
             const uint64_t full_out_bytes =
                 uint64_t(A.out_h) * A.out_w * A.out_c * elem;
             if (2ull * full_out_bytes + pure_wgt + params_blob + safety <= L1_BUDGET)
@@ -2192,7 +2256,8 @@ int sc_main(int argc, char* argv[]) {
                 const uint64_t fixed =
                     align64(uint32_t(params_blob)) +
                     align64(uint32_t(pure_wgt)) +
-                    uint64_t(ewe_depth) * align64(48u);
+                    uint64_t(ewe_depth) * align64(48u) +
+                    align64(uint32_t(unary_params_size));
                 const uint64_t slot =
                     align64(uint32_t(conv_in)) +
                     (2ull + uint64_t(ewe_depth)) * align64(uint32_t(out));
@@ -2217,8 +2282,10 @@ int sc_main(int argc, char* argv[]) {
             const uint32_t L1_WGT_STREAM = align64(uint32_t(params_blob));
             const uint32_t L1_EWE_PARAMS_BASE =
                 align64(uint32_t(L1_WGT_STREAM + pure_wgt));
-            const uint32_t SLOT_BASE =
+            const uint32_t L1_UNARY_PARAMS =
                 align64(uint32_t(L1_EWE_PARAMS_BASE + 48u * ewe_depth));
+            const uint32_t SLOT_BASE =
+                align64(uint32_t(L1_UNARY_PARAMS + unary_params_size));
             const uint32_t SLOT_BYTES = align64(uint32_t(slot_bytes_raw));
             const auto max_shape = tile_shape_bytes(tile_oh);
             const uint32_t max_conv_in = uint32_t(max_shape.first);
@@ -2242,9 +2309,10 @@ int sc_main(int argc, char* argv[]) {
                 uint8_t params_tag = 0;
             };
             std::vector<EweStage> ewe_stages(ewe_depth);
-            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_ewe(N, 0), last_tnps(N, 0);
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_ewe(N, 0), last_pool(N, 0), last_tnps(N, 0);
             const uint8_t params_tag = alloc_tag();
             const uint8_t wgt_tag = alloc_tag();
+            uint8_t unary_params_tag = 0;
 
             program.push_back(make_udma(A.dram_wgt + uint32_t(pure_wgt),
                                         L1_PARAMS_STREAM, uint32_t(params_blob),
@@ -2276,10 +2344,22 @@ int sc_main(int argc, char* argv[]) {
                 ++udma_count_so_far;
                 last_udma[k] = udma_count_so_far;
             }
+            if (unary_tail) {
+                const auto& U = metas[unary_tail_idx];
+                unary_params_tag = alloc_tag();
+                program.push_back(make_udma(U.dram_wgt, L1_UNARY_PARAMS, U.wgt_size,
+                                            /*dir*/ 0, unary_params_tag));
+                acc[unary_tail_idx].dram_r += U.wgt_size;
+                acc[unary_tail_idx].sram_w += U.wgt_size;
+                ++udma_count_so_far;
+                last_udma[unary_tail_idx] = udma_count_so_far;
+            }
 
             uint8_t slot_done[STREAM_SLOTS] = {0};
             uint8_t conv_done = 0;
             uint8_t ewe_done = 0;
+            uint8_t unary_done = 0;
+            uint8_t pool_done = 0;
             uint8_t d2s_done = 0;
             uint16_t tile_id = 0;
             for (uint32_t oh_done = 0; oh_done < A.out_h; oh_done += tile_oh, ++tile_id) {
@@ -2415,6 +2495,59 @@ int sc_main(int argc, char* argv[]) {
                     ewe_in_addr = ewe_out_addr;
                 }
 
+                uint32_t final_addr = ewe_in_addr;
+                uint32_t final_layer = ewe_end;
+                uint8_t final_done = tile_done;
+                if (unary_tail) {
+                    const auto& U = metas[unary_tail_idx];
+                    LayerMeta tile_U = U;
+                    tile_U.in_h = uint16_t(this_oh);
+                    tile_U.out_h = uint16_t(this_oh);
+                    const uint32_t unary_out_addr = (ewe_depth & 1u) ? L1_DATA0 : L1_DATA1;
+                    const uint8_t unary_tag = alloc_tag();
+                    Descriptor ud = make_ewe_unary(tile_U, ewe_in_addr, unary_out_addr,
+                                                   L1_UNARY_PARAMS, tile_done,
+                                                   unary_tag, unary_params_tag);
+                    emit_stream(ud, mb, unary_tail_idx,
+                                SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0),
+                                true);
+                    acc[unary_tail_idx].sram_r += tile_out_bytes;
+                    acc[unary_tail_idx].sram_w += tile_out_bytes;
+                    ++ewe_count_so_far;
+                    last_ewe[unary_tail_idx] = ewe_count_so_far;
+                    unary_done = unary_tag;
+                    final_addr = unary_out_addr;
+                    final_layer = unary_tail_idx;
+                    final_done = unary_tag;
+                    udma_w_skipped[ewe_end] = true;
+                    udma_w_streamed[ewe_end] = true;
+                    mark_flow_edge(ewe_end, unary_tail_idx);
+                }
+                if (pool_tail) {
+                    const auto& Q = metas[pool_tail_idx];
+                    LayerMeta tile_Q = Q;
+                    tile_Q.in_h = uint16_t(this_oh);
+                    tile_Q.out_h = uint16_t(this_oh);
+                    const uint32_t pool_out_addr = (ewe_depth & 1u) ? L1_DATA0 : L1_DATA1;
+                    const uint8_t pool_tag = alloc_tag();
+                    Descriptor pd = make_pool(tile_Q, final_addr, pool_out_addr,
+                                              final_done, pool_tag);
+                    emit_stream(pd, mb, pool_tail_idx,
+                                SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0),
+                                true);
+                    acc[pool_tail_idx].sram_r += tile_out_bytes;
+                    acc[pool_tail_idx].sram_w += tile_out_bytes;
+                    ++pool_count_so_far;
+                    last_pool[pool_tail_idx] = pool_count_so_far;
+                    pool_done = pool_tag;
+                    final_addr = pool_out_addr;
+                    final_layer = pool_tail_idx;
+                    final_done = pool_tag;
+                    udma_w_skipped[ewe_end] = true;
+                    udma_w_streamed[ewe_end] = true;
+                    mark_flow_edge(ewe_end, pool_tail_idx);
+                }
+
                 if (d2s_tail) {
                     const auto& D = metas[d2s_tail_idx];
                     const uint16_t block = D.k_h ? D.k_h : 1;
@@ -2438,20 +2571,24 @@ int sc_main(int argc, char* argv[]) {
                     udma_w_skipped[ewe_end] = true;
                     udma_w_streamed[ewe_end] = true;
                     mark_flow_edge(ewe_end, d2s_tail_idx);
-                } else if (producer_no_store[ewe_end]) {
-                    udma_w_skipped[ewe_end] = true;
-                    udma_w_streamed[ewe_end] = true;
-                    slot_done[mb.slot] = tile_done;
+                } else if (producer_no_store[final_layer]) {
+                    udma_w_skipped[final_layer] = true;
+                    udma_w_streamed[final_layer] = true;
+                    if (pool_tail) pool_done = final_done;
+                    slot_done[mb.slot] = final_done;
                 } else {
                     const uint8_t st_tag = alloc_tag();
-                    emit_stream(make_udma(ewe_in_addr, metas[ewe_end].dram_out + dram_out_off,
-                                          tile_out_bytes, /*dir*/ 1, st_tag, tile_done),
-                                mb, ewe_end, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0));
-                    acc[ewe_end].sram_r += tile_out_bytes;
-                    acc[ewe_end].dram_w += tile_out_bytes;
+                    emit_stream(make_udma(final_addr, metas[final_layer].dram_out + dram_out_off,
+                                          tile_out_bytes, /*dir*/ 1, st_tag, final_done),
+                                mb, final_layer,
+                                SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    acc[final_layer].sram_r += tile_out_bytes;
+                    acc[final_layer].dram_w += tile_out_bytes;
                     ++udma_count_so_far;
-                    last_udma[ewe_end] = udma_count_so_far;
-                    ewe_done = st_tag;
+                    last_udma[final_layer] = udma_count_so_far;
+                    if (unary_tail) unary_done = st_tag;
+                    else if (pool_tail) pool_done = st_tag;
+                    else ewe_done = st_tag;
                     slot_done[mb.slot] = st_tag;
                 }
             }
@@ -2484,13 +2621,30 @@ int sc_main(int argc, char* argv[]) {
                 tnps_count_at_layer_end[d2s_tail_idx] = last_tnps[d2s_tail_idx];
                 layer_done_tag[d2s_tail_idx] = d2s_done;
             }
+            if (unary_tail) {
+                tiles_h_per_layer[unary_tail_idx] = tiles_h_per_layer[i];
+                tiles_oc_per_layer[unary_tail_idx] = 1;
+                udma_count_at_layer_end[unary_tail_idx] = last_udma[unary_tail_idx];
+                requant_count_at_layer_end[unary_tail_idx] = 0;
+                ewe_count_at_layer_end[unary_tail_idx] = last_ewe[unary_tail_idx];
+                layer_done_tag[unary_tail_idx] = unary_done;
+            }
+            if (pool_tail) {
+                tiles_h_per_layer[pool_tail_idx] = tiles_h_per_layer[i];
+                tiles_oc_per_layer[pool_tail_idx] = 1;
+                udma_count_at_layer_end[pool_tail_idx] = last_udma[pool_tail_idx];
+                requant_count_at_layer_end[pool_tail_idx] = 0;
+                ewe_count_at_layer_end[pool_tail_idx] = 0;
+                pool_count_at_layer_end[pool_tail_idx] = last_pool[pool_tail_idx];
+                layer_done_tag[pool_tail_idx] = pool_done;
+            }
             fuse_prev_l1_out_addr = 0;
             fuse_prev_l1_out_size = 0;
             fuse_prev_single_tile = false;
             fuse_prev_is_conv_class = false;
             clear_prev_binary_ewe_live();
             chain_alt = 0;
-            i = d2s_tail ? d2s_tail_idx : ewe_end;
+            i = d2s_tail ? d2s_tail_idx : (unary_tail ? unary_tail_idx : (pool_tail ? pool_tail_idx : ewe_end));
             return true;
         };
 
@@ -3054,6 +3208,9 @@ int sc_main(int argc, char* argv[]) {
             auto is_binary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_ADD || L.op_kind == OK_MUL || L.op_kind == OK_SUB;
             };
+            auto is_unary_ewe = [](const LayerMeta& L) {
+                return L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU;
+            };
             if (!graph_metas || !is_binary_ewe(metas[i])) return false;
             const auto& first = metas[i];
             if (first.dtype != DT_INT8x8) return false;
@@ -3104,7 +3261,30 @@ int sc_main(int argc, char* argv[]) {
                     return false;
                 return true;
             }();
-            if (end <= i && !d2s_tail) return false;
+            const uint32_t unary_tail_idx =
+                (!d2s_tail && end + 1 < N && is_unary_ewe(metas[end + 1]))
+                    ? (end + 1) : N;
+            const bool unary_tail = [&]() -> bool {
+                if (unary_tail_idx >= N) return false;
+                const auto& P = metas[end];
+                const auto& U = metas[unary_tail_idx];
+                const auto& GP = graph_metas[end];
+                const auto& GU = graph_metas[unary_tail_idx];
+                if (GP.consumer_count != 1 ||
+                    GP.first_consumer_layer != int32_t(unary_tail_idx) ||
+                    GP.last_consumer_layer  != int32_t(unary_tail_idx))
+                    return false;
+                if (GU.producer0_layer != int32_t(end))
+                    return false;
+                if (U.dtype != P.dtype) return false;
+                if (U.in_h != P.out_h || U.in_w != P.out_w || U.in_c != P.out_c)
+                    return false;
+                if (U.in_h != U.out_h || U.in_w != U.out_w || U.in_c != U.out_c)
+                    return false;
+                if (U.wgt_size == 0) return false;
+                return true;
+            }();
+            if (end <= i && !d2s_tail && !unary_tail) return false;
 
             // Transformer attention tails are often binary EWE -> SOFTMAX.
             // The older per-layer EWE wavefront can keep the final attention
@@ -3129,7 +3309,10 @@ int sc_main(int argc, char* argv[]) {
                 const uint64_t seg = align64(uint32_t(tile_bytes));
                 return (2ull + depth) * seg; // ping-pong data buffers + one B buffer per layer.
             };
-            const uint64_t params_bytes = align64(48u) * uint64_t(depth);
+            const uint64_t unary_params_size =
+                unary_tail ? uint64_t(metas[unary_tail_idx].wgt_size) : 0;
+            const uint64_t params_bytes =
+                align64(48u) * uint64_t(depth) + align64(uint32_t(unary_params_size));
             while (tile_rows > 1 &&
                    params_bytes + 2ull * slot_bytes_for(tile_rows) + safety > L1_BUDGET) {
                 --tile_rows;
@@ -3160,6 +3343,20 @@ int sc_main(int argc, char* argv[]) {
                 acc[k].sram_w += 48;
                 ++udma_count_so_far;
                 udma_count_at_layer_end[k] = udma_count_so_far;
+            }
+            uint32_t unary_params_l1 = 0;
+            uint8_t unary_params_tag = 0;
+            if (unary_tail) {
+                const auto& U = metas[unary_tail_idx];
+                unary_params_l1 = cursor;
+                cursor = align64(cursor + uint32_t(unary_params_size));
+                unary_params_tag = alloc_tag();
+                program.push_back(make_udma(U.dram_wgt, unary_params_l1, U.wgt_size,
+                                            /*dir*/ 0, unary_params_tag));
+                acc[unary_tail_idx].dram_r += U.wgt_size;
+                acc[unary_tail_idx].sram_w += U.wgt_size;
+                ++udma_count_so_far;
+                udma_count_at_layer_end[unary_tail_idx] = udma_count_so_far;
             }
 
             const uint32_t tile_bytes_max = tile_rows * per_row_bytes;
@@ -3252,6 +3449,36 @@ int sc_main(int argc, char* argv[]) {
                     in_addr = out_addr;
                 }
 
+                uint32_t final_addr = in_addr;
+                uint8_t final_done = tile_done;
+                uint32_t final_layer = end;
+                if (unary_tail) {
+                    const auto& U = metas[unary_tail_idx];
+                    LayerMeta tile_U = U;
+                    tile_U.in_h = uint16_t(rows);
+                    tile_U.out_h = uint16_t(rows);
+                    const uint32_t out_addr = (depth & 1u) ? data0 : data1;
+                    const uint8_t u_tag = alloc_tag();
+                    Descriptor ud = make_ewe_unary(tile_U, in_addr, out_addr,
+                                                   unary_params_l1, tile_done,
+                                                   u_tag, unary_params_tag);
+                    mark_stream(ud, unary_tail_idx, mb,
+                                SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                    ud.hdr.flags |= DF_STREAM_TAIL;
+                    program.push_back(ud);
+                    acc[unary_tail_idx].sram_r += tile_bytes;
+                    acc[unary_tail_idx].sram_w += tile_bytes;
+                    ++ewe_count_so_far;
+                    last_ewe[unary_tail_idx] = ewe_count_so_far;
+                    last_done[unary_tail_idx] = u_tag;
+                    final_addr = out_addr;
+                    final_done = u_tag;
+                    final_layer = unary_tail_idx;
+                    udma_w_skipped[end] = true;
+                    udma_w_streamed[end] = true;
+                    mark_flow_edge(end, unary_tail_idx);
+                }
+
                 if (d2s_tail) {
                     const auto& D = metas[d2s_tail_idx];
                     const uint16_t block = D.k_h ? D.k_h : 1;
@@ -3277,21 +3504,22 @@ int sc_main(int argc, char* argv[]) {
                     udma_w_skipped[end] = true;
                     udma_w_streamed[end] = true;
                     mark_flow_edge(end, d2s_tail_idx);
-                } else if (producer_no_store[end]) {
-                    udma_w_skipped[end] = true;
-                    udma_w_streamed[end] = true;
-                    slot_done[mb.slot] = tile_done;
+                } else if (producer_no_store[final_layer]) {
+                    udma_w_skipped[final_layer] = true;
+                    udma_w_streamed[final_layer] = true;
+                    slot_done[mb.slot] = final_done;
                 } else {
                     const uint8_t st_tag = alloc_tag();
-                    Descriptor sd = make_udma(in_addr, metas[end].dram_out + dram_off,
-                                              tile_bytes, /*dir*/ 1, st_tag, tile_done);
-                    mark_stream(sd, end, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                    Descriptor sd = make_udma(final_addr, metas[final_layer].dram_out + dram_off,
+                                              tile_bytes, /*dir*/ 1, st_tag, final_done);
+                    mark_stream(sd, final_layer, mb,
+                                SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(sd);
-                    acc[end].sram_r += tile_bytes;
-                    acc[end].dram_w += tile_bytes;
+                    acc[final_layer].sram_r += tile_bytes;
+                    acc[final_layer].dram_w += tile_bytes;
                     ++udma_count_so_far;
-                    last_udma[end] = udma_count_so_far;
-                    last_done[end] = st_tag;
+                    last_udma[final_layer] = udma_count_so_far;
+                    last_done[final_layer] = st_tag;
                     slot_done[mb.slot] = st_tag;
                 }
             }
@@ -3323,6 +3551,14 @@ int sc_main(int argc, char* argv[]) {
                 tnps_count_at_layer_end[d2s_tail_idx] = last_tnps[d2s_tail_idx];
                 layer_done_tag[d2s_tail_idx] = d2s_done;
             }
+            if (unary_tail) {
+                tiles_h_per_layer[unary_tail_idx] = tiles_h;
+                tiles_oc_per_layer[unary_tail_idx] = 1;
+                udma_count_at_layer_end[unary_tail_idx] = last_udma[unary_tail_idx] ? last_udma[unary_tail_idx] : udma_count_at_layer_end[unary_tail_idx];
+                requant_count_at_layer_end[unary_tail_idx] = 0;
+                ewe_count_at_layer_end[unary_tail_idx] = last_ewe[unary_tail_idx];
+                layer_done_tag[unary_tail_idx] = last_done[unary_tail_idx];
+            }
 
             fuse_prev_l1_out_addr = 0;
             fuse_prev_l1_out_size = 0;
@@ -3330,7 +3566,7 @@ int sc_main(int argc, char* argv[]) {
             fuse_prev_is_conv_class = false;
             clear_prev_binary_ewe_live();
             chain_alt = 0;
-            i = d2s_tail ? d2s_tail_idx : end;
+            i = d2s_tail ? d2s_tail_idx : (unary_tail ? unary_tail_idx : end);
             return true;
         };
 
@@ -4229,8 +4465,10 @@ int sc_main(int argc, char* argv[]) {
                                         : align64(uint32_t(uint64_t(tile_oh) * per_row_out));
                 uint8_t prev_tag = 0;
                 uint32_t oh_done = 0;
+                uint16_t mb_id = 0;
                 while (oh_done < L.out_h) {
                     const uint32_t this_oh = std::min<uint32_t>(tile_oh, L.out_h - oh_done);
+                    const bool final_mb = (oh_done + this_oh == L.out_h);
                     const int ih_lo_u = int(oh_done) * int(L.s_h) - int(L.p_t);
                     const int ih_hi_u = int(oh_done + this_oh - 1) * int(L.s_h) + int(k_h_eff) - 1 - int(L.p_t);
                     const int ih_lo = std::max(0, ih_lo_u);
@@ -4240,9 +4478,17 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t dram_in_off  = uint32_t(ih_lo) * per_row_in;
                     const uint8_t  in_tag_t  = alloc_tag();
                     const uint8_t  pool_tag  = alloc_tag();
+                    Microblock mb{};
+                    mb.id = mb_id;
+                    mb.slot = uint8_t(mb_id & 1u);
+                    mb.elem_off = uint64_t(oh_done) * L.out_w * L.out_c;
+                    mb.rows = this_oh;
+                    mb.elems = this_oh * L.out_w * L.out_c;
+                    mb.bytes = this_oh * per_row_out;
                     auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_in_off),
                                                        L1_IN_t, tile_in_size,
                                                        in_tag_t, prev_tag);
+                    mark_stream(id, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(id);
                     acc[i].dram_r += charged;
                     acc[i].sram_w += tile_in_size;
@@ -4254,8 +4500,10 @@ int sc_main(int argc, char* argv[]) {
                     const uint32_t L1_OUT_tile = output_resident
                                                ? (L1_OUT_t + uint32_t(oh_done) * per_row_out)
                                                : L1_OUT_t;
-                    program.push_back(make_pool(tile_L, L1_IN_t, L1_OUT_tile,
-                                                in_tag_t, pool_tag));
+                    Descriptor pd = make_pool(tile_L, L1_IN_t, L1_OUT_tile,
+                                              in_tag_t, pool_tag);
+                    mark_stream(pd, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(pd);
                     acc[i].sram_r += tile_in_size;
                     acc[i].sram_w += this_oh * per_row_out;
                     if (output_resident) {
@@ -4270,15 +4518,19 @@ int sc_main(int argc, char* argv[]) {
                             udma_w_streamed[i] = true;
                             prev_tag = pool_tag;
                         } else {
-                            program.push_back(make_udma(L1_OUT_tile,
-                                                        uint32_t(L.dram_out + dram_out_off),
-                                                        tile_out_size,
-                                                        /*dir*/ 1, st_tag_tile, pool_tag));
+                            Descriptor sd = make_udma(L1_OUT_tile,
+                                                      uint32_t(L.dram_out + dram_out_off),
+                                                      tile_out_size,
+                                                      /*dir*/ 1, st_tag_tile, pool_tag);
+                            mark_stream(sd, i, mb,
+                                        SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                            program.push_back(sd);
                             acc[i].dram_w += tile_out_size;
                             prev_tag = st_tag_tile;
                         }
                     }
                     oh_done += this_oh;
+                    ++mb_id;
                 }
                 if (output_resident) {
                     // Final udma_w deferred to pending for source-fusion eligibility.
@@ -4634,16 +4886,26 @@ int sc_main(int argc, char* argv[]) {
                 const uint64_t total_elems = uint64_t(L.in_h) * L.in_w * L.in_c;
                 uint8_t prev_st_tag = 0;
                 uint64_t elem_done = 0;
+                uint16_t mb_id = 0;
                 while (elem_done < total_elems) {
                     const uint64_t this_elems = std::min<uint64_t>(tile_elems, total_elems - elem_done);
                     const uint64_t dram_off = elem_done * elem_size;
                     const uint64_t tile_bytes = this_elems * elem_size;
+                    const bool final_mb = (elem_done + this_elems == total_elems);
                     const uint8_t in_tag  = alloc_tag();
                     const uint8_t req_tag = alloc_tag();
                     const uint8_t st_tag  = alloc_tag();
+                    Microblock mb{};
+                    mb.id = mb_id;
+                    mb.slot = uint8_t(mb_id & 1u);
+                    mb.elem_off = elem_done;
+                    mb.rows = 1;
+                    mb.elems = uint32_t(this_elems);
+                    mb.bytes = uint32_t(tile_bytes);
                     auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_off),
                                                        L1_IN_t, uint32_t(tile_bytes),
                                                        in_tag, prev_st_tag);
+                    mark_stream(id, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(id);
                     LayerMeta tile_L = L;
                     tile_L.in_h = 1;
@@ -4652,21 +4914,26 @@ int sc_main(int argc, char* argv[]) {
                     tile_L.out_h = 1;
                     tile_L.out_w = 1;
                     tile_L.out_c = uint16_t(this_elems);
-                    program.push_back(make_ewe_unary(tile_L, L1_IN_t, L1_OUT_t, L1_PARAMS,
-                                                     in_tag, req_tag, pa_tag));
+                    Descriptor ed = make_ewe_unary(tile_L, L1_IN_t, L1_OUT_t, L1_PARAMS,
+                                                   in_tag, req_tag, pa_tag);
+                    mark_stream(ed, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(ed);
                     acc[i].dram_r += charged;
                     acc[i].sram_w += 2 * tile_bytes;
                     acc[i].sram_r += 2 * tile_bytes;
                     if (producer_no_store[i]) {
                         prev_st_tag = req_tag;
                     } else {
-                        program.push_back(make_udma(L1_OUT_t, uint32_t(L.dram_out + dram_off),
-                                                    uint32_t(tile_bytes),
-                                                    /*dir*/ 1, st_tag, req_tag));
+                        Descriptor sd = make_udma(L1_OUT_t, uint32_t(L.dram_out + dram_off),
+                                                  uint32_t(tile_bytes),
+                                                  /*dir*/ 1, st_tag, req_tag);
+                        mark_stream(sd, i, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(sd);
                         acc[i].dram_w += tile_bytes;
                         prev_st_tag = st_tag;
                     }
                     elem_done += this_elems;
+                    ++mb_id;
                 }
                 if (producer_no_store[i]) {
                     udma_w_skipped[i] = true;
@@ -5334,6 +5601,11 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
                 layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                const bool l1_view_passthrough =
+                    (L.op_kind == OK_SQUEEZE || L.op_kind == OK_EXPAND_DIMS) &&
+                    fuse_prev_single_tile &&
+                    fuse_prev_dtype == L.dtype &&
+                    fuse_prev_l1_out_size == L.ref_size;
                 if (L.op_kind == OK_PAD && i + 1 < N && is_conv_class_meta(metas[i + 1])) {
                     if (i > 0)
                         mark_flow_edge(i - 1, i);
@@ -5351,6 +5623,22 @@ int sc_main(int argc, char* argv[]) {
                     fuse_prev_is_conv_class = false;
                     clear_prev_binary_ewe_live();
                     chain_alt = 0;
+                } else if (l1_view_passthrough) {
+                    if (i > 0)
+                        mark_flow_edge(i - 1, i);
+                    if (i + 1 < N &&
+                        L.out_h == metas[i + 1].in_h &&
+                        L.out_w == metas[i + 1].in_w &&
+                        L.out_c == metas[i + 1].in_c &&
+                        L.dtype == metas[i + 1].dtype)
+                        mark_flow_edge(i, i + 1);
+                    fuse_prev_done_tag      = layer_done_tag[i];
+                    fuse_prev_out_h         = L.out_h;
+                    fuse_prev_out_w         = L.out_w;
+                    fuse_prev_out_c         = L.out_c;
+                    fuse_prev_dtype         = L.dtype;
+                    fuse_prev_single_tile   = true;
+                    fuse_prev_is_conv_class = true;
                 } else {
                     fuse_prev_l1_out_addr   = 0;
                     fuse_prev_l1_out_size   = 0;
@@ -5434,12 +5722,28 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
                 layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                const bool l1_view_passthrough =
+                    L.op_kind == OK_RESHAPE &&
+                    fuse_prev_single_tile &&
+                    fuse_prev_dtype == L.dtype &&
+                    fuse_prev_l1_out_size == L.ref_size;
                 if (i + 1 < N &&
                     L.out_h == metas[i + 1].in_h &&
                     L.out_w == metas[i + 1].in_w &&
                     L.out_c == metas[i + 1].in_c &&
                     L.dtype == metas[i + 1].dtype)
                     mark_flow_edge(i, i + 1);
+                if (l1_view_passthrough) {
+                    if (i > 0)
+                        mark_flow_edge(i - 1, i);
+                    fuse_prev_done_tag      = layer_done_tag[i];
+                    fuse_prev_out_h         = L.out_h;
+                    fuse_prev_out_w         = L.out_w;
+                    fuse_prev_out_c         = L.out_c;
+                    fuse_prev_dtype         = L.dtype;
+                    fuse_prev_single_tile   = true;
+                    fuse_prev_is_conv_class = true;
+                }
                 break;
             }
             // Pure DRAM→DRAM passthrough; bytes already in their final layout.
@@ -5491,7 +5795,13 @@ int sc_main(int argc, char* argv[]) {
         // v8.20: ADD / POOL also produce single-tile L1-resident outputs and
         // set fuse_prev_* explicitly inside their cases — don't clobber them.
         // RESHAPE / CONCAT / GATHER / SOFTMAX go to DRAM directly → reset.
-        if (L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC
+        const bool keep_layout_view_source =
+            producer_no_store[i] &&
+            (L.op_kind == OK_RESHAPE || L.op_kind == OK_SQUEEZE ||
+             L.op_kind == OK_EXPAND_DIMS) &&
+            fuse_prev_single_tile;
+        if (!keep_layout_view_source &&
+            L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC
             && L.op_kind != OK_ADD && L.op_kind != OK_MUL && L.op_kind != OK_SUB
             && L.op_kind != OK_AVG_POOL && L.op_kind != OK_MAX_POOL) {
             fuse_prev_is_conv_class = false;
@@ -5508,11 +5818,13 @@ int sc_main(int argc, char* argv[]) {
             if (oc == OC_UDMA)    ++udma_count_so_far;
             if (oc == OC_REQUANT) ++requant_count_so_far;
             if (oc == OC_EWE)     ++ewe_count_so_far;
+            if (oc == OC_POOL)    ++pool_count_so_far;
             if (oc == OC_TNPS)    ++tnps_count_so_far;
         }
         udma_count_at_layer_end[i]    = udma_count_so_far;
         requant_count_at_layer_end[i] = requant_count_so_far;
         ewe_count_at_layer_end[i]     = ewe_count_so_far;
+        pool_count_at_layer_end[i]    = pool_count_so_far;
         tnps_count_at_layer_end[i]    = tnps_count_so_far;
     }
     // v8.14: flush any final deferred udma_w (last layer was a single-tile
@@ -5684,6 +5996,7 @@ int sc_main(int argc, char* argv[]) {
         const size_t   uk = udma_count_at_layer_end[i];
         const size_t   rk = requant_count_at_layer_end[i];
         const size_t   ek = ewe_count_at_layer_end[i];
+        const size_t   pk = pool_count_at_layer_end[i];
         const size_t   tk = tnps_count_at_layer_end[i];
         const uint64_t udma_end = (uk > 0 && uk <= sys.udma.tasks.size())
                                 ? sys.udma.tasks[uk - 1].second : 0;
@@ -5691,10 +6004,13 @@ int sc_main(int argc, char* argv[]) {
                                 ? sys.requant.tasks[rk - 1].second : 0;
         const uint64_t ewe_end  = (ek > 0 && ek <= sys.ewe.tasks.size())
                                 ? sys.ewe.tasks[ek - 1].second : 0;
+        const uint64_t pool_end = (pk > 0 && pk <= sys.pool.tasks.size())
+                                ? sys.pool.tasks[pk - 1].second : 0;
         const uint64_t tnps_end = (tk > 0 && tk <= sys.tnps.tasks.size())
                                 ? sys.tnps.tasks[tk - 1].second : 0;
         const uint64_t prev_ns = uint64_t(prev_done.to_seconds() * 1e9);
-        uint64_t done_ns = std::max(std::max(std::max(udma_end, req_end), ewe_end), tnps_end);
+        uint64_t done_ns =
+            std::max(std::max(std::max(std::max(udma_end, req_end), ewe_end), pool_end), tnps_end);
         if (done_ns == 0) done_ns = prev_ns;
         const uint64_t cyc_total = done_ns;
         const uint64_t cyc_layer = (done_ns > prev_ns) ? (done_ns - prev_ns) : 0;
