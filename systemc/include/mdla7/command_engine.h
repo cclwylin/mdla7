@@ -10,6 +10,7 @@
 #include <limits>
 #include <iostream>
 #include <queue>
+#include <vector>
 #include "mdla7/descriptor.h"
 
 namespace mdla7 {
@@ -37,6 +38,19 @@ SC_MODULE(CommandEngine) {
     uint8_t* req_dtype_latch  = nullptr;
     uint8_t* ewe_dtype_latch  = nullptr;
     uint8_t* pool_dtype_latch = nullptr;
+
+    struct TaskMeta {
+        uint16_t layer_id = 0;
+        uint16_t microblock_id = 0;
+        uint8_t stream_slot = 0;
+        uint8_t stream_meta_flags = 0;
+        uint8_t flags = 0;
+        uint8_t op_class = 0;
+        uint8_t op_subtype = 0;
+        uint8_t udma_direction = 0;
+    };
+    std::vector<TaskMeta> trace_udma_r, trace_udma_w;
+    std::vector<TaskMeta> trace_conv, trace_requant, trace_ewe, trace_pool, trace_tnps;
 
     SC_HAS_PROCESS(CommandEngine);
     CommandEngine(sc_core::sc_module_name nm) : sc_module(nm) {
@@ -181,21 +195,53 @@ SC_MODULE(CommandEngine) {
 
         switch (d.hdr.op_class()) {
         case OC_CONV:
+            record_trace(d);
             if (conv_dtype_latch) *conv_dtype_latch = d.hdr.dtype;
             conv_cfg_out.write(d.body); break;
         case OC_REQUANT:
+            record_trace(d);
             if (req_dtype_latch) *req_dtype_latch = d.hdr.dtype;
             requant_cfg_out.write(d.body); break;
         case OC_EWE:
+            record_trace(d);
             if (ewe_dtype_latch) *ewe_dtype_latch = d.hdr.dtype;
             ewe_cfg_out.write(d.body); break;
         case OC_POOL:
+            record_trace(d);
             if (pool_dtype_latch) *pool_dtype_latch = d.hdr.dtype;
             pool_cfg_out.write(d.body); break;
-        case OC_TNPS:   tnps_cfg_out.write(d.body); break;
-        case OC_UDMA:   udma_cfg_out.write(d.body); break;
+        case OC_TNPS:
+            record_trace(d);
+            tnps_cfg_out.write(d.body); break;
+        case OC_UDMA:
+            record_trace(d);
+            udma_cfg_out.write(d.body); break;
         default:
             std::cout << "[CmdEng] unknown op_class\n"; break;
+        }
+    }
+
+    void record_trace(const Descriptor& d) {
+        TaskMeta m{};
+        m.layer_id = d.hdr.layer_id;
+        m.microblock_id = d.hdr.microblock_id;
+        m.stream_slot = d.hdr.stream_slot;
+        m.stream_meta_flags = d.hdr.stream_meta_flags;
+        m.flags = d.hdr.flags;
+        m.op_class = uint8_t(d.hdr.op_class());
+        m.op_subtype = d.hdr.op_subtype();
+        m.udma_direction = (d.hdr.op_class() == OC_UDMA) ? d.body.udma.direction : 0;
+        switch (d.hdr.op_class()) {
+        case OC_UDMA:
+            if (m.udma_direction == 1) trace_udma_w.push_back(m);
+            else                       trace_udma_r.push_back(m);
+            break;
+        case OC_CONV:    trace_conv.push_back(m); break;
+        case OC_REQUANT: trace_requant.push_back(m); break;
+        case OC_EWE:     trace_ewe.push_back(m); break;
+        case OC_POOL:    trace_pool.push_back(m); break;
+        case OC_TNPS:    trace_tnps.push_back(m); break;
+        default: break;
         }
     }
 

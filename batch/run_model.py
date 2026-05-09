@@ -474,6 +474,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     summary = profile.get("summary", {}) or {}
     engines = profile.get("engines", {}) or {}
     layers  = profile.get("layers", []) or []
+    task_meta = profile.get("task_meta", {}) or {}
     total_cyc = int(summary.get("total_cycles", 0) or 0)
 
     compile_rows_data = _parse_compile_log(log_lines)
@@ -522,6 +523,45 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
         prev_end = 0
         claimed: set[int] = set()
+        layer_starts: list[int] = []
+        p = 0
+        for L in layers:
+            layer_starts.append(p)
+            p = int(L.get("cycles_cum", 0) or 0)
+
+        # FC weight prefetch can start during the preceding transpose window,
+        # so start-window annotation would otherwise label the long UDMA_R as a
+        # transpose read.  Mark the overlapping read as the consumer FC weight
+        # prefetch in the HTML-only Gantt payload.
+        for idx, L in enumerate(layers):
+            op = str(L.get("op", "")).strip().lower()
+            if op != "fc" or idx < 2:
+                continue
+            prev_op = str(layers[idx - 1].get("op", "")).strip().lower()
+            prev2_op = str(layers[idx - 2].get("op", "")).strip().lower()
+            if prev_op != "reshape" or prev2_op != "trnps":
+                continue
+            fc_start = layer_starts[idx]
+            c = ready_compile_rows[idx] if idx < len(ready_compile_rows) else None
+            wgt_b = _conv_pure_weight_bytes(L, c)
+            candidates = [
+                ti for ti, t in enumerate(annotated)
+                if ti not in claimed and len(t) >= 2
+                and int(t[0]) < fc_start <= int(t[1])
+            ]
+            if not candidates:
+                continue
+            ti = max(candidates, key=lambda k: int(annotated[k][1]) - int(annotated[k][0]))
+            t = annotated[ti]
+            layer_id = int(L.get("id", idx) or idx)
+            label = f"L{layer_id} fc weight prefetch"
+            if wgt_b:
+                label += f" ({_kb(wgt_b)} KB)"
+            t.append(label)
+            if wgt_b:
+                t.append(wgt_b)
+            claimed.add(ti)
+
         for idx, L in enumerate(layers):
             end = int(L.get("cycles_cum", 0) or 0)
             op = str(L.get("op", "")).strip().lower()
@@ -671,6 +711,63 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             prev_end = end
         return waits
 
+    def _stage_from_meta(engine: str, meta: dict) -> str:
+        flags = int(meta.get("stream_flags", 0) or 0)
+        if engine == "udma_r":
+            if flags & 0x2:
+                return "load_b"
+            return "load"
+        if engine == "udma_w":
+            return "store"
+        if engine in ("conv", "requant"):
+            return engine
+        if engine in ("ewe", "pool", "tnps"):
+            return "consumer"
+        return engine
+
+    def _decorate_task_meta(engine: str, tasks: list) -> list:
+        metas = list(task_meta.get(engine) or [])
+        if not metas:
+            return tasks
+        out = []
+        for idx, raw in enumerate(tasks):
+            t = list(raw)
+            if len(t) < 2:
+                out.append(t)
+                continue
+            meta = metas[idx] if idx < len(metas) else {}
+            layer_raw = meta.get("layer", -1)
+            layer_idx = int(layer_raw if layer_raw is not None else -1)
+            mb = int(meta.get("mb", 0) or 0)
+            flags = int(meta.get("flags", 0) or 0)
+            sflags = int(meta.get("stream_flags", 0) or 0)
+            if flags & 0x10 and sflags and 0 <= layer_idx < len(layers):
+                L = layers[layer_idx]
+                lid = int(L.get("id", layer_idx) or layer_idx)
+                flow = int(L.get("flow", L.get("id", layer_idx))
+                           if L.get("flow") is not None else L.get("id", layer_idx))
+                op = str(L.get("op", "")).strip()
+                stage = _stage_from_meta(engine, meta)
+                label = f"L{lid} F{flow} mb{mb} {op} {stage}"
+                if sflags & 0x10:
+                    label += " final"
+                if flags & 0x20:
+                    label += " tail"
+                if len(t) >= 3 and t[2]:
+                    label += f" · {t[2]}"
+                if len(t) < 3:
+                    t.append(label)
+                else:
+                    t[2] = label
+                if len(t) < 4:
+                    t.append(0)
+            elif len(t) < 4:
+                while len(t) < 4:
+                    t.append("" if len(t) == 2 else 0)
+            t.append(meta)
+            out.append(t)
+        return out
+
     # v8.2: build an interactive SVG Gantt instead of embedding the matplotlib PNG.
     # Engines render as horizontal lanes; tasks as colored rects; horizontal
     # mouse wheel zooms; click+drag pans; hover shows tooltip.
@@ -680,22 +777,181 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         tasks = list(e.get("tasks") or [])
         if name == "udma_r":
             tasks = _annotate_udma_read_tasks(tasks)
+            tasks = _decorate_task_meta(name, tasks)
             conv_wait_tasks = _conv_wait_tasks_from_udma(tasks)
         elif name == "udma_w":
             tasks = _annotate_udma_write_tasks(tasks)
+            tasks = _decorate_task_meta(name, tasks)
+        else:
+            tasks = _decorate_task_meta(name, tasks)
         eng_payload[name] = {
             "busy": int(e.get("busy_cycles", 0) or 0),
             "tasks": tasks,
         }
+
+    def _layer_task_spans() -> list[tuple[int | None, int | None]]:
+        spans: list[list[int | None]] = [[None, None] for _ in layers]
+
+        def add_span(layer_id: int, start: int, end: int) -> None:
+            if not (0 <= layer_id < len(spans)) or end < start:
+                return
+            cur = spans[layer_id]
+            cur[0] = start if cur[0] is None else min(int(cur[0]), start)
+            cur[1] = end if cur[1] is None else max(int(cur[1]), end)
+
+        # Labeled UDMA tasks cover most visible layer front/tail work.
+        for eng_name, e in eng_payload.items():
+            if eng_name == "udma_w":
+                continue
+            for t in e.get("tasks", []):
+                if len(t) < 3:
+                    continue
+                m = re.match(r"L(\d+)\b", str(t[2]))
+                if m:
+                    add_span(int(m.group(1)), int(t[0]), int(t[1]))
+
+        # CONV/REQUANT task arrays are serialized without labels. Map them back
+        # to conv-class layers by the same tile-count convention used for MAC
+        # utilization so overlapped layer bands don't appear on TNPS time.
+        for eng_name in ("conv", "requant"):
+            tasks = list(eng_payload.get(eng_name, {}).get("tasks") or [])
+            task_idx = 0
+            for idx, L in enumerate(layers):
+                op = str(L.get("op", "")).strip().lower()
+                if op not in ("conv", "dwconv", "fc"):
+                    continue
+                th, toc = (L.get("tiles") or [1, 1])
+                n_tasks = max(1, int(th or 1) * int(toc or 1))
+                for _ in range(n_tasks):
+                    if task_idx >= len(tasks):
+                        break
+                    t = tasks[task_idx]
+                    if len(t) >= 2:
+                        add_span(idx, int(t[0]), int(t[1]))
+                    task_idx += 1
+
+        return [(s, e) for s, e in spans]
+
+    layer_spans = _layer_task_spans()
     layer_marks = [
         {"id": int(L.get("id", i)),
          "flow": int(L.get("flow", L.get("id", i)) if L.get("flow") is not None else L.get("id", i)),
          "op": str(L.get("op", "")).strip(),
+         "start": (min(int(layer_spans[i][0]), int(L.get("cycles_cum", 0) or 0))
+                   if layer_spans[i][0] is not None
+                   else max(0, int(L.get("cycles_cum", 0) or 0) - int(L.get("cycles_layer", 0) or 0))),
          "end": int(L.get("cycles_cum", 0) or 0)}
         for i, L in enumerate(layers)
     ]
+
+    def _tile_count_for_layer(idx: int) -> int:
+        if not (0 <= idx < len(layers)):
+            return 1
+        th, toc = (layers[idx].get("tiles") or [1, 1])
+        return max(1, int(th or 1) * int(toc or 1))
+
+    def _microblock_payload() -> dict:
+        """HTML-only view that re-buckets engine tasks by microblock stage."""
+        lane_order = ["load", "conv", "requant", "consumer", "store"]
+        lanes = {name: {"tasks": []} for name in lane_order}
+
+        def layer_info(idx: int) -> tuple[int, int, str]:
+            if not (0 <= idx < len(layers)):
+                return idx, idx, ""
+            L = layers[idx]
+            lid = int(L.get("id", idx) or idx)
+            flow = int(L.get("flow", L.get("id", idx)) if L.get("flow") is not None else L.get("id", idx))
+            op = str(L.get("op", "")).strip()
+            return lid, flow, op
+
+        def add(stage: str, task: list, layer_idx: int, mb: int,
+                engine: str, detail: str = "", nbytes: int = 0) -> None:
+            if stage not in lanes or len(task) < 2:
+                return
+            s, e = int(task[0]), int(task[1])
+            if e < s:
+                return
+            lid, flow, op = layer_info(layer_idx)
+            label = f"L{lid} F{flow} mb{mb} {op} {engine}"
+            if detail:
+                label += f" · {detail}"
+            lanes[stage]["tasks"].append([s, e, label, int(nbytes or 0), engine])
+
+        if task_meta:
+            for engine, payload in eng_payload.items():
+                for task in payload.get("tasks", []):
+                    if len(task) < 5 or not isinstance(task[-1], dict):
+                        continue
+                    meta = task[-1]
+                    mflags = int(meta.get("flags", 0) or 0)
+                    if not (mflags & 0x10):
+                        continue
+                    if mflags & 0x20:
+                        continue
+                    if not int(meta.get("stream_flags", 0) or 0):
+                        continue
+                    stage = _stage_from_meta(engine, meta)
+                    if stage == "load_b":
+                        stage = "load"
+                    if stage not in lanes:
+                        continue
+                    layer_raw = meta.get("layer", -1)
+                    layer_idx = int(layer_raw if layer_raw is not None else -1)
+                    mb = int(meta.get("mb", 0) or 0)
+                    nbytes = int(task[3]) if len(task) > 3 and isinstance(task[3], int) else 0
+                    detail = "tail" if int(meta.get("flags", 0) or 0) & 0x20 else ""
+                    add(stage, task, layer_idx, mb, engine, detail, nbytes)
+            for lane in lanes.values():
+                lane["tasks"].sort(key=lambda t: (int(t[0]), int(t[1])))
+            return {"lane_order": lane_order, "lanes": lanes, "source": "task_meta"}
+
+        def assign_dense_engine(engine: str, stage: str, ops: set[str]) -> None:
+            tasks = list(eng_payload.get(engine, {}).get("tasks") or [])
+            task_idx = 0
+            for layer_idx, L in enumerate(layers):
+                op = str(L.get("op", "")).strip().lower()
+                if op not in ops:
+                    continue
+                n = _tile_count_for_layer(layer_idx)
+                for mb in range(n):
+                    if task_idx >= len(tasks):
+                        return
+                    add(stage, tasks[task_idx], layer_idx, mb, engine)
+                    task_idx += 1
+
+        conv_ops = {"conv", "dwconv", "fc"}
+        ewe_ops = {"add", "mul", "sub", "h_swsh", "relu", "gelu", "softmax"}
+        pool_ops = {"avgpool", "maxpool", "mean"}
+        tnps_ops = {"d2spac", "trnps", "reshape", "concat"}
+        assign_dense_engine("conv", "conv", conv_ops)
+        assign_dense_engine("requant", "requant", conv_ops)
+        assign_dense_engine("ewe", "consumer", ewe_ops)
+        assign_dense_engine("pool", "consumer", pool_ops)
+        assign_dense_engine("tnps", "consumer", tnps_ops)
+
+        udma_counts: dict[tuple[str, int], int] = {}
+        for engine, stage in (("udma_r", "load"), ("udma_w", "store")):
+            for task in eng_payload.get(engine, {}).get("tasks", []):
+                if len(task) < 3:
+                    continue
+                m = re.match(r"L(\d+)\b", str(task[2]))
+                if not m:
+                    continue
+                layer_idx = int(m.group(1))
+                n = _tile_count_for_layer(layer_idx)
+                key = (engine, layer_idx)
+                mb = udma_counts.get(key, 0) % n
+                udma_counts[key] = udma_counts.get(key, 0) + 1
+                nbytes = int(task[3]) if len(task) > 3 and str(task[3]).isdigit() else 0
+                add(stage, task, layer_idx, mb, engine, str(task[2]), nbytes)
+
+        for lane in lanes.values():
+            lane["tasks"].sort(key=lambda t: (int(t[0]), int(t[1])))
+        return {"lane_order": lane_order, "lanes": lanes, "source": "inferred"}
+
     gantt_data_json = json.dumps({
         "engines": eng_payload,
+        "microblocks": _microblock_payload(),
         "layers":  layer_marks,
         "conv_wait": conv_wait_tasks,
         "total":   total_cyc,
@@ -1008,6 +1264,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   <span id="gantt-window" style="margin-left:12px; color:#888;"></span>
   <span style="float:right; color:#888;">drag = zoom-to-range · alt+drag <i>or</i> right-drag = pan · wheel-on-lanes = zoom · wheel-on-axis = scroll · keys: ←/→ pan, +/− zoom, 0 reset</span>
 </div>
+<h3 style="font-size:13px; margin:10px 0 4px;">Original engine timeline</h3>
 <div id="gantt-tip"
      style="position:absolute; pointer-events:none; background:#222; color:#eee;
             font: 11px/1.3 ui-monospace,Menlo,Consolas,monospace; padding:4px 7px;
@@ -1027,13 +1284,25 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         fill="rgba(66,135,245,0.18)" stroke="#4287f5" stroke-width="1"
         stroke-dasharray="3,2" style="display:none; pointer-events:none;"/>
 </svg>
+<h3 style="font-size:13px; margin:14px 0 4px;">Microblock stage timeline</h3>
+<svg id="micro-gantt-svg" width="100%"
+     style="border:1px solid #ddd; background:#fafafa; cursor:default;
+            display:block; user-select:none;">
+  <g id="micro-gantt-grid"></g>
+  <g id="micro-gantt-bars"></g>
+  <g id="micro-gantt-axis"></g>
+</svg>
 <script id="gantt-data" type="application/json">{gantt_data_json}</script>
 <script>
 (function() {{
   const data = JSON.parse(document.getElementById('gantt-data').textContent);
-  // Pre-compute layer windows (start = previous layer's end).
+  // Pre-compute layer windows. New profiles include task-derived starts so
+  // overlapped/non-monotonic layer ends don't make a CONV/FC band appear over
+  // TNPS time; older profiles fall back to previous-end windows.
   data.layers.forEach((L, i) => {{
-    L.start = i > 0 ? data.layers[i-1].end : 0;
+    if (L.start === undefined || L.start === null) {{
+      L.start = i > 0 ? data.layers[i-1].end : 0;
+    }}
   }});
 
   const ENG_COLORS = {{
@@ -1054,6 +1323,10 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   const gBars   = document.getElementById('gantt-bars');
   const gAnchor = document.getElementById('gantt-anchor');
   const gAxis   = document.getElementById('gantt-axis');
+  const microSvg  = document.getElementById('micro-gantt-svg');
+  const microGrid = document.getElementById('micro-gantt-grid');
+  const microBars = document.getElementById('micro-gantt-bars');
+  const microAxis = document.getElementById('micro-gantt-axis');
   const selRect = document.getElementById('gantt-selrect');
   const tip     = document.getElementById('gantt-tip');
   const cursorInfo = document.getElementById('gantt-cursor');
@@ -1063,6 +1336,9 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 
   const eng_names = Object.keys(data.engines);
   const N_LANES = eng_names.length;
+  const micro = data.microblocks || {{lane_order: [], lanes: {{}}}};
+  const micro_names = micro.lane_order || Object.keys(micro.lanes || {{}});
+  const N_MICRO_LANES = micro_names.length;
   // v8.3 / v8.9 geometry: TOP → OP_ROW (28 px) → engine lanes (56 px each)
   // → axis (32 px). The OP_ROW shows one rect per layer with the op id and
   // name; click an op rect to zoom to that layer.
@@ -1093,6 +1369,74 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     const span = view1 - view0;
     const sx = (W - LEFT - RIGHT) / span;
     return view0 + (px - LEFT) / sx;
+  }}
+
+  function renderMicro() {{
+    if (!microSvg) return;
+    const W = microSvg.clientWidth || 1100;
+    const LANE_H2 = 42, LANE_PAD2 = 7, LEFT2 = 92, RIGHT2 = 12, TOP2 = 8, AXIS_H2 = 28;
+    const H = TOP2 + Math.max(1, N_MICRO_LANES) * LANE_H2 + AXIS_H2;
+    microSvg.setAttribute('viewBox', `0 0 ${{W}} ${{H}}`);
+    microSvg.setAttribute('height', H);
+    const span = Math.max(1, view1 - view0);
+    const sx = (W - LEFT2 - RIGHT2) / span;
+    const x = c => LEFT2 + (c - view0) * sx;
+
+    let grid = '';
+    if (!N_MICRO_LANES) {{
+      grid += `<text x="${{LEFT2}}" y="${{TOP2 + 18}}" font-size="12" fill="#777">no inferred microblock tasks</text>`;
+    }}
+    micro_names.forEach((name, i) => {{
+      const y = TOP2 + i * LANE_H2;
+      const fill = (i % 2) ? '#f0f2f5' : '#ffffff';
+      grid += `<rect x="${{LEFT2}}" y="${{y}}" width="${{W - LEFT2 - RIGHT2}}" height="${{LANE_H2}}" fill="${{fill}}"/>`;
+      grid += `<text x="${{LEFT2 - 8}}" y="${{y + LANE_H2/2 + 5}}" text-anchor="end" font-size="12" fill="#333" font-weight="500">${{name}}</text>`;
+    }});
+    microGrid.innerHTML = grid;
+
+    let bars = '';
+    micro_names.forEach((name, i) => {{
+      const lane = (micro.lanes || {{}})[name] || {{tasks: []}};
+      const yy = TOP2 + i * LANE_H2 + LANE_PAD2;
+      const hh = LANE_H2 - 2 * LANE_PAD2;
+      for (const task of lane.tasks || []) {{
+        const s = +task[0], e = +task[1];
+        if (e <= view0 || s >= view1) continue;
+        const x0 = Math.max(x(s), LEFT2);
+        const x1 = Math.min(x(e), W - RIGHT2);
+        const w = Math.max(1, x1 - x0);
+        const label = task.length > 2 ? String(task[2]) : '';
+        const bytes = task.length > 3 ? String(task[3]) : '';
+        const eng = task.length > 4 ? String(task[4]) : name;
+        const color = ENG_COLORS[eng] || '#777';
+        bars += `<rect class="gantt-task micro-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
+              + `fill="${{color}}" data-eng="micro ${{name}} / ${{eng}}" data-s="${{s}}" data-e="${{e}}" `
+              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}"/>`;
+        if (w >= Math.min(160, label.length * 6 + 8)) {{
+          bars += `<text x="${{x0 + 4}}" y="${{yy + hh/2 + 4}}" font-size="10" fill="#111" pointer-events="none">${{esc(label)}}</text>`;
+        }}
+      }}
+    }});
+    microBars.innerHTML = bars;
+
+    let axis = '';
+    const yAx = TOP2 + Math.max(1, N_MICRO_LANES) * LANE_H2;
+    axis += `<line x1="${{LEFT2}}" y1="${{yAx}}" x2="${{W - RIGHT2}}" y2="${{yAx}}" stroke="#666"/>`;
+    const niceStep = (rng) => {{
+      const raw = rng / 10;
+      const e10 = Math.pow(10, Math.floor(Math.log10(raw)));
+      const m = raw / e10;
+      const s = m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10;
+      return s * e10;
+    }};
+    const step = niceStep(span);
+    const t0 = Math.ceil(view0 / step) * step;
+    for (let t = t0; t <= view1; t += step) {{
+      const xx = x(t);
+      axis += `<line x1="${{xx}}" y1="${{yAx}}" x2="${{xx}}" y2="${{yAx + 5}}" stroke="#666"/>`;
+      axis += `<text x="${{xx}}" y="${{yAx + 18}}" font-size="11" text-anchor="middle" fill="#444">${{fmt(t)}}</text>`;
+    }}
+    microAxis.innerHTML = axis;
   }}
 
   function render() {{
@@ -1239,6 +1583,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     gAxis.innerHTML = axis;
 
     windowInfo.textContent = `view: [${{fmt(view0)}}, ${{fmt(view1)}}] (${{fmt(span)}} cyc)`;
+    renderMicro();
   }}
 
   // ----- Wheel -----
@@ -1268,6 +1613,28 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       const factor = Math.exp(ev.deltaY * 0.0015);
       let new_span = clamp(span * factor, 4, total);
       let new0 = clamp(cx - (cx - view0) * (new_span / span), 0, total - new_span);
+      view0 = new0; view1 = new0 + new_span;
+    }}
+    render();
+  }}, {{passive: false}});
+
+  if (microSvg) microSvg.addEventListener('wheel', (ev) => {{
+    ev.preventDefault();
+    const r = microSvg.getBoundingClientRect();
+    const W = microSvg.clientWidth || 1100;
+    const px = ev.clientX - r.left;
+    const LEFT2 = 92, RIGHT2 = 12;
+    const span = view1 - view0;
+    if (ev.shiftKey) {{
+      const dx = ev.deltaY * span * 0.001;
+      view0 = clamp(view0 + dx, 0, total - span);
+      view1 = view0 + span;
+    }} else {{
+      const sx = (W - LEFT2 - RIGHT2) / span;
+      const cx = view0 + (px - LEFT2) / sx;
+      const factor = Math.exp(ev.deltaY * 0.0015);
+      const new_span = clamp(span * factor, 4, total);
+      const new0 = clamp(cx - (cx - view0) * (new_span / span), 0, total - new_span);
       view0 = new0; view1 = new0 + new_span;
     }}
     render();
@@ -1370,7 +1737,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   }});
 
   // Tooltip on task / op-rect hover (uses bubbling so it works while drag is active).
-  svg.addEventListener('mousemove', (ev) => {{
+  function handleTooltip(ev) {{
     if (mode !== 'idle') {{ tip.style.opacity = '0'; return; }}
     const t = ev.target;
     if (t && t.classList && t.classList.contains('gantt-task')) {{
@@ -1399,8 +1766,11 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     }} else {{
       tip.style.opacity = '0';
     }}
-  }});
+  }}
+  svg.addEventListener('mousemove', handleTooltip);
+  if (microSvg) microSvg.addEventListener('mousemove', handleTooltip);
   svg.addEventListener('mouseleave', () => {{ tip.style.opacity = '0'; }});
+  if (microSvg) microSvg.addEventListener('mouseleave', () => {{ tip.style.opacity = '0'; }});
 
   // Click an op-rect → zoom to that layer's window.
   svg.addEventListener('click', (ev) => {{

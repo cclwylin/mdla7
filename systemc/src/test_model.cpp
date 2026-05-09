@@ -629,10 +629,11 @@ int sc_main(int argc, char* argv[]) {
         }
         return std::pair<Descriptor, uint64_t>(d, charged);
     };
-    auto make_store_barrier = [&](uint32_t src_addr, uint32_t dst_addr,
+    auto make_store_barrier = [&](uint32_t layer_idx, uint32_t src_addr, uint32_t dst_addr,
                                   uint8_t signal_tag, uint8_t wait_tag) -> Descriptor {
         Descriptor d = make_udma(src_addr, dst_addr, 1, /*dir*/ 1, signal_tag, wait_tag);
         d.hdr.flags |= DF_STREAM | DF_STREAM_TAIL;  // stream tail: allow safe later prefetches to bypass.
+        d.hdr.layer_id = uint16_t(layer_idx);
         d.hdr.stream_meta_flags = SMF_STORE | SMF_FINAL_TILE;
         return d;
     };
@@ -4057,7 +4058,8 @@ int sc_main(int argc, char* argv[]) {
             }
             if (suppress_producer_store && !single_tile_layer && prev_store) {
                 const uint8_t barrier_tag = alloc_tag();
-                program.push_back(make_store_barrier(last_l1_out_addr, L.dram_out, barrier_tag, prev_store));
+                program.push_back(make_store_barrier(i, last_l1_out_addr, L.dram_out,
+                                                     barrier_tag, prev_store));
                 acc[i].sram_r += 1;
                 acc[i].dram_w += 1;
                 prev_store = barrier_tag;
@@ -4338,7 +4340,7 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
                 const uint8_t barrier_tag = alloc_tag();
-                program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, req_tag));
+                program.push_back(make_store_barrier(i, L1_OUT, L.dram_out, barrier_tag, req_tag));
                 acc[i].sram_r += 1;
                 acc[i].dram_w += 1;
                 layer_done_tag[i] = barrier_tag;
@@ -4588,7 +4590,7 @@ int sc_main(int argc, char* argv[]) {
                     udma_w_skipped[i] = true;
                     udma_w_streamed[i] = true;
                     const uint8_t barrier_tag = alloc_tag();
-                    program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, req_tag));
+                    program.push_back(make_store_barrier(i, L1_OUT, L.dram_out, barrier_tag, req_tag));
                     acc[i].sram_r += 1;
                     acc[i].dram_w += 1;
                     layer_done_tag[i] = barrier_tag;
@@ -4670,7 +4672,8 @@ int sc_main(int argc, char* argv[]) {
                     udma_w_skipped[i] = true;
                     udma_w_streamed[i] = true;
                     const uint8_t barrier_tag = alloc_tag();
-                    program.push_back(make_store_barrier(L1_OUT_t, L.dram_out, barrier_tag, prev_st_tag));
+                    program.push_back(make_store_barrier(i, L1_OUT_t, L.dram_out,
+                                                         barrier_tag, prev_st_tag));
                     acc[i].sram_r += 1;
                     acc[i].dram_w += 1;
                     prev_st_tag = barrier_tag;
@@ -4994,7 +4997,7 @@ int sc_main(int argc, char* argv[]) {
                 }
                 if (suppress_producer_store && prev_st_tag) {
                     const uint8_t barrier_tag = alloc_tag();
-                    program.push_back(make_store_barrier(0, L.dram_out, barrier_tag, prev_st_tag));
+                    program.push_back(make_store_barrier(i, 0, L.dram_out, barrier_tag, prev_st_tag));
                     acc[i].sram_r += 1;
                     acc[i].dram_w += 1;
                     prev_st_tag = barrier_tag;
@@ -5114,7 +5117,8 @@ int sc_main(int argc, char* argv[]) {
                         udma_w_skipped[i] = true;
                         udma_w_streamed[i] = true;
                         const uint8_t barrier_tag = alloc_tag();
-                        program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, prev_tag));
+                        program.push_back(make_store_barrier(i, L1_OUT, L.dram_out,
+                                                             barrier_tag, prev_tag));
                         acc[i].sram_r += 1;
                         acc[i].dram_w += 1;
                         layer_done_tag[i] = barrier_tag;
@@ -5279,7 +5283,7 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
                 const uint8_t barrier_tag = alloc_tag();
-                program.push_back(make_store_barrier(L1_OUT, L.dram_out, barrier_tag, req_tag));
+                program.push_back(make_store_barrier(i, L1_OUT, L.dram_out, barrier_tag, req_tag));
                 acc[i].sram_r += 1;
                 acc[i].dram_w += 1;
                 layer_done_tag[i] = barrier_tag;
@@ -5942,6 +5946,33 @@ int sc_main(int argc, char* argv[]) {
             }
             pf << "]}" << (i+1 < NE ? "," : "") << "\n";
         }
+        pf << "  },\n";
+        auto write_meta_vec = [&](const char* name,
+                                  const std::vector<CommandEngine::TaskMeta>& meta) {
+            pf << "    \"" << name << "\": [";
+            for (size_t j = 0; j < meta.size(); ++j) {
+                const auto& m = meta[j];
+                pf << "{\"layer\": " << m.layer_id
+                   << ", \"mb\": " << m.microblock_id
+                   << ", \"slot\": " << int(m.stream_slot)
+                   << ", \"stream_flags\": " << int(m.stream_meta_flags)
+                   << ", \"flags\": " << int(m.flags)
+                   << ", \"op_class\": " << int(m.op_class)
+                   << ", \"op_subtype\": " << int(m.op_subtype)
+                   << ", \"udma_direction\": " << int(m.udma_direction)
+                   << "}";
+                if (j + 1 < meta.size()) pf << ",";
+            }
+            pf << "]";
+        };
+        pf << "  \"task_meta\": {\n";
+        write_meta_vec("udma_r", sys.cmd.trace_udma_r); pf << ",\n";
+        write_meta_vec("udma_w", sys.cmd.trace_udma_w); pf << ",\n";
+        write_meta_vec("conv", sys.cmd.trace_conv); pf << ",\n";
+        write_meta_vec("requant", sys.cmd.trace_requant); pf << ",\n";
+        write_meta_vec("ewe", sys.cmd.trace_ewe); pf << ",\n";
+        write_meta_vec("pool", sys.cmd.trace_pool); pf << ",\n";
+        write_meta_vec("tnps", sys.cmd.trace_tnps); pf << "\n";
         pf << "  },\n";
         pf << "  \"layers\": [\n";
         for (size_t i = 0; i < profile.size(); ++i) {
