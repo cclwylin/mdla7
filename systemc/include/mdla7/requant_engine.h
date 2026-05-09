@@ -60,6 +60,13 @@ SC_MODULE(RequantEngine) {
             const uint32_t OC_layer = r.scale_count ? r.scale_count : OC;   // params blob covers full layer
             const uint32_t oc_start = r.oc_start;
             const uint64_t total = uint64_t(OH) * OW * OC;
+            const bool d2s_store_req = (r._r[0] == RQ_STORE_D2SPACE);
+            const uint32_t d2s_block = d2s_store_req ? std::max<uint32_t>(1, r._r[1]) : 1;
+            const uint32_t d2s_out_c = d2s_store_req
+                ? uint32_t(r._r[2] | (uint16_t(r._r[3]) << 8))
+                : OC;
+            const bool d2s_store =
+                d2s_store_req && d2s_out_c && OC == d2s_out_c * d2s_block * d2s_block;
             std::cout << "[Requant] " << OH << "x" << OW << "x" << OC
                       << "  oc_start=" << oc_start << "/" << OC_layer
                       << "  scale_lut=0x" << std::hex << r.scale_lut_addr
@@ -158,8 +165,11 @@ SC_MODULE(RequantEngine) {
             int32_t a_max = std::min(act_max, hi);
 
             // Drain chains in NHWC scan order; per-channel requant + activation clamp.
-            std::vector<int16_t> out16(int16_out ? total : 0);
-            std::vector<int8_t>  out8 (int16_out ? 0     : total);
+            const uint64_t dst_total = d2s_store
+                ? uint64_t(OH) * d2s_block * OW * d2s_block * d2s_out_c
+                : total;
+            std::vector<int16_t> out16(int16_out ? dst_total : 0);
+            std::vector<int8_t>  out8 (int16_out ? 0         : dst_total);
             // v8.7 + v8.8: chain backpressure at LANES throughput.
             uint64_t reads = 0;
             for (uint32_t oh = 0; oh < OH; ++oh)
@@ -187,7 +197,16 @@ SC_MODULE(RequantEngine) {
                 int32_t v = scaled + zp_out;
                 if (v < a_min) v = a_min;
                 if (v > a_max) v = a_max;
-                const size_t idx = (oh * OW + ow) * OC + oc;
+                size_t idx = (oh * OW + ow) * OC + oc;
+                if (d2s_store) {
+                    const uint32_t q = d2s_out_c ? (oc / d2s_out_c) : 0;
+                    const uint32_t real_oc = d2s_out_c ? (oc % d2s_out_c) : oc;
+                    const uint32_t bh = d2s_block ? (q / d2s_block) : 0;
+                    const uint32_t bw = d2s_block ? (q % d2s_block) : 0;
+                    const uint32_t out_h = oh * d2s_block + bh;
+                    const uint32_t out_w = ow * d2s_block + bw;
+                    idx = (uint64_t(out_h) * (OW * d2s_block) + out_w) * d2s_out_c + real_oc;
+                }
                 if (int16_out) out16[idx] = int16_t(v);
                 else           out8 [idx] = int8_t (v);
                 if (++reads % LANES == 0) wait(1, sc_core::SC_NS);

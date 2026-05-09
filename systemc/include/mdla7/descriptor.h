@@ -136,6 +136,11 @@ enum StreamMetaFlags : uint8_t {
     SMF_FINAL_TILE = 1 << 4,
 };
 
+enum RequantStoreMode : uint8_t {
+    RQ_STORE_LINEAR = 0,
+    RQ_STORE_D2SPACE = 1,
+};
+
 // 16 bytes — common header.
 struct DescriptorHeader {
     uint8_t  op_class_subtype;   // [3:0]=op_class, [7:4]=op_subtype

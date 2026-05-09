@@ -1155,6 +1155,26 @@ int sc_main(int argc, char* argv[]) {
                 producer_no_store[k] = true;
         }
 
+        // Layout-only TNPS ops can dominate ETHZ/XLSR when modeled as
+        // materialized DRAM round trips.  If GraphMeta says the layout result
+        // feeds a later consumer, the consumer's synthetic input is already
+        // present in the compiled program, while the intended hardware path is
+        // an on-chip handoff.  Suppress the intermediate checkpoint; keep true
+        // final layout outputs visible.
+        for (uint32_t k = 0; k < N; ++k) {
+            const auto& L = metas[k];
+            const auto& G = graph_metas[k];
+            const bool layout_handoff =
+                L.op_kind == OK_CONCAT ||
+                L.op_kind == OK_SLICE ||
+                L.op_kind == OK_STRIDED_SLICE;
+            if (layout_handoff &&
+                G.consumer_count > 0 &&
+                G.last_consumer_layer > int32_t(k)) {
+                producer_no_store[k] = true;
+            }
+        }
+
         // BERT embedding masks lower as GATHER -> same-shape EWE.  The
         // consumer has compiler-materialized input bytes today, so the gather
         // DRAM store is only an intermediate checkpoint.
@@ -2612,6 +2632,9 @@ int sc_main(int argc, char* argv[]) {
                 if (GD.producer0_layer != int32_t(i))
                     return false;
             }
+            const bool direct_d2s_store =
+                graph_metas ? (graph_metas[i + 1].consumer_count == 0)
+                            : (i + 1 == N - 1);
 
             const bool is_dw = (A.op_kind == OK_DWCONV);
             const bool is_fp = (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8);
@@ -2639,8 +2662,8 @@ int sc_main(int argc, char* argv[]) {
                 return align64(uint32_t(params_blob)) +
                        align64(uint32_t(pure_wgt)) +
                        align64(uint32_t(in_bytes)) +
-                       align64(uint32_t(out_bytes)) +
-                       align64(uint32_t(d2s_bytes));
+                       (direct_d2s_store ? 0 : align64(uint32_t(out_bytes))) +
+                       (direct_d2s_store ? 0 : align64(uint32_t(d2s_bytes)));
             };
             while (tile_oh > 1 && bytes_for(tile_oh) + safety > L1_BUDGET)
                 --tile_oh;
@@ -2663,7 +2686,8 @@ int sc_main(int argc, char* argv[]) {
                 align64(uint32_t(L1_IN_STREAM + max_in_bytes));
             const uint32_t L1_D2S_OUT =
                 align64(uint32_t(L1_CONV_OUT + max_out_bytes));
-            if (uint64_t(L1_D2S_OUT) + max_d2s_bytes + safety > L1_BUDGET)
+            if (!direct_d2s_store &&
+                uint64_t(L1_D2S_OUT) + max_d2s_bytes + safety > L1_BUDGET)
                 return false;
 
             auto emit_stream = [&](Descriptor d, const Microblock& mb,
@@ -2768,27 +2792,43 @@ int sc_main(int argc, char* argv[]) {
                 rb.oh_start = uint16_t(oh_done);
                 rb.corr_addr = corr_size ? uint32_t(L1_PARAMS_STREAM + scale_lut_size) : 0u;
                 rb.corr_per_oc = uint8_t(corr_size && is_dw);
-                emit_stream(rd, mb, i, SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                if (direct_d2s_store) {
+                    rb.out_addr = D.dram_out + d2s_dram_off;
+                    rb._r[0] = RQ_STORE_D2SPACE;
+                    rb._r[1] = uint8_t(block);
+                    rb._r[2] = uint8_t(D.out_c & 0xFF);
+                    rb._r[3] = uint8_t((D.out_c >> 8) & 0xFF);
+                }
+                emit_stream(rd, mb, i,
+                            SMF_COMPUTE |
+                            (direct_d2s_store ? SMF_STORE : 0) |
+                            (is_last_h ? SMF_FINAL_TILE : 0));
                 acc[i].sram_r += scale_lut_size;
-                acc[i].sram_w += out_bytes;
+                if (!direct_d2s_store)
+                    acc[i].sram_w += out_bytes;
                 ++requant_count_so_far;
                 last_req[i] = requant_count_so_far;
                 conv_done = req_tag;
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
 
-                const uint8_t d2s_tag = alloc_tag();
-                emit_stream(make_tnps_d2s(L1_CONV_OUT, D.dram_out + d2s_dram_off,
-                                          uint16_t(this_oh), A.out_w, A.out_c,
-                                          block, uint8_t(elem), d2s_tag, req_tag),
-                            mb, i + 1, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0),
-                            true);
-                acc[i + 1].sram_r += out_bytes;
                 acc[i + 1].dram_w += d2s_bytes;
-                ++tnps_count_so_far;
-                last_tnps[i + 1] = tnps_count_so_far;
-                d2s_done = d2s_tag;
-                slot_done = d2s_tag;
+                if (direct_d2s_store) {
+                    d2s_done = req_tag;
+                    slot_done = req_tag;
+                } else {
+                    const uint8_t d2s_tag = alloc_tag();
+                    emit_stream(make_tnps_d2s(L1_CONV_OUT, D.dram_out + d2s_dram_off,
+                                              uint16_t(this_oh), A.out_w, A.out_c,
+                                              block, uint8_t(elem), d2s_tag, req_tag),
+                                mb, i + 1, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0),
+                                true);
+                    acc[i + 1].sram_r += out_bytes;
+                    ++tnps_count_so_far;
+                    last_tnps[i + 1] = tnps_count_so_far;
+                    d2s_done = d2s_tag;
+                    slot_done = d2s_tag;
+                }
             }
 
             tiles_h_per_layer[i] = uint16_t((A.out_h + tile_oh - 1) / tile_oh);
@@ -4846,6 +4886,17 @@ int sc_main(int argc, char* argv[]) {
                     mark_flow_edge(i, i + 1);
                     // Preserve the previous producer's L1-resident output so
                     // the following CONV can fold this PAD into its halo.
+                } else if ((L.op_kind == OK_SLICE || L.op_kind == OK_STRIDED_SLICE) &&
+                           i + 1 < N && is_conv_class_meta(metas[i + 1])) {
+                    if (i > 0)
+                        mark_flow_edge(i - 1, i);
+                    mark_flow_edge(i, i + 1);
+                    fuse_prev_l1_out_addr   = 0;
+                    fuse_prev_l1_out_size   = 0;
+                    fuse_prev_single_tile   = false;
+                    fuse_prev_is_conv_class = false;
+                    clear_prev_binary_ewe_live();
+                    chain_alt = 0;
                 } else {
                     fuse_prev_l1_out_addr   = 0;
                     fuse_prev_l1_out_size   = 0;
@@ -4948,6 +4999,22 @@ int sc_main(int argc, char* argv[]) {
         }
         case OK_CONCAT: {
             flush_pending();
+            if (producer_no_store[i]) {
+                udma_w_skipped[i] = true;
+                udma_w_streamed[i] = true;
+                layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                if (i > 0)
+                    mark_flow_edge(i - 1, i);
+                if (i + 1 < N)
+                    mark_flow_edge(i, i + 1);
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
+                break;
+            }
             const uint8_t st_tag = alloc_tag();
             const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
             program.push_back(make_tnps(L.dram_in, L.dram_out, L.in_size,
