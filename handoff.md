@@ -1,12 +1,13 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-10 03:19:30 CST
+日期時間：2026-05-10 05:49:40 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
-- 最新 microblock commit：`a8dd50f Expand microblock fused pipeline tails`
+- 最新 microblock commit：`d51a330 Strengthen microblock paths 7-10`
+- 前一版 microblock tail commit：`a8dd50f Expand microblock fused pipeline tails`
 - Gantt task-meta commit：`a490aab Add task-meta microblock Gantt timeline`
 - Fast-only runner commit：`09d97cb Implement fused microblock fast-only runners`
 - 工作樹仍有使用者/文件/profile 類未提交修改；不要混進 microblock code commit。
@@ -18,16 +19,23 @@ Branch：`main`
   - microblock stage timeline
 - `task_meta` 已從 Command Engine trace 到 profile JSON，Gantt 用 descriptor metadata 判斷 microblock。
 - `run_*.py` 已統一支援 `--fast-only`。
-- Path 1-6 已可用：
+- Path 1-10 已可用：
   - CONV/DW/FC -> Requant -> store/forward
   - CONV -> Requant -> binary EWE ADD/MUL/SUB -> store/forward
   - CONV -> Requant -> D2SPACE
   - Binary EWE chain -> store/forward
   - Binary EWE chain -> D2SPACE
   - CONV/Requant -> binary EWE -> unary EWE(HARD_SWISH/GELU) -> store/forward
+  - CONV/Requant -> EWE -> POOL/TNPS consumer
+  - POOL -> unary/binary EWE/TNPS consumer
+  - TNPS/layout -> compute consumer handoff for safe GraphMeta boundaries
+  - producer tile -> multiple consumers / concat fanout safe subset
 - 已補強：
   - Binary EWE chain -> unary EWE tail
-  - CONV/Requant -> EWE -> POOL safe subset
+  - CONV/Requant -> EWE -> real-window/global POOL tail
+  - POOL producer microblock tail to binary EWE / unary EWE / D2S(TNPS)
+  - TRANSPOSE/PACK/UNPACK/SPLIT GraphMeta layout handoff no-store
+  - conv fanout generalized to safe CONV/DW/FC row-tiled subset
   - tiled POOL / unary EWE descriptor metadata
   - POOL layer cycle accounting
   - RESHAPE/SQUEEZE/EXPAND_DIMS L1 view passthrough safe subset
@@ -52,45 +60,39 @@ git diff --check
 
 ## GPT2 L2 結論
 
-`MDLA7 profile - gpt2_quant_L24_L63.tflite` 的 L2 目前沒有 microblock。
+`MDLA7 profile - gpt2_quant_L24_L63.tflite` 的 L2 現在有 FC OC-slice microblock。
 
 - L2 是 `FC in=1x1x768 out=1x1x768`
-- `tiles=1x1`
-- profile JSON 沒有 `task_meta` layer 2
-- 有 microblock metadata 的 layer 從 L3 / EWE 類路徑開始
+- `tiles=1x3`，以 256 OC 為預設 slice，3 個 microblocks
+- profile JSON 已有 `task_meta` layer 2：
+  - `udma_r`: input preload + 3 個 weight-slice loads
+  - `conv`: 3 個 FC compute microblocks
+  - `requant`: 3 個 requant microblocks
+- `gpt2_quant_L24_L63`: `42/42 PASS`
 
-原因：
+實作邊界：
 
-- `try_stream_conv_chain()` 目前只吃 `OK_CONV/OK_DWCONV`，不吃 `OK_FC`
-- `try_stream_conv_ewe()` 雖接受 `OK_FC`，但 L2 -> L3 shape 不合：
-  - L2 output `1x1x768`
-  - L3 ADD input `1x77x768`
-- L2 working set 約 583 KB，低於 2 MB L1，不是容量驅動的必切 microblock
-
-若要讓 L2 顯示 microblock，可選：
-
-- 加 single-tile pseudo-microblock metadata，只改善 Gantt 可視性
-- 真做 FC microblock，需決定按 output-channel 切或改 compiler descriptor 表示成 token-batched FC
+- 這版是 `OC slice x full-K`，也就是每個 microblock 載一段 weight rows，
+  input vector / params 留在 L1。
+- 還不是 partial-K accumulation；真的 K-slice 需要 CONV engine 增加 psum
+  buffer / accumulate descriptor 協定。
 
 ## Next To-do
 
-優先強化 Path 7-10，方向如下：
+Path 7-10 已完成 conservative implementation。下一步若要再加強，可做：
 
-1. Path 7 完整化
-   `CONV/Requant -> EWE -> POOL/TNPS consumer`
-   目前 POOL 只支援 safe subset：`1x1 / stride1 / no-pad`。下一步要處理 real window pool 的 tile halo / partial window。
+1. True TNPS tiled kernels
+   目前 `TRANSPOSE/PACK/UNPACK/SPLIT` 對 GraphMeta-confirmed intermediate boundary 會做 no-store handoff；任意 layout permute 的真正 tile kernel仍是後續工作。
 
-2. Path 8 完整化
-   `POOL -> unary/EWE/TNPS consumer`
-   目前 POOL 能被計時與標 metadata，但還不是完整 producer tail model。
+2. Multi-source concat descriptor
+   現在 concat fanout 可以 suppress intermediate stores，但 CONCAT 本身仍主要靠 compiler packed tensor / materialized layout path。
 
-3. Path 9 完整化
-   `TNPS/layout -> CONV or compute consumer`
-   目前只有 RESHAPE/SQUEEZE/EXPAND_DIMS 這種 L1 view safe subset。TRANSPOSE/PACK/UNPACK 還會 materialize，是 GPT/ViT 類模型的主要斷點。
+3. FC partial-K accumulation
+   GPT2 L2 已有 FC OC-slice microblock；若要做到真正 K-slice，CONV engine
+   需要支援多段 partial sum accumulate，再由最後一段觸發 Requant。
 
-4. Path 10 泛化
-   `producer tile -> multiple consumers / concat fanout`
-   目前仍主要是 `conv_fanout` special-case，不是通用 fanout framework。
+4. Wider fanout ownership model
+   目前 fanout 放寬到 safe CONV/DW/FC subset；任意 producer multiple-consumer 仍需更完整的 live-range / slot ownership。
 
 ## 快速命令
 

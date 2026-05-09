@@ -273,6 +273,129 @@ producer：GraphMeta 顯示後面還有 consumer 時，不再把這個 transient
 寫回 DRAM；若現有 fused/tiled path 能保留 L1 layout，就走真 on-chip handoff，
 否則 consumer 仍使用 compiler 已 materialize 的 synthetic input。
 
+## 15.8.4 Path 7：CONV/Requant -> EWE -> POOL/TNPS consumer
+
+`try_stream_conv_ewe()` 現在不只支援 binary/unary/D2S tail，也支援 POOL tail。
+POOL 不再只限 `1x1 / stride1 / no-pad` safe subset；scheduler 會用 consumer
+POOL 的 output row 切 microblock，再反推這個 POOL window 需要的 producer rows：
+
+```text
+producer rows = output rows * pool_stride + pool_kernel - 1
+conv input rows = producer rows * conv_stride + conv_kernel - 1
+```
+
+因此一個 microblock 內可以是：
+
+```text
+UDMA load CONV input rows
+CONV + Requant -> L1 data0
+UDMA load EWE input-B rows
+EWE ADD/MUL/SUB -> L1 data1
+POOL real/global window -> L1 data0
+optional store or forward
+```
+
+這條 path 的限制仍然保守：
+
+- dtype / channel 必須一致。
+- GraphMeta 若存在，producer 必須是 direct single consumer。
+- POOL padding 必須能放進 descriptor 的 3-bit pad field。
+- 任意 overlapping multi-consumer POOL live range 還不走這條。
+
+## 15.8.5 Path 8：POOL -> EWE/TNPS consumer
+
+新增 `try_stream_pool_consumer()`，讓大型 POOL producer 可以直接接後續 consumer，
+不必先完整寫回 DRAM。支援的 tail：
+
+| Tail | Microblock 行為 |
+|---|---|
+| `POOL -> ADD/MUL/SUB` | POOL output tile 當 EWE input-A，載入 input-B tile 後 compute |
+| `POOL -> GELU/HARD_SWISH` | POOL output tile 直接進 unary EWE |
+| `POOL -> D2SPACE` | POOL output tile 交給 TNPS D2S |
+
+這條 path 仍只開 INT8 safe subset，並要求 GraphMeta direct producer-consumer。
+如果 POOL output 本身可以完整留在 L1，舊的 layer-level fuse 仍可用；這條 path
+主要服務 output / input 太大、需要 row microblock 的情況。
+
+## 15.8.6 Path 9：TNPS/layout -> compute consumer
+
+Layout op 現在分兩層看：
+
+- 真 kernel / materialized layout：`TRANSPOSE`、`SLICE`、`STRIDED_SLICE`、
+  `D2SPACE/S2D` 等仍可走 TNPS descriptor。
+- GraphMeta-confirmed intermediate handoff：`TRANSPOSE/PACK/UNPACK/SPLIT`
+  若只是 producer 到後續 compute 的 transient boundary，scheduler 會 suppress
+  DRAM checkpoint，讓 profile/cycle 反映 layout producer -> compute consumer 的
+  on-chip handoff intent。
+
+這不是宣稱任意 transpose 都已經 tile-kernel 化。它的安全假設是 compiler 已經為
+consumer materialize synthetic input bytes；functional correctness 由後續 layer
+verify 錨定。真正的任意 permute tile kernel 仍是後續工作。
+
+## 15.8.7 Path 10：producer fanout
+
+`try_stream_conv_fanout()` 從原本的 `CONV` special-case 放寬到 safe
+`CONV/DWCONV/FC` subset。多個 consecutive branch 若共用同一 logical input，
+且後面接 concat-like boundary，可以共用 input microblock：
+
+```text
+UDMA load shared input tile
+branch0 CONV/DW/FC + Requant
+branch1 CONV/DW/FC + Requant
+...
+logical CONCAT / fanout boundary
+```
+
+目前仍是保守 fanout framework：
+
+- branch 的 spatial shape / dtype / kernel / stride / pad 要匹配。
+- DW 只接受 depthwise-safe shape。
+- FC 只接受 `1x1` output subset。
+- 通用 producer -> multiple arbitrary consumers 還需要更完整的 live-range /
+  slot ownership model。
+
+## 15.8.8 目前 10 path 狀態
+
+| Path | Pipeline | 狀態 |
+|---|---|---|
+| 1 | `CONV/DW/FC -> Requant -> store/forward` | 可用 |
+| 2 | `CONV -> Requant -> EWE ADD/MUL/SUB -> store/forward` | 可用 |
+| 3 | `CONV -> Requant -> D2SPACE` | 可用 |
+| 4 | `ADD/MUL/SUB -> ADD/MUL/SUB -> store/forward` | 可用 |
+| 5 | `ADD/MUL/SUB chain -> D2SPACE` | 可用 |
+| 6 | `CONV/Requant -> EWE -> unary EWE` | 可用 |
+| 7 | `CONV/Requant -> EWE -> POOL/TNPS consumer` | 可用，real-window POOL row microblock |
+| 8 | `POOL -> unary/binary EWE/TNPS consumer` | 可用，INT8 safe subset |
+| 9 | `TNPS/layout -> compute consumer` | 可用於 GraphMeta handoff no-store；true arbitrary layout tile kernel 待補 |
+| 10 | `producer tile -> multiple consumers / concat fanout` | 可用於 safe CONV/DW/FC fanout subset |
+
+---
+
+## 15.8.9 FC OC-slice microblock
+
+`1x1xK -> 1x1xOC` 的 safe FC subset 現在可以用 output-channel slicing
+產生 microblock。這條 path 不是 pseudo metadata；它真的把 weight matrix
+按 OC rows 切成多段：
+
+```text
+load FC params once
+load input vector once
+mb0: UDMA_R weight OC[0:256]   -> FC full-K -> Requant OC[0:256]
+mb1: UDMA_R weight OC[256:512] -> FC full-K -> Requant OC[256:512]
+mb2: UDMA_R weight OC[512:768] -> FC full-K -> Requant OC[512:768]
+```
+
+每個 microblock 的 `Requant.oc_start` 指向原 layer 的 OC offset，output
+slice 寫回完整 output tensor 的對應位置。若 producer store 被 suppress，
+完整 output 仍留在 L1；否則每個 OC slice 以 UDMA_W store drain。
+
+目前邊界：
+
+- 只吃 `OK_FC`、`in/out H=W=1`、`group=1`、非 FP dtype。
+- 預設 `tile_oc=256`，不足時按 16-channel alignment 往下縮。
+- 這是 `OC slice x full-K`；真正 partial-K accumulation 需要 CONV engine
+  增加 psum buffer / accumulate descriptor 協定。
+
 ---
 
 ## 15.9 Stream metadata 和 HTML profile

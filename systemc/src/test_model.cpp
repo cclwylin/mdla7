@@ -1368,11 +1368,15 @@ int sc_main(int argc, char* argv[]) {
                  F.dtype == DT_FP16 || F.dtype == DT_BFP16 || F.dtype == DT_FP8) ? 2u : 1u;
             const uint64_t fc_in_bytes = uint64_t(F.in_h) * F.in_w * F.in_c * fc_elem;
             const uint64_t fc_out_bytes = uint64_t(F.out_h) * F.out_w * F.out_c * fc_elem;
+            const bool fc_oc_slice_candidate =
+                F.in_h == 1 && F.in_w == 1 && F.out_h == 1 && F.out_w == 1 &&
+                F.out_c > 128 && !fc_is_fp && (F.group ? F.group : 1) == 1;
             const uint32_t pref_wgt_l1 = 64u * 1024u;
             const uint64_t pref_top = uint64_t(pref_wgt_l1) + fc_pure_wgt +
                                       fc_in_bytes + fc_out_bytes + fc_params + 4096u;
             const uint64_t cur_working = std::max<uint64_t>(L.in_size, L.ref_size);
-            if (pref_wgt_l1 >= align64(uint32_t(cur_working)) && pref_top <= L1_BUDGET) {
+            if (!fc_oc_slice_candidate &&
+                pref_wgt_l1 >= align64(uint32_t(cur_working)) && pref_top <= L1_BUDGET) {
                 flush_pending();
                 const uint8_t wgt_tag = alloc_tag();
                 Descriptor wd = make_udma(F.dram_wgt, pref_wgt_l1,
@@ -3941,6 +3945,221 @@ int sc_main(int argc, char* argv[]) {
         }
 
         if (try_stream_conv_chain()) {
+            continue;
+        }
+
+        auto try_stream_fc_oc_slices = [&]() -> bool {
+            const auto& A = metas[i];
+            if (A.op_kind != OK_FC) return false;
+            if (A.in_h != 1 || A.in_w != 1 || A.out_h != 1 || A.out_w != 1)
+                return false;
+            if ((A.group ? A.group : 1) != 1) return false;
+            if (A.k_h != 1 || A.k_w != 1 || A.s_h != 1 || A.s_w != 1)
+                return false;
+            if (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8)
+                return false;
+            if (A.out_c <= 128) return false;
+
+            const bool is_int16 =
+                (A.dtype == DT_INT16x16 || A.dtype == DT_INT16x8);
+            const unsigned elem = is_int16 ? 2u : 1u;
+            const uint64_t pure_wgt = conv_pure_weight_bytes(A);
+            const uint64_t pure_wgt_per_oc =
+                pure_wgt / std::max<uint32_t>(A.out_c, 1u);
+            if (pure_wgt_per_oc == 0) return false;
+            const uint64_t scale_lut_size = 12 + 9 * uint64_t(A.out_c);
+            const uint64_t corr_size =
+                (uint64_t(A.wgt_size) > pure_wgt + scale_lut_size)
+                ? (uint64_t(A.wgt_size) - pure_wgt - scale_lut_size) : 0;
+            const uint64_t params_blob = scale_lut_size + corr_size;
+            const uint64_t in_bytes = uint64_t(A.in_c) * elem;
+            const uint64_t out_bytes = uint64_t(A.out_c) * elem;
+            const uint64_t safety = 65536;
+
+            uint32_t tile_oc = std::min<uint32_t>(256, A.out_c);
+            if (tile_oc >= 16) tile_oc = (tile_oc / 16) * 16;
+            if (tile_oc < 16) return false;
+            auto fits = [&](uint32_t toc) {
+                const uint64_t wgt_slot = align64(uint32_t(toc * pure_wgt_per_oc));
+                const uint64_t total =
+                    align64(uint32_t(params_blob)) +
+                    align64(uint32_t(in_bytes)) +
+                    align64(uint32_t(out_bytes)) +
+                    2ull * wgt_slot + safety;
+                return total <= L1_BUDGET;
+            };
+            while (tile_oc >= 32 && !fits(tile_oc))
+                tile_oc = uint32_t((tile_oc / 2) & ~15u);
+            if (tile_oc < 16 || !fits(tile_oc) || tile_oc >= A.out_c)
+                return false;
+
+            flush_pending();
+
+            const uint32_t L1_PARAMS_FC = 0;
+            const uint32_t L1_IN_FC = align64(uint32_t(params_blob));
+            const uint32_t L1_OUT_FC = align64(uint32_t(L1_IN_FC + in_bytes));
+            const uint32_t L1_WGT0_FC = align64(uint32_t(L1_OUT_FC + out_bytes));
+            const uint32_t wgt_slot_bytes =
+                align64(uint32_t(tile_oc * pure_wgt_per_oc));
+            const uint32_t L1_WGT1_FC = align64(uint32_t(L1_WGT0_FC + wgt_slot_bytes));
+            if (uint64_t(L1_WGT1_FC) + wgt_slot_bytes + safety > L1_BUDGET)
+                return false;
+
+            const bool suppress_producer_store = producer_no_store[i];
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            const uint8_t params_tag = alloc_tag();
+            Descriptor pd = make_udma(A.dram_wgt + uint32_t(pure_wgt),
+                                      L1_PARAMS_FC, uint32_t(params_blob),
+                                      /*dir*/ 0, params_tag,
+                                      (i > 0) ? layer_done_tag[i - 1] : 0);
+            program.push_back(pd);
+            acc[i].dram_r += params_blob;
+            acc[i].sram_w += params_blob;
+            ++udma_count_so_far;
+            last_udma[i] = udma_count_so_far;
+
+            const uint8_t in_tag = alloc_tag();
+            auto [id, charged] = make_act_load(A, A.dram_in, L1_IN_FC,
+                                               uint32_t(in_bytes), in_tag,
+                                               (i > 0) ? layer_done_tag[i - 1] : 0);
+            Microblock input_mb{};
+            input_mb.id = 0;
+            input_mb.slot = 0;
+            input_mb.elems = A.in_c;
+            input_mb.bytes = uint32_t(in_bytes);
+            mark_stream(id, i, input_mb, SMF_LOAD_A);
+            program.push_back(id);
+            acc[i].dram_r += charged;
+            acc[i].sram_w += in_bytes;
+            ++udma_count_so_far;
+            last_udma[i] = udma_count_so_far;
+
+            uint8_t slot_free_tag[2] = {0, 0};
+            uint8_t prev_done = in_tag;
+            uint32_t oc_done = 0;
+            uint16_t mb_id = 0;
+            while (oc_done < A.out_c) {
+                const uint32_t this_oc = std::min<uint32_t>(tile_oc, A.out_c - oc_done);
+                const uint8_t slot = uint8_t(mb_id & 1u);
+                const bool final_mb = (oc_done + this_oc == A.out_c);
+                const uint32_t wgt_bytes = uint32_t(this_oc * pure_wgt_per_oc);
+                const uint32_t out_slice_bytes = this_oc * elem;
+                const uint32_t wgt_l1 = slot ? L1_WGT1_FC : L1_WGT0_FC;
+                const uint32_t out_l1 = L1_OUT_FC + oc_done * elem;
+
+                Microblock mb{};
+                mb.id = mb_id;
+                mb.slot = slot;
+                mb.elem_off = oc_done;
+                mb.rows = 1;
+                mb.elems = this_oc;
+                mb.bytes = out_slice_bytes;
+
+                const uint8_t wgt_tag = alloc_tag();
+                Descriptor wd = make_udma(A.dram_wgt + uint32_t(oc_done * pure_wgt_per_oc),
+                                          wgt_l1, wgt_bytes,
+                                          /*dir*/ 0, wgt_tag, slot_free_tag[slot]);
+                mark_stream(wd, i, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(wd);
+                acc[i].dram_r += wgt_bytes;
+                acc[i].sram_w += wgt_bytes;
+                ++udma_count_so_far;
+                last_udma[i] = udma_count_so_far;
+
+                Descriptor cd = make_desc(OC_CONV, uint8_t(A.dtype),
+                                          /*signal*/ 0, wgt_tag, in_tag);
+                auto& cb = cd.body.conv;
+                cb.in_addr = L1_IN_FC;
+                cb.wgt_addr = wgt_l1;
+                cb.out_addr = out_l1;
+                cb.in_h = 1;
+                cb.in_w = 1;
+                cb.in_c = A.in_c;
+                cb.out_c = uint16_t(this_oc);
+                cb.k_h = 1;
+                cb.k_w = 1;
+                cb.stride_dilation = encode_conv_stride_pair(1, 1);
+                cb.pad_tb = 0;
+                cb.pad_lr = 0;
+                cb._r0 = CONV_DF_WS;
+                cb.group = 1;
+                cb.cluster_mask = 0xFFFF;
+                cb.in_pad_value = A.zp_in_eff;
+                mark_stream(cd, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(cd);
+                acc[i].sram_r += in_bytes + wgt_bytes;
+
+                const uint8_t req_tag = alloc_tag();
+                Descriptor rd = make_desc(OC_REQUANT, uint8_t(A.dtype),
+                                          /*signal*/ req_tag, params_tag, wgt_tag);
+                auto& rb = rd.body.requant;
+                rb.in_addr = 0;
+                rb.out_addr = out_l1;
+                rb.n = 1;
+                rb.h = 1;
+                rb.w = 1;
+                rb.c = uint16_t(this_oc);
+                rb.scale_lut_addr = L1_PARAMS_FC;
+                rb.scale_count = A.out_c;
+                rb.oc_start = uint16_t(oc_done);
+                rb.per_channel_flag = 1;
+                rb.out_w_layer = 1;
+                rb.oh_start = 0;
+                rb.corr_addr = corr_size ? uint32_t(L1_PARAMS_FC + scale_lut_size) : 0u;
+                rb.corr_per_oc = 0;
+                mark_stream(rd, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(rd);
+                acc[i].sram_r += scale_lut_size;
+                acc[i].sram_w += out_slice_bytes;
+                ++requant_count_so_far;
+                last_req[i] = requant_count_so_far;
+
+                if (suppress_producer_store) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                    prev_done = req_tag;
+                    slot_free_tag[slot] = req_tag;
+                } else {
+                    const uint8_t store_tag = alloc_tag();
+                    Descriptor sd = make_udma(out_l1,
+                                              uint32_t(uint64_t(A.dram_out) + oc_done * elem),
+                                              out_slice_bytes,
+                                              /*dir*/ 1, store_tag, req_tag);
+                    mark_stream(sd, i, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(sd);
+                    acc[i].sram_r += out_slice_bytes;
+                    acc[i].dram_w += out_slice_bytes;
+                    ++udma_count_so_far;
+                    last_udma[i] = udma_count_so_far;
+                    prev_done = store_tag;
+                    slot_free_tag[slot] = store_tag;
+                }
+
+                oc_done += this_oc;
+                ++mb_id;
+            }
+
+            layer_done_tag[i] = prev_done;
+            tiles_h_per_layer[i] = 1;
+            tiles_oc_per_layer[i] = uint16_t((A.out_c + tile_oc - 1) / tile_oc);
+            udma_count_at_layer_end[i] = last_udma[i];
+            requant_count_at_layer_end[i] = last_req[i];
+
+            fuse_prev_l1_out_addr = L1_OUT_FC;
+            fuse_prev_l1_out_size = uint32_t(out_bytes);
+            fuse_prev_done_tag = prev_done;
+            fuse_prev_out_h = A.out_h;
+            fuse_prev_out_w = A.out_w;
+            fuse_prev_out_c = A.out_c;
+            fuse_prev_dtype = A.dtype;
+            fuse_prev_single_tile = true;
+            fuse_prev_is_conv_class = true;
+            clear_prev_binary_ewe_live();
+            chain_alt = 1;
+            return true;
+        };
+
+        if (try_stream_fc_oc_slices()) {
             continue;
         }
 
