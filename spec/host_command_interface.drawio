@@ -1,0 +1,132 @@
+<mxfile host="65bd71144e">
+    <diagram name="Host-Command-Interface" id="host-command-interface-v1">
+        <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="MDLA7 Host to Command Engine Interface" style="text;html=1;fontSize=26;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="30" width="900" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="subtitle" value="Programming model: AXI-Lite CSR + DRAM descriptor ring + MMIO doorbell + IRQ/status" style="text;html=1;fontSize=14;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="72" width="950" height="26" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="host" value="Host&lt;br/&gt;(RISC-V)&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;compiler / runtime&lt;br/&gt;descriptor producer&lt;br/&gt;ISR / status polling&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=18;fontStyle=1;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="70" y="210" width="220" height="140" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="csr" value="AXI-Lite CSR Slave&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;4 KB MMIO window&lt;br/&gt;ring base / size&lt;br/&gt;tail_ptr doorbell&lt;br/&gt;head_ptr / status&lt;br/&gt;IRQ clear / debug&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;fontStyle=1;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="430" y="170" width="260" height="190" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="cmdhost" value="Command / Host Interface&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;CSR decode&lt;br/&gt;ring head/tail tracking&lt;br/&gt;descriptor fetch DMA&lt;br/&gt;completion/status writeback&lt;br/&gt;IRQ generation&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=18;fontStyle=1;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="810" y="170" width="300" height="190" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="cmdeng" value="Command Engine&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;64 B descriptor decode&lt;br/&gt;dependency tracker&lt;br/&gt;per-engine dispatch queues&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=18;fontStyle=1;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="1250" y="170" width="280" height="150" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="engines" value="NPU Engines&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;CONV / Requant / EWE / POOL / TNPS / UDMA&lt;br/&gt;config via W 1T payload&lt;br/&gt;done tag returns to Command Engine&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=16;fontStyle=1;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="1250" y="490" width="280" height="140" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="dram" value="DRAM 4 GB Shared Address Space&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal;color:#444444&quot;&gt;LPDDR5X-10667; host-visible command and status buffers live here&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=18;fontStyle=1;align=left;verticalAlign=top;spacingLeft=16;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="170" y="650" width="1050" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="ring" value="Descriptor Ring&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal&quot;&gt;256 entries x 64 B = 16 KB&lt;br/&gt;Host writes descriptors&lt;br/&gt;Command Interface fetches by head/tail&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="220" y="730" width="260" height="105" as="geometry"/>
+                </mxCell>
+                <mxCell id="metadata" value="Descriptor Stream / Tensor Metadata&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal&quot;&gt;optional tables&lt;br/&gt;TNPS metadata&lt;br/&gt;scale LUT pointers&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="730" width="260" height="105" as="geometry"/>
+                </mxCell>
+                <mxCell id="status" value="Completion / Status Buffer&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal&quot;&gt;layer/model done&lt;br/&gt;error code&lt;br/&gt;profiling/debug data&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="900" y="730" width="260" height="105" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="legend" value="Legend&lt;br/&gt;&lt;span style=&quot;font-size:12px;font-weight:normal&quot;&gt;&lt;font color=&quot;#888888&quot;&gt;gray dashed&lt;/font&gt;: AXI-Lite MMIO / IRQ control&lt;br/&gt;&lt;font color=&quot;#0050ef&quot;&gt;blue&lt;/font&gt;: DRAM AXI master traffic&lt;br/&gt;&lt;font color=&quot;#82b366&quot;&gt;green&lt;/font&gt;: internal descriptor/config dispatch&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=14;fontStyle=1;align=left;verticalAlign=top;spacingLeft=12;spacingTop=8;" parent="1" vertex="1">
+                    <mxGeometry x="70" y="450" width="320" height="120" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="e_host_csr_wr" value="MMIO write&lt;br/&gt;base/size/tail_ptr doorbell" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;fontSize=11;fontColor=#444444;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="host" target="csr" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="290" y="250" as="sourcePoint"/>
+                        <mxPoint x="430" y="250" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_csr_host_rd" value="MMIO read&lt;br/&gt;head/status/debug" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;fontSize=11;fontColor=#444444;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="csr" target="host" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="560" y="390"/>
+                            <mxPoint x="180" y="390"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_csr_cmdhost" value="CSR sideband control" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;fontSize=11;fontColor=#444444;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="csr" target="cmdhost" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_irq" value="interrupt / done status" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1.5;dashed=1;fontSize=11;fontColor=#444444;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdhost" target="host" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="960" y="120"/>
+                            <mxPoint x="180" y="120"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+
+                <mxCell id="e_host_ring" value="Host memcpy&lt;br/&gt;64 B descriptors" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="host" target="ring" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="180" y="610"/>
+                            <mxPoint x="350" y="610"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_host_status" value="Host reads completion&lt;br/&gt;or ISR checks status" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="status" target="host" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1030" y="910"/>
+                            <mxPoint x="90" y="910"/>
+                            <mxPoint x="90" y="300"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_cmdhost_ring" value="DRAM AXI master&lt;br/&gt;fetch command ring" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdhost" target="ring" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="960" y="610"/>
+                            <mxPoint x="350" y="610"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_cmdhost_meta" value="read metadata / tables" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdhost" target="metadata" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="960" y="610"/>
+                            <mxPoint x="690" y="610"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e_cmdhost_status" value="write completion / profile" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;strokeWidth=2;fontSize=11;fontColor=#0050ef;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdhost" target="status" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="e_cmdhost_cmdeng" value="decoded 64 B descriptor" style="endArrow=classic;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;fontSize=11;fontColor=#2d7600;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdhost" target="cmdeng" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_cmdeng_engines" value="W 1T config dispatch" style="endArrow=classic;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;fontSize=11;fontColor=#2d7600;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="cmdeng" target="engines" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_engines_done" value="done tag / error" style="endArrow=classic;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;fontSize=11;fontColor=#2d7600;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;" parent="1" source="engines" target="cmdeng" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1540" y="560"/>
+                            <mxPoint x="1580" y="560"/>
+                            <mxPoint x="1580" y="245"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
