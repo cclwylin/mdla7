@@ -7,6 +7,7 @@ Usage:
     ./batch/run_ethz_v6.py --limit 3
     ./batch/run_ethz_v6.py --offset 3 --limit 3
     ./batch/run_ethz_v6.py --rerun-all
+    ./batch/run_ethz_v6.py --fast-only
 """
 
 from __future__ import annotations

@@ -141,6 +141,11 @@ enum RequantStoreMode : uint8_t {
     RQ_STORE_D2SPACE = 1,
 };
 
+enum ConvDataflowMode : uint8_t {
+    CONV_DF_OS = 0,
+    CONV_DF_WS = 1,
+};
+
 // 16 bytes — common header.
 struct DescriptorHeader {
     uint8_t  op_class_subtype;   // [3:0]=op_class, [7:4]=op_subtype

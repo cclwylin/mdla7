@@ -53,7 +53,8 @@ inline uint64_t conv_cycles(const ConvBody& c, DType dtype, uint64_t out_count) 
     // multi-tile layer naturally accumulates fills. With the 2 MB L1 in
     // test_model.cpp emitting per-tile CONV descriptors, this is now the
     // dominant overhead for layers that don't fit single-shot.
-    return (bit_mult + 1048575) / 1048576 + 64;
+    const uint64_t fill = (c._r0 == CONV_DF_WS) ? 48 : 64;
+    return (bit_mult + 1048575) / 1048576 + fill;
 }
 
 SC_MODULE(ConvEngine) {
@@ -93,7 +94,8 @@ SC_MODULE(ConvEngine) {
                       << "  s=" << s_h << "x" << s_w
                       << "  pad=" << pad_t << "/" << pad_l
                       << "  out=" << out_h << "x" << out_w << "x" << c.out_c
-                      << "  dtype=" << int(dt) << "\n";
+                      << "  dtype=" << int(dt)
+                      << "  df=" << ((c._r0 == CONV_DF_WS) ? "WS" : "OS") << "\n";
 
             if (dt == DT_INT8x8) {
                 compute_int<int8_t, int8_t>(c, s_h, s_w, pad_t, pad_l, out_h, out_w);

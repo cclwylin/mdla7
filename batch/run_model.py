@@ -15,6 +15,7 @@ Usage:
   ./run_model.py --list                # list bundled models
   ./run_model.py --all                 # try every INT8 model
   ./run_model.py --layer N             # legacy: run only one CONV layer
+  ./run_model.py <pattern> --fast-only # alias for --l1-timing fast
   ./run_model.py <pattern> --l1-timing conflict
   ./run_model.py <pattern> --l1-timing mesh
 """
@@ -1755,7 +1756,11 @@ def main():
     ap.add_argument("--l1-timing", choices=("fast", "conflict", "mesh"), default="fast",
                     help="L1Mesh timing mode: fast aggregate estimate (default) "
                          "or per-bank SRAM port conflict model, or 4x4 mesh router/link conflict model")
+    ap.add_argument("--fast-only", action="store_true",
+                    help="alias for --l1-timing fast, matching sweep runners")
     args = ap.parse_args()
+    if args.fast_only:
+        args.l1_timing = "fast"
     global _keep_intermediate
     _keep_intermediate = bool(args.keep_intermediate)
 

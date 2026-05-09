@@ -7,6 +7,7 @@ Usage:
     ./batch/run_mlperf.py --limit 3
     ./batch/run_mlperf.py --offset 3 --limit 3
     ./batch/run_mlperf.py --rerun-all
+    ./batch/run_mlperf.py --fast-only
 """
 
 from __future__ import annotations

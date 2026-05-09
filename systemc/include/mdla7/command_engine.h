@@ -130,7 +130,11 @@ SC_MODULE(CommandEngine) {
         case OC_CONV:    base = 30; break;
         case OC_REQUANT: base = 40; break;
         case OC_POOL:    base = 40; break;
-        case OC_TNPS:    base = 45; break;
+        case OC_TNPS:
+            // Layout consumers often wait on a producer microblock prefix. Let
+            // ready TNPS work launch before filling more same-engine compute
+            // FIFO entries, so it can overlap with the producer's tail.
+            base = 8; break;
         default:         base = 70; break;
         }
         // Microblock wavefront tie-breaker: keep work roughly in tile order

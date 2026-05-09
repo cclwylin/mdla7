@@ -37,13 +37,14 @@ def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
     return out
 
 
-def _load_prior_results(csv_path: Path) -> dict[str, dict]:
-    return {
-        p: r for p, r in _load_prior_csv(csv_path).items()
-        if r.get("status") == "ok" and r.get("mdla7_ms") and
-        r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
-        r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")
-    }
+def _load_prior_results(csv_path: Path, fast_only: bool = False) -> dict[str, dict]:
+    rows = {p: r for p, r in _load_prior_csv(csv_path).items()
+            if r.get("status") == "ok" and r.get("mdla7_ms")}
+    if fast_only:
+        return rows
+    return {p: r for p, r in rows.items()
+            if r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
+            r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")}
 
 
 def _discover_models(model_dir: Path, name_filter: str) -> list[str]:
@@ -109,6 +110,8 @@ def run_corpus(*,
                     help="skip the first N selected models before applying --limit")
     ap.add_argument("--rerun-all", action="store_true",
                     help="ignore prior --csv-out cache and re-run everything")
+    ap.add_argument("--fast-only", action="store_true",
+                    help="run only fast mode; leave conflict/mesh CSV fields empty")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
     ap.add_argument("--list", action="store_true",
@@ -139,7 +142,7 @@ def run_corpus(*,
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     prior_full = _load_prior_csv(csv_path)
-    prior_ok = {} if args.rerun_all else _load_prior_results(csv_path)
+    prior_ok = {} if args.rerun_all else _load_prior_results(csv_path, fast_only=args.fast_only)
     if prior_ok:
         print(f"  (cache: {len(prior_ok)} prior ok rows in {csv_path.name}; "
               f"--rerun-all to ignore)", flush=True)
@@ -178,21 +181,25 @@ def run_corpus(*,
     for i, pat in enumerate(patterns, 1):
         if pat in prior_ok and _report_exists_for(pat, model_dir):
             cached = prior_ok[pat]
+            cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
+            cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
+            cached_conflict_status = "" if args.fast_only else cached.get("conflict_status", "ok")
+            cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
+            suffix = (cached.get("status", "ok") if args.fast_only
+                      else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}")
             _row_print(f"[{i:>2}/{len(patterns)}] {pat:<42s} "
                        f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
-                       f"conflict={_ms_cell(cached.get('mdla7_conflict_ms', ''))} "
-                       f"mesh={_ms_cell(cached.get('mdla7_mesh_ms', ''))} cached  "
-                       f"{cached.get('status', 'ok')}/"
-                       f"{cached.get('conflict_status', 'ok')}/"
-                       f"{cached.get('mesh_status', 'ok')}")
+                       f"conflict={_ms_cell(cached_conflict_ms)} "
+                       f"mesh={_ms_cell(cached_mesh_ms)} cached  "
+                       f"{suffix}")
             rows_out.append({
                 "pattern": pat,
                 "mdla7_ms": cached.get("mdla7_ms", ""),
-                "mdla7_conflict_ms": cached.get("mdla7_conflict_ms", ""),
-                "mdla7_mesh_ms": cached.get("mdla7_mesh_ms", ""),
+                "mdla7_conflict_ms": cached_conflict_ms,
+                "mdla7_mesh_ms": cached_mesh_ms,
                 "status": cached.get("status", "ok"),
-                "conflict_status": cached.get("conflict_status", "ok"),
-                "mesh_status": cached.get("mesh_status", "ok"),
+                "conflict_status": cached_conflict_status,
+                "mesh_status": cached_mesh_status,
             })
             _checkpoint(rows_out)
             continue
@@ -206,17 +213,18 @@ def run_corpus(*,
                         f"running {stage}...")
 
         _, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
-            pat, model_dir, progress=_progress)
+            pat, model_dir, progress=_progress, fast_only=args.fast_only)
         elapsed = time.time() - t0
         ms_str = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         conflict_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
                         else f"{'—':>10s}    ")
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
+        suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
         _row_print(f"[{i:>2}/{len(patterns)}] {pat:<42s} "
                    f"fast={ms_str} conflict={conflict_str} mesh={mesh_str}  "
                    f"({elapsed:5.1f}s)  "
-                   f"{status}/{conflict_status}/{mesh_status}")
+                   f"{suffix}")
         rows_out.append({
             "pattern": pat,
             "mdla7_ms": f"{ms:.3f}" if ms is not None else "",
@@ -244,11 +252,16 @@ def run_corpus(*,
     n_mesh = sum(1 for r in rows_out if r.get("mdla7_mesh_ms"))
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
     total_s = time.time() - t_total
-    print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
-          f"conflict {n_conflict}/{len(rows_out)} ran, "
-          f"mesh {n_mesh}/{len(rows_out)} ran, "
-          f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
-          flush=True)
+    if args.fast_only:
+        print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
+              f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
+              flush=True)
+    else:
+        print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
+              f"conflict {n_conflict}/{len(rows_out)} ran, "
+              f"mesh {n_mesh}/{len(rows_out)} ran, "
+              f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
+              flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_profile_index(profile_title, profile_html, csv_path)
     print(f"html: {HERE / profile_html}", flush=True)

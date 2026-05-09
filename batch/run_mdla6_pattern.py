@@ -610,10 +610,15 @@ def main():
     n_fail  = len(rows_out) - n_ok
     total_s = time.time() - t_total
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r["mdla7_ms"])
-    print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran, "
-          f"conflict {n_conflict_ok}/{len(rows_out)} ran, "
-          f"mesh {n_mesh_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
-          f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
+    if args.fast_only:
+        print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran "
+              f"({n_fail} skipped/failed),"
+              f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
+    else:
+        print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran, "
+              f"conflict {n_conflict_ok}/{len(rows_out)} ran, "
+              f"mesh {n_mesh_ok}/{len(rows_out)} ran  ({n_fail} skipped/failed),"
+              f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()
     print(f"html: {HERE / 'profile_mdla6_pattern.html'}", flush=True)
