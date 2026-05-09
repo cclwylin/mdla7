@@ -3832,7 +3832,7 @@ UDMA extra  ~= 16 cycles per descriptor
 
 ## 4.27 Activation Compression 在 memory hierarchy 的位置
 
-當 profile 顯示 `UDMA_R` 長期 dominate，代表 DRAM→L1 的 activation load 可能比 compute 更重要。這時可以考慮在 memory hierarchy 加一個 ACT compression/decompression path。
+ACT compression/decompression path 已正式納入 v1 spec。當 profile 顯示 `UDMA_R` 長期 dominate，代表 DRAM→L1 的 activation load 可能比 compute 更重要，ACTC 就是 memory hierarchy 的標準解法之一。
 
 最保守的設計是：
 
@@ -3861,7 +3861,7 @@ L1 compressed activation -> CONV on-the-fly decompress
 | cycle model | 每個 MAC 讀 operand 前可能有 decompress latency |
 | L1 lifetime | compressed block 和 raw window cache 都要管理 |
 
-所以教材建議先做 DRAM compressed、L1 decompressed。
+所以 v1 spec 固定採用 DRAM compressed、L1 decompressed。
 
 ### 4.27.1 新增 UDMA mode 的想法
 
@@ -10783,7 +10783,7 @@ DRAM compressed ACT
     -> CONV / EWE / POOL / REQUANT existing path
 ```
 
-第一版建議只做：
+v1 固定採用：
 
 ```text
 DRAM compressed, L1 decompressed
@@ -10819,16 +10819,16 @@ UDMA_W + ACT_COMP:
 
 ### 21.13.2 Compression format 要保守
 
-第一版不要追求最強壓縮率，要追求硬體簡單、latency 可估、worst case 安全。
+v1 不追求最強壓縮率，要追求硬體簡單、latency 可估、worst case 安全。
 
 建議 block granularity：
 
 | 欄位 | 建議 |
 |---|---|
-| block size | 64B 或 128B raw block |
+| block size | 128B raw block |
 | granularity | row-major NHWC，盡量不要跨太多 row |
 | dtype | INT8 / INT16 / FP16 都以 storage byte stream 處理 |
-| metadata | per-block offset + compressed length + raw flag |
+| metadata | per-block compressed length + raw flag；offset v1 用 sequential stream implicit |
 | fallback | compressed size >= raw size 時存 raw |
 
 可先支援的 lossless scheme：
@@ -10938,7 +10938,7 @@ after:
 4. ACT read 還是很大？才考慮 ACT compression。
 ```
 
-ACT compression 是硬體資源，不是 scheduling 小修。它適合放在 architecture roadmap，並用 simulator 先做趨勢實驗。
+ACT compression 是硬體資源，不是 scheduling 小修。它已進 v1 spec；simulator 用 conservative ratio / raw fallback 先估趨勢，RTL 需實作 lossless 128B block codec。
 
 ---
 

@@ -22,7 +22,7 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
                                                    4G DRAM
 ```
 
-- **Host 控制流**：RISC-V 把 NN graph 編成 descriptor stream（含 dependency tag），送進 Command Engine。
+- **Host 控制流**：RISC-V 透過 AXI-Lite register map 設定 Command/Host interface，並由 command ring / descriptor doorbell 啟動 Command Engine。Command/Host interface 具 DRAM AXI master，可直接讀寫 DRAM command buffer / descriptor / status buffer。
 - **NPU 內控制流**：Command Engine 含 **dependency tracker**，依 tag 狀態 dispatch task 給各 Engine（透過 `W` 1T 介面）。Engine 完成後上報 done tag。
 - **資料流**：DRAM (LPDDR5X-10667) ⇄ UDMA ⇄ L1_Manager ⇄ non-CONV engines / L1Mesh；CONV ACT/WGT read 直接接 L1Mesh。
 - CONV ACT/WGT direct path bypass L1_Manager；L1_Manager 作為 Requant / EWE / POOL / TNPS / UDMA 的 on-chip 記憶體仲裁中心。
@@ -33,8 +33,8 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 
 | 層 | Block | 容量 / 寬度 | 角色 |
 |---|---|---|---|
-| Host | **Host (RISC-V)** | SoC 主 CPU | NN compiler、runtime、descriptor 產生器、ISR；下發 descriptor 給 Command Engine `[TBD]`：core 數、ISA extension、SoC 上是內嵌 NPU 還是外掛 |
-| Ctrl | **Command Engine** | top controller | 解 host 下來的 descriptor，把 layer 拆成 micro-op 派給各 Engine |
+| Host | **Host (RISC-V)** | SoC 主 CPU | NN compiler、runtime、descriptor 產生器、ISR；透過 AXI-Lite MMIO register map 控制 Command Engine，command/descriptor buffer 放 DRAM |
+| Ctrl | **Command Engine** | top controller + DRAM AXI master | 解 host 下來的 descriptor，把 layer 拆成 micro-op 派給各 Engine；可透過 DRAM AXI master fetch command ring / descriptor 並回寫 status |
 | Compute | **CONV Engine** | **65,536 4×4 base cell**（16 cluster，4 個帶 FP）| Convolution / MAC 主運算；bit-decomposable，hybrid INT+FP；見 §3A.4 |
 | Compute | **Requant Engine** | — | INT8/INT32 重新量化（scale + shift + zero-point）`[TBD]` |
 | Compute | **EWE Engine** | — | Element-Wise（add / mul / activation, ReLU 系），**64 elem/cyc** |
@@ -55,9 +55,26 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 |---|---|---|
 | **藍色線** | **Payload lane** | 每條 beat **128 bits = 16 bytes**，內部自訂 handshake |
 | **白色線** | **單拍 (1T) payload**，無 AXI 協議 | 視 payload 大小，假設一個 cycle 寫完 |
-| 線旁邊的數字 | **該方向 Payload lane 的條數**（並列度） | **暫定值，後續會評估修改** |
+| 線旁邊的數字 | **該方向 Payload lane 的條數**（並列度） | **v1 frozen**，RTL / cycle model 以本表為準 |
 
 → 同一條 link 的「總頻寬 = 條數 × 16 bytes/cycle」。下表的數字都是「條數」。
+
+### 3.0b Command / Host interface
+
+Command / Host interface 是 SoC control plane 與 NPU command plane 的邊界：
+
+| Interface | Direction | Role |
+|---|---|---|
+| AXI-Lite register map | Host CPU ↔ Command Engine | MMIO control/status，包含 command ring base/size、doorbell、interrupt/status、profiling/debug register |
+| DRAM AXI master | Command Engine / Host interface → DRAM | 直接讀 command buffer / descriptor stream / tensor metadata，並回寫 completion/status buffer |
+| Interrupt / done status | Command Engine → Host CPU | layer/model completion、error、profile done |
+
+Runtime path：
+
+1. Host 在 DRAM 建好 command ring / descriptor buffer。
+2. Host 透過 AXI-Lite register map 寫入 base/size/control，敲 doorbell。
+3. Command Engine 透過 DRAM AXI master fetch descriptor，依 dependency tag dispatch 到 engines。
+4. 完成後 Command Engine 回寫 DRAM status buffer，並更新 AXI-Lite status / interrupt。
 
 ### 3.1 各 Engine memory interface（藍線 = Payload 16B × N）
 
@@ -78,6 +95,7 @@ opcode = READ_REQ / READ_RESP / WRITE_REQ / WRITE_ACK
 | POOL | — | — | 16 | 8 | R: **256 B/cyc**；W: **128 B/cyc** |
 | **TNPS** | — | — | **8** | **8** | R: **128 B/cyc**；W: **128 B/cyc**（讀寫對稱：每個 element 一進一出） |
 
+- **Payload lane count is frozen for v1 silicon target**：CONV ACT_R=32、CONV WGT_R=32、Requant=8R/8W、EWE=16R/8W、POOL=16R/8W、TNPS=8R/8W。後續 performance tuning 不再改 lane 數；若 RTL PPA 要調整，需開 v2 spec revision。
 - CONV ACT/WGT read **各自有 CONV 專用線直接接 L1Mesh，不經過 L1_Manager**（32 組 ACT_R + 32 組 WGT_R，兩組 Payload R lane 彼此獨立）。
 - CONV 的輸出（INT32 partial sum）**不直接寫回 L1**；推測有專用 chain 路徑串到 Requant Engine（路徑形式 `[TBD]`，見 §6.2）。
 - Requant / EWE / POOL / TNPS：保留 Payload R + Payload W，partial sum / output / 重排後 tensor 透過 L1_Manager 仲裁進出 L1Mesh。
@@ -85,11 +103,12 @@ opcode = READ_REQ / READ_RESP / WRITE_REQ / WRITE_ACK
 
 L1_Manager 入口有 arbiter，但 CONV ACT/WGT read 不進 L1_Manager。
 CONV read 以 ACT_R / WGT_R 兩組 dedicated L1Mesh path 取得最高服務優先權，避免 compute cluster starvation。
-L1_Manager 入口 priority 目前定義為：
+L1_Manager 入口 arbitration policy **v1 frozen = round-robin**：
 
-1. Requant writeback / parameter read。
-2. EWE / POOL / TNPS。
-3. UDMA background load/store。
+- Arbiter participants：Requant / EWE / POOL / TNPS / UDMA non-CONV traffic。
+- Read side 與 write side 各自 round-robin，不用 fixed priority，避免長時間餓死 UDMA 或任一 non-CONV engine。
+- Empty / stalled master 直接 skip；下一個 eligible master 接續取得 grant。
+- CONV ACT_R / WGT_R bypass L1_Manager，不參與這個 round-robin；進入 L1Mesh 後才與 L1_Manager traffic 共同受 bank service 限制。
 
 ACT_R / WGT_R 對 CONV Engine 是兩組專線；進入 L1Mesh 後仍會依 address 路由到目標 bank，最後與 L1_Manager traffic 共同受 L1Mesh 後端 banked SRAM service 限制。
 
@@ -333,7 +352,7 @@ CONV 對 L1Mesh 的 direct R 介面（**ACT_R / WGT_R 各有專線到 CONV Engin
 - 對比可用 BW 1.024 TB/s ⇒ **頻寬只夠 1/32 的 naïve 需求**
 - ⇒ 必須仰賴 **systolic / weight-stationary 等 dataflow 的 operand reuse** 才能餵滿 array
 
-**Output-stationary 假設下穩態 BW（`[TBD]`，等使用者確認）：**
+**Hybrid dataflow 下的穩態 BW：**
 
 16 cluster 並列、每 cluster 在 OS 模式穩態每 cycle：
 - 注入新 ACT：32 byte
@@ -344,7 +363,15 @@ CONV 對 L1Mesh 的 direct R 介面（**ACT_R / WGT_R 各有專線到 CONV Engin
 → 32 + 32 條 Payload R 設計剛好對應 16 cluster 的穩態餵料。
 → 若 dataflow 是 weight-stationary，WGT_R 只在 tile load 時忙碌，可拿來預取下一 tile 的權重。
 
-> 真正的 dataflow（OS / WS / IS / row-stationary）`[TBD]`。
+v1 dataflow 決定為 **compiler-selected hybrid OS/WS**：
+
+| Layer / pattern | Dataflow | 原因 |
+|---|---|---|
+| 3×3 / 5×5 / 7×7 normal CONV | OS / row-output-stationary | output tile 早完成，利於 Requant / consumer handoff |
+| Depthwise CONV | OS | weight reuse 小，WS psum/lifetime 成本不划算 |
+| `CONV -> Requant -> TNPS/EWE/POOL` fused tail | OS | 讓 producer tile 盡快交給 consumer，保留 overlap |
+| 1×1 CONV / FC / pointwise-heavy layer | WS | weight slice 可跨 H tiles reuse，降低 WGT_R / DRAM weight reload |
+| WS 造成 psum spill 或 consumer handoff 延遲 | fallback OS | 不允許為省 weight traffic 製造 INT32 psum DRAM round-trip |
 
 ---
 
@@ -380,11 +407,13 @@ L3 array        : 16 cluster
 → FP 任務 dispatch 時只啟動 cluster 12–15，其餘 cluster idle（節能）。
 → INT 任務 16 cluster 全開，FP-capable cluster 的 FP datapath 在 INT 模式下不耗能。
 
-### Cluster 內部 dataflow 預設
+### Cluster 內部 dataflow
 
-- 每 cluster 採 **output-stationary**：accumulator 留在 cluster 內部，ACT / WGT 從邊緣注入流經 array。
+- 每 cluster 支援 **OS / WS hybrid**，由 compiler descriptor 選擇。
+- OS：accumulator 留在 cluster 內部，ACT / WGT 從邊緣注入流經 array；預設給 3×3、depthwise、fused consumer tail。
+- WS：weight tile 留在 cluster / local buffer，ACT stream across spatial tiles；預設只給 1×1 / FC / pointwise-heavy layer。
 - Partial sum 不在 cluster 內部繞 ring；reduce 發生在 array level（16 cluster → reduce tree → Requant chain）。
-- Tile fill latency = cluster 邊長 ≈ 64 cycle（base cell 視角；實際與 dtype 相關）`[TBD]`。
+- Tile fill latency：OS = 64 cycle；WS = 48 cycle（weight already staged，first output latency 較短）。若 RTL 校準後不同，以 RTL timing table 更新。
 
 ---
 
@@ -428,7 +457,7 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 16 條 INT8 輸出在 Requant Engine 末端 merge，走 **8 條 Payload W**（Requant ↔ L1_Manager）寫回 L1Mesh：
 
 - 16 lane × 1 byte/cycle = **16 byte/cycle 穩態** = 1 Payload lane 即可
-- 8 條 Payload W 大量 over-provision → 用於多 layer fused 模式 `[TBD]`。
+- 8 條 Payload W 是 v1 frozen interface，用於 cover fused / tiled store burst 與 final-store swizzle，不再視為可調參數。
 
 ### SystemC 介面
 
@@ -730,8 +759,39 @@ UDMA 是 DRAM ↔ L1 的搬運與 activation codec engine；tensor layout / tran
 | `SCATTER_CONCAT` | 多個 source 寫到 dst 連續區段 | legacy concat fallback；主路徑轉 TNPS |
 | `STRIDED_SLICE` | 從大 tensor 取子區段 | legacy slice fallback；主路徑轉 TNPS |
 | `DEPTH_TO_SPACE` | NHWC pixel shuffle | legacy D2S fallback；主路徑轉 TNPS |
-| `ACT_DECOMP_COPY` | compressed ACT in DRAM → raw ACT in L1 | activation decompression read |
-| `ACT_COMP_COPY` | raw ACT in L1 → DRAM | compression write path；目前 DRAM W compression off，計 raw bytes |
+| `ACT_DECOMP_COPY` | compressed ACT in DRAM → raw ACT in L1 | **v1 official activation decompression read path** |
+| `ACT_COMP_COPY` | raw ACT in L1 → compressed ACT in DRAM | **v1 official activation compression write path**；final output 可選 raw store |
+
+### ACT compression-decompression policy
+
+ACTC is now part of the v1 memory spec. It is a UDMA-side memory path resource, not a CONV/EWE/POOL datapath feature:
+
+```text
+DRAM compressed activation
+  -> UDMA_R + ACT_DECOMP
+  -> L1 raw NHWC tile
+  -> CONV / EWE / POOL / TNPS / Requant existing paths
+
+L1 raw intermediate activation
+  -> UDMA_W + ACT_COMP
+  -> DRAM compressed activation stream
+```
+
+Key rules:
+
+| Item | v1 decision |
+|---|---|
+| L1 format | Always raw NHWC / normal tensor bytes. Engines do not read compressed L1. |
+| DRAM activation format | Block-compressed stream plus metadata. |
+| Block raw size | **128 B raw block**. |
+| Metadata | Per-block compressed length + raw fallback flag; block offsets are implicit by sequential stream for v1. |
+| Fallback | If compressed size + metadata is not smaller than raw, store raw block. |
+| Supported dtype | Byte-stream lossless compression for INT8 / INT16 / FP8 / FP16 / BFP16 storage. |
+| Weight / params | Not compressed by ACTC. Weight compression, if any, is a separate spec item. |
+| Final output | May stay raw to simplify host-visible output; intermediate activations should use ACT_COMP when written to DRAM. |
+| Cycle model | DRAM charges compressed bytes + metadata bytes; L1 charges raw bytes; ACT codec pipe charges raw bytes at **512 B/cyc** plus normal UDMA descriptor startup. |
+
+The v1 simulator may estimate compression conservatively when compiled binaries do not carry a real compressed payload, but the hardware contract above is frozen: ACTC must be lossless, bounded by raw fallback, and invisible to compute engines.
 
 ### UDMA descriptor body 修訂
 
@@ -761,7 +821,7 @@ slice_end[4] (16×4)
 | `SCATTER_CONCAT` | ✓ legacy | TNPS multi-source descriptor |
 | `STRIDED_SLICE` | ✓ legacy | TNPS metadata kernel 已上主路徑 |
 | `DEPTH_TO_SPACE` | ✓ legacy | TNPS kernel 已上主路徑 |
-| `ACT_DECOMP_COPY` / `ACT_COMP_COPY` | ✓ | compression policy tuning |
+| `ACT_DECOMP_COPY` / `ACT_COMP_COPY` | ✓ official | v1 ACTC path；lossless 128B block + raw fallback |
 
 ---
 
@@ -1030,7 +1090,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
   - **FP layer cycle 數**：用 cluster 12–15 的 4096 MAC ⇒ ⌈ MAC_total / 4096 ⌉ + tile fill
   - 等價寫法：`cycle = ⌈ MAC_total / MAC_per_cycle(dtype) ⌉ + tile fill`，其中 `MAC_per_cycle` 查 §3A.2 表
   - INT8×8 → 16384、INT8×4 → 32768、INT16×16 → 4096、FP* → 4096
-  - tile fill = 64 cycle（systolic 從注入到第一筆輸出）`[TBD]`
+  - tile fill：OS = 64 cycle；WS = 48 cycle。WS 只由 compiler 對 1×1 / FC / pointwise-heavy layer 選用；若需 psum spill 或會延遲 fused consumer handoff，fallback OS。
   - 1.9 GHz 換算：wall time = cycle 數 / 1.9 GHz ≈ cycle 數 × 0.526 ns
   - **SystemC 介面**：CONV Engine config descriptor 必須帶 `dtype` + `output_channel_group_id` (per cluster) 欄位，模型查表決定 cycle 數
 - **v2**：L1_Manager arbitration + bandwidth contention
@@ -1045,10 +1105,10 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 下列項目決定後，spec.md 會升級到 v1。
 
 ### 6.1 系統參數
-- [x] ~~介面寬度 `32 / 16 / 8` 是 byte width / channel / 其他？~~ → **是 Payload 16B lane 的條數（暫定值，後續會評估）**
+- [x] ~~介面寬度 `32 / 16 / 8` 是 byte width / channel / 其他？~~ → **是 Payload 16B lane 的條數**
+- [x] ~~Payload lane 條數是否凍結？~~ → **v1 frozen**：CONV ACT_R=32、CONV WGT_R=32、Requant=8R/8W、EWE=16R/8W、POOL=16R/8W、TNPS=8R/8W
 - [x] ~~系統時脈頻率？~~ → **1.9 GHz**（v8.25 起；原 1 GHz baseline 已升至 1.9 GHz 對齊 LPDDR5X-10667 BW）
 - [x] ~~CONV throughput target？~~ → **62.3 TOPS @ INT8**（由 16384 MAC × 2 × 1.9 GHz 推得）
-- [ ] 介面條數的最終值何時凍結？哪些是會調整的熱點？
 
 ### 6.2 CONV Engine
 - [x] ~~PE array 形狀~~ → **65,536 base 4×4 cell，組成 16 cluster**（見 §3A.4）
@@ -1061,8 +1121,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~Accumulator 寬度~~ → **INT48**（v0 SystemC 用 `int64_t` 簡化，v1 切 `sc_int<48>` 嚴格 saturation）
 - [x] ~~FP / INT 並行性~~ → **Layer-serial only**（不混跑；scheduler 簡化）
 - [x] ~~支援 kernel / stride / dilation / padding / group~~ → **見 §3A.6**（K∈{1,2,3,5,7}, K 上限 11, S∈{1,2,4}, D∈{1,2,4}, P∈[0,7], group 含 depthwise）
-- [ ] **Dataflow** 細節（OS 已預設，但 ACT 沿哪邊注入？WGT 怎麼預載？）
-- [ ] **Tile fill latency** = 64 cycle 是否正確？對應 4-bit 視角還是 8-bit 視角？
+- [x] ~~Dataflow~~ → **compiler-selected hybrid OS/WS**；OS default，WS for 1×1 / FC / pointwise-heavy；fused tail/depthwise fallback OS
+- [x] ~~Tile fill latency~~ → **OS 64 cycle, WS 48 cycle**（RTL timing table 可再校準）
 - [x] ~~Kernel 上限~~ → **11×11 保留**
 - [x] ~~Dilation 上限~~ → **降到 4**（{1, 2, 4}）
 - [ ] Group conv 上限是否 ≥ 32（含 depthwise = C_in）？
@@ -1078,11 +1138,12 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~L1Mesh SRAM 的 bank 切法、port 數~~ → **3MB, 4x4 NoC, 16 banks, 256 x 768x16B macros, 4R/4W edge ports per side, CONV ACT_R / WGT_R dedicated direct ingress**
 - [x] ~~DRAM 規格~~ → **LPDDR5X-10667**（JEDEC LPDDR5X，10.667 Gbps/pin）
 - [x] ~~channel 數 / bus width~~ → **dual-channel x32**，peak BW **85.3 GB/s**（@ 1.9 GHz core ≈ 44.9 B/cyc → 模型用 48 B/cyc）
-- [ ] L1_Manager 的 arbitration policy
+- [x] ~~Activation compression 是否正式進 spec？~~ → **是**，UDMA-side ACTC，DRAM compressed / L1 raw，128B raw block，lossless + raw fallback，codec 512 B/cyc
+- [x] ~~L1_Manager 的 arbitration policy~~ → **round-robin** among Requant / EWE / POOL / TNPS / UDMA non-CONV traffic；CONV ACT_R / WGT_R bypass
 
 ### 6.5 Command / Programming model
 - [x] ~~Command 格式~~ → **64 byte fixed descriptor，16+48 layout**（見 §3A.10）
-- [x] ~~host ↔ Command Engine 介面~~ → **DRAM ring buffer + MMIO doorbell**（見 §3A.10）
+- [x] ~~host ↔ Command Engine 介面~~ → **AXI-Lite register map + DRAM command ring + MMIO doorbell；Command/Host DRAM AXI master fetches descriptors/status**（見 §3.0b / §3A.10）
 - [x] ~~Memory map~~ → **Unified 32-bit addr space**：L1Mesh 0x0000_0000–0x002F_FFFF；DRAM 0x1000_0000–0xFFFF_FFFF（見 §3A.10）
 - [ ] CSR 4 KB AXI-Lite slave 的詳細 register map（tail_ptr / head_ptr / status / IRQ_clear 各 register offset）
 - [ ] Ring buffer head/tail wrap-around / overflow policy
@@ -1095,8 +1156,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~Host CPU 種類？~~ → **RISC-V**
 - [ ] RISC-V 規格：core 數、ISA extension（RV64GC？M/A/F/D/C？V (RVV) for SIMD？）
 - [ ] SoC 拓樸：NPU 是 RISC-V 的 close-coupled accelerator（同 die、共用 cache）還是 loose-coupled（PCIe / 系統 bus）？
-- [ ] Host ↔ Command Engine 介面：AXI-Lite MMIO / mailbox / shared queue in DRAM？
-- [ ] Host 是否直接擁有 DRAM AXI master（與 UDMA 共享 4G DRAM）？
+- [x] ~~Host ↔ Command Engine 介面：AXI-Lite MMIO / mailbox / shared queue in DRAM？~~ → **AXI-Lite register map + shared command ring / descriptor buffer in DRAM**
+- [x] ~~Host 是否直接擁有 DRAM AXI master（與 UDMA 共享 4G DRAM）？~~ → **Command/Host interface has DRAM AXI master for command/descriptor/status traffic**
 - [ ] Interrupt 路徑（NPU done → RISC-V）：哪條 IRQ line？是否需 PLIC 模型？
 - [ ] SystemC 端要 ISS 還是 stub？
   - v0：stub（從 JSON / 測試檔讀 descriptor 推進 fifo）

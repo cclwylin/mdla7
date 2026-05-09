@@ -1,83 +1,110 @@
 # MDLA7 Handoff
 
-日期：2026-05-10
+日期時間：2026-05-10 03:19:30 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
-- Commit 基準：`8a101b2 Add Host Command interface diagram`
-- 工作樹目前有未提交修改。
-- ETHZ_V6 fast-only：`51/51 ok`，Function FAIL `0`，Skipped OP `0`。
-- 暫時不要把 conflict / mesh 當成驗證門檻；使用者目前指定只看 fast。
+- 最新 microblock commit：`a8dd50f Expand microblock fused pipeline tails`
+- Gantt task-meta commit：`a490aab Add task-meta microblock Gantt timeline`
+- Fast-only runner commit：`09d97cb Implement fused microblock fast-only runners`
+- 工作樹仍有使用者/文件/profile 類未提交修改；不要混進 microblock code commit。
 
-## 本輪變更重點
+## 已完成
 
-- `systemc/src/test_model.cpp`
-  - 已接 microblock-level fused pipeline 的主要路徑。
-  - 已驗證：
-    - `microisp_quant`：`178/178 PASS`
-    - `dped_quant`：`84/84 PASS`
-    - `pynet_v2_quant`：`212/212 PASS`
-- `batch/run_*.py`
-  - 所有 runner 都支援 `--fast-only`。
-  - corpus runner fast-only 只跑 fast，CSV conflict/mesh 欄位留空，summary 只顯示 fast。
-  - `run_model.py --fast-only` 是 `--l1-timing fast` 的 alias。
+- Profile HTML 有兩張 Gantt：
+  - original engine timeline
+  - microblock stage timeline
+- `task_meta` 已從 Command Engine trace 到 profile JSON，Gantt 用 descriptor metadata 判斷 microblock。
+- `run_*.py` 已統一支援 `--fast-only`。
+- Path 1-6 已可用：
+  - CONV/DW/FC -> Requant -> store/forward
+  - CONV -> Requant -> binary EWE ADD/MUL/SUB -> store/forward
+  - CONV -> Requant -> D2SPACE
+  - Binary EWE chain -> store/forward
+  - Binary EWE chain -> D2SPACE
+  - CONV/Requant -> binary EWE -> unary EWE(HARD_SWISH/GELU) -> store/forward
+- 已補強：
+  - Binary EWE chain -> unary EWE tail
+  - CONV/Requant -> EWE -> POOL safe subset
+  - tiled POOL / unary EWE descriptor metadata
+  - POOL layer cycle accounting
+  - RESHAPE/SQUEEZE/EXPAND_DIMS L1 view passthrough safe subset
+
+## 最近驗證
+
+```bash
+make -C systemc -s
+git diff --check
+./batch/run_model.py --model model/MLPerf_Tiny/vww_96_int8.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py --model model/Hotspot/llama2_quant_L35_L74.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py --model model/ETHZ_v6/mobilenet_v3_quant.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py --model model/Hotspot/gpt2_quant_L24_L63.tflite --fast-only --no-build --keep-intermediate
+```
+
+結果：
+
+- `vww_96_int8`: `31/31 PASS`
+- `llama2_quant_L35_L74`: `43/43 PASS`
+- `mobilenet_v3_quant`: `123/123 PASS`
+- `gpt2_quant_L24_L63`: `42/42 PASS`
+
+## GPT2 L2 結論
+
+`MDLA7 profile - gpt2_quant_L24_L63.tflite` 的 L2 目前沒有 microblock。
+
+- L2 是 `FC in=1x1x768 out=1x1x768`
+- `tiles=1x1`
+- profile JSON 沒有 `task_meta` layer 2
+- 有 microblock metadata 的 layer 從 L3 / EWE 類路徑開始
+
+原因：
+
+- `try_stream_conv_chain()` 目前只吃 `OK_CONV/OK_DWCONV`，不吃 `OK_FC`
+- `try_stream_conv_ewe()` 雖接受 `OK_FC`，但 L2 -> L3 shape 不合：
+  - L2 output `1x1x768`
+  - L3 ADD input `1x77x768`
+- L2 working set 約 583 KB，低於 2 MB L1，不是容量驅動的必切 microblock
+
+若要讓 L2 顯示 microblock，可選：
+
+- 加 single-tile pseudo-microblock metadata，只改善 Gantt 可視性
+- 真做 FC microblock，需決定按 output-channel 切或改 compiler descriptor 表示成 token-batched FC
 
 ## Next To-do
 
-- 優先處理 ETHZ_V6 中間層 DRAM W > 1KB 的 pattern；大 write 主要集中在 `d2spac` / `add` / `maxpool` / `softmax`：
+優先強化 Path 7-10，方向如下：
 
-```text
-srgan_quant        83.000 MB
-  L54 F53 d2spac   64.000 MB  out=(1024,1024,64)
-  L52 F51 d2spac   16.000 MB  out=(512,512,64)
-  L55 F55 conv      3.000 MB  out=(1024,1024,3)
+1. Path 7 完整化
+   `CONV/Requant -> EWE -> POOL/TNPS consumer`
+   目前 POOL 只支援 safe subset：`1x1 / stride1 / no-pad`。下一步要處理 real window pool 的 tile halo / partial window。
 
-srgan_float        32.000 MB
-  L54 F53 d2spac   32.000 MB  out=(512,512,64)
+2. Path 8 完整化
+   `POOL -> unary/EWE/TNPS consumer`
+   目前 POOL 能被計時與標 metadata，但還不是完整 producer tail model。
 
-microisp_quant     11.953 MB
-  L41/L84/L127 add       each 1.992 MB
-  L42/L85/L128 d2spac    each 1.992 MB
+3. Path 9 完整化
+   `TNPS/layout -> CONV or compute consumer`
+   目前只有 RESHAPE/SQUEEZE/EXPAND_DIMS 這種 L1 view safe subset。TRANSPOSE/PACK/UNPACK 還會 materialize，是 GPT/ViT 類模型的主要斷點。
 
-pynet_v2_quant      6.000 MB
-  L162 F161 d2spac  6.000 MB  out=(1024,1536,4)
-
-dped_quant          4.500 MB
-  L81 F81 add       4.500 MB  out=(512,768,12)
-
-unet_quant          4.000 MB
-  L2 F2 maxpool     4.000 MB  out=(512,512,16)
-
-sd_encoder_quant    1.000 MB
-  L246 F246 softmax 1.000 MB  out=(1,1024,1024)
-
-sd_decoder_quant    1.000 MB
-  L42 F42 softmax   1.000 MB  out=(1,1024,1024)
-
-mobilevit_v2_float  0.013 MB
-  several softmax writes, about 1-4 KB each
-```
-
-- 優先看 `d2spac -> consumer`、`add -> d2spac`、`maxpool -> consumer` handoff，目標是把上面大中間寫回收掉。
+4. Path 10 泛化
+   `producer tile -> multiple consumers / concat fanout`
+   目前仍主要是 `conv_fanout` special-case，不是通用 fanout framework。
 
 ## 快速命令
 
 ```bash
 make -C systemc -s
-./batch/run_ethz_v6.py --list
-./batch/run_ethz_v6.py --filter xlsr_quant --limit 1 --fast-only --rerun-all
-./batch/run_ethz_v6.py --filter resnet_quant --limit 1 --fast-only --rerun-all
-./batch/run_ethz_v6.py --filter mobilenet_v3_quant --limit 1 --fast-only --rerun-all
-./batch/run_ethz_v6.py --filter mv3_depth_quant --limit 1 --fast-only --rerun-all
+./batch/run_model.py --model model/Hotspot/gpt2_quant_L24_L63.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py --model model/Hotspot/llama2_quant_L35_L74.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py --model model/ETHZ_v6/mobilenet_v3_quant.tflite --fast-only --no-build --keep-intermediate
 ```
 
 Profile entry：
 
 ```text
+batch/profile_hotspot.html
 batch/profile_ethz_v6.html
 batch/output/<stem>.html
 ```
-
-注意：Python entry point 從 repo root 用 `./batch/<runner>.py` 執行；產物都在 `batch/output/`。

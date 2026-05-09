@@ -113,13 +113,15 @@ cluster starvation。
 
 `L1Manager` 是 non-CONV engine / UDMA 進入 L1Mesh 的仲裁點。
 
-L1Manager 入口 priority 目前定義為：
+L1Manager 入口 arbitration policy **v1 frozen = round-robin**：
 
-| Priority | Traffic |
-|---:|---|
-| 1 | Requant writeback / parameter read |
-| 2 | EWE / POOL / TNPS |
-| 3 | UDMA background load/store |
+| Rule | Meaning |
+|---|---|
+| participants | Requant / EWE / POOL / TNPS / UDMA non-CONV traffic |
+| read / write | read side 與 write side 各自 round-robin |
+| no fixed priority | 不用 fixed priority，避免 UDMA 或任一 non-CONV engine 長時間 starvation |
+| skip rule | empty / stalled master 直接 skip，grant 給下一個 eligible master |
+| CONV bypass | CONV ACT_R / WGT_R 不參與 L1Manager round-robin，直接接 L1Mesh |
 
 目前 SystemC 實作仍是簡化的一階模型，`L1Manager` code path 接近 pass-through router：
 
@@ -139,10 +141,10 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 | route to L1Mesh / DRAM | implemented |
 | out-of-range error | implemented |
 | Non-CONV entrance arbitration | spec defined; simulator simplified |
-| QoS / priority | CONV ACT_R / WGT_R bypass L1Manager via two dedicated direct L1Mesh paths |
+| QoS / arbitration | round-robin among non-CONV masters; CONV ACT_R / WGT_R bypass L1Manager via two dedicated direct L1Mesh paths |
 | cache coherency | not relevant，這裡是 scratchpad |
 
-換句話說，HW spec 有 CONV ACT_R / WGT_R dedicated direct paths + L1Manager non-CONV arbitration；
+換句話說，HW spec 有 CONV ACT_R / WGT_R dedicated direct paths + L1Manager non-CONV round-robin arbitration；
 目前 simulator 還不是完整 port-accurate interconnect model。真正的 latency
 主要在 L1Mesh / DRAM 裡 imposing wait。
 
@@ -150,7 +152,7 @@ void read(uint32_t addr, void* dst, uint32_t n) {
 
 - non-CONV engine code 不需要知道某個 address 在 L1 還是 DRAM。
 - UDMA mode 可以用同一套 `read()` / `write()`。
-- future 如果要加完整 priority contention，可以集中在 `L1Manager`。
+- future 如果要加完整 round-robin contention / port-accurate grant model，可以集中在 `L1Manager`。
 
 ---
 
@@ -1363,7 +1365,7 @@ UDMA extra  ~= 16 cycles per descriptor
 
 ## 4.27 Activation Compression 在 memory hierarchy 的位置
 
-當 profile 顯示 `UDMA_R` 長期 dominate，代表 DRAM→L1 的 activation load 可能比 compute 更重要。這時可以考慮在 memory hierarchy 加一個 ACT compression/decompression path。
+ACT compression/decompression path 已正式納入 v1 spec。當 profile 顯示 `UDMA_R` 長期 dominate，代表 DRAM→L1 的 activation load 可能比 compute 更重要，ACTC 就是 memory hierarchy 的標準解法之一。
 
 最保守的設計是：
 
@@ -1392,11 +1394,11 @@ L1 compressed activation -> CONV on-the-fly decompress
 | cycle model | 每個 MAC 讀 operand 前可能有 decompress latency |
 | L1 lifetime | compressed block 和 raw window cache 都要管理 |
 
-所以教材建議先做 DRAM compressed、L1 decompressed。
+所以 v1 spec 固定採用 DRAM compressed、L1 decompressed。
 
-### 4.27.1 新增 UDMA mode 的想法
+### 4.27.1 UDMA ACTC mode
 
-可以把 ACTC 建成 UDMA 的新 mode：
+ACTC 使用 UDMA mode：
 
 ```text
 UM_ACT_DECOMP_COPY:
@@ -1412,6 +1414,17 @@ UM_ACT_COMP_COPY:
   length = raw input bytes
 ```
 
+v1 格式與 cycle model：
+
+| 項目 | v1 決定 |
+|---|---|
+| raw block size | 128B |
+| metadata | per-block compressed length + raw fallback flag；v1 offset implicit |
+| fallback | 壓不下去就 raw block |
+| codec throughput | 512 B/cyc，依 raw bytes 計 |
+| DRAM charge | compressed bytes + metadata bytes |
+| L1 charge | raw bytes |
+
 Cycle model 至少要計：
 
 | 項目 | 是否會變 |
@@ -1422,7 +1435,7 @@ Cycle model 至少要計：
 | ACT_DECOMP cycles | 增加，取決於 lanes / bytes per cycle |
 | UDMA descriptor startup | 仍存在 |
 
-因此 ACT compression 不是把 `dram_r` 直接除以 2。它是用較少 DRAM bytes 換一個新硬體 block 的 decompress latency。
+因此 ACT compression 不是把 `dram_r` 直接除以 2。它是用較少 DRAM bytes 換 ACT_DECOMP / ACT_COMP latency，並且 L1 仍付 raw bytes。
 
 ### 4.27.2 Profile 上怎麼看值不值得做
 

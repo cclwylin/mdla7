@@ -57,8 +57,8 @@ Host
 
 | 組件 | 角色 |
 |---|---|
-| Host | RISC-V host / runtime，負責下 descriptor |
-| Command Engine | 中央 controller，依 dependency tag dispatch 工作 |
+| Host | RISC-V host / runtime；透過 AXI-Lite register map 設定 Command Engine，descriptor / command ring 放 DRAM |
+| Command Engine | 中央 controller，依 dependency tag dispatch 工作；具 DRAM AXI master 可 fetch descriptor / 回寫 status |
 | CONV Engine | 做 convolution / fully-connected MAC |
 | Requant Engine | 把 CONV partial sum 轉成 quantized output |
 | EWE Engine | element-wise op、activation、softmax 類工作 |
@@ -92,14 +92,15 @@ UDMA write output tile
 Control path 描述誰命令誰：
 
 ```text
-Host -> Command Engine -> engine config FIFO -> engine done tag
+Host AXI-Lite MMIO -> Command Engine DRAM AXI master fetch -> engine config FIFO -> engine done tag
 ```
 
 在 SystemC 裡對應：
 
 | HW 概念 | SystemC 對應 |
 |---|---|
-| Host 下 descriptor | [`Host`](../systemc/include/mdla7/host.h) |
+| Host 透過 AXI-Lite register map 設 command ring / doorbell | [`Host`](../systemc/include/mdla7/host.h) 直接推 descriptor |
+| Command/Host DRAM AXI master fetch descriptor | simulator 以 `std::vector<Descriptor> program` 代表已 fetch 的 command buffer |
 | descriptor stream | `sc_fifo<Descriptor> desc_stream` |
 | Command Engine dispatch | [`CommandEngine`](../systemc/include/mdla7/command_engine.h) |
 | engine config interface | `sc_fifo<DescriptorBody> *_cfg` |

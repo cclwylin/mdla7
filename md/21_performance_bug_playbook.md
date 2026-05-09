@@ -443,7 +443,7 @@ per-engine busy:
 
 這代表主要瓶頸還在「從 DRAM 把 activation tile 搬進 L1」。這時候只增加 CONV MAC 或 EWE lanes，幫助會有限，因為 compute engine 還是在等資料。
 
-一個合理的下一級硬體解法是加 **ACTC（Activation Compression / Decompression）**：
+v1 spec 已正式加入 **ACTC（Activation Compression / Decompression）**：
 
 ```text
 DRAM compressed ACT
@@ -452,7 +452,7 @@ DRAM compressed ACT
     -> CONV / EWE / POOL / REQUANT existing path
 ```
 
-第一版建議只做：
+v1 固定採用：
 
 ```text
 DRAM compressed, L1 decompressed
@@ -488,16 +488,16 @@ UDMA_W + ACT_COMP:
 
 ### 21.13.2 Compression format 要保守
 
-第一版不要追求最強壓縮率，要追求硬體簡單、latency 可估、worst case 安全。
+v1 不追求最強壓縮率，要追求硬體簡單、latency 可估、worst case 安全。
 
 建議 block granularity：
 
 | 欄位 | 建議 |
 |---|---|
-| block size | 64B 或 128B raw block |
+| block size | 128B raw block |
 | granularity | row-major NHWC，盡量不要跨太多 row |
 | dtype | INT8 / INT16 / FP16 都以 storage byte stream 處理 |
-| metadata | per-block offset + compressed length + raw flag |
+| metadata | per-block compressed length + raw flag；offset v1 用 sequential stream implicit |
 | fallback | compressed size >= raw size 時存 raw |
 
 可先支援的 lossless scheme：
@@ -559,7 +559,7 @@ Simulator 不應該只把 bytes 乘上一個 compression ratio。比較正確的
 | descriptor startup | 新 UDMA mode 或 ACTC descriptor 仍有 decode cost |
 | fallback ratio | 部分 block 可能 raw，不會壓縮 |
 
-第一版可新增兩個 UDMA mode：
+v1 使用兩個 UDMA mode：
 
 ```text
 UM_ACT_DECOMP_COPY
@@ -607,7 +607,7 @@ after:
 4. ACT read 還是很大？才考慮 ACT compression。
 ```
 
-ACT compression 是硬體資源，不是 scheduling 小修。它適合放在 architecture roadmap，並用 simulator 先做趨勢實驗。
+ACT compression 是硬體資源，不是 scheduling 小修。它已進 v1 spec；simulator 用 conservative ratio / raw fallback 先估趨勢，RTL 需實作 lossless 128B block codec。
 
 ---
 

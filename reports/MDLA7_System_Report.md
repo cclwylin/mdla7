@@ -25,7 +25,7 @@ Generated PPT: `reports/MDLA7_System_Report.pptx`
 - EWE: Add/Mul/Sub/activation/math/softmax pieces; 64 elem/cyc; R 256 B/cyc, W 128 B/cyc
 - POOL: Max/Avg/Global pooling; R 256 B/cyc, W 128 B/cyc
 - TNPS: Transpose/Slice/Space-depth/Layout materialize; 128 B/cyc read + 128 B/cyc write; handles intermediate/standalone D2SPACE
-- UDMA: DRAM↔L1 copy, prefetch, store, ACT codec; LPDDR model peak ≈85.3 GB/s external
+- UDMA: DRAM↔L1 copy, prefetch, store, v1 ACTC codec; LPDDR model peak ≈85.3 GB/s external
 - L1Mesh: 3 MB banked scratchpad / routing fabric; 16 banks x 16B per SRAM cycle backend
 
 ## Slide 6: SystemC and Profiling Deliverables

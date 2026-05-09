@@ -44,9 +44,19 @@ for (auto& d : program) {
 
 | 真實系統 | simulator |
 |---|---|
-| firmware writes command ring | Host writes `desc_stream` FIFO |
-| MMIO doorbell | FIFO data_written_event |
+| firmware writes command ring in DRAM | Host writes `desc_stream` FIFO |
+| AXI-Lite register map + MMIO doorbell | FIFO data_written_event |
 | command buffer in DRAM | `std::vector<Descriptor> program` |
+| Command/Host interface DRAM AXI master fetches descriptors | descriptors are preloaded into simulator memory vector |
+
+硬體 spec v1 將 Command / Host interface 定義成兩個實體介面：
+
+| Interface | Role |
+|---|---|
+| AXI-Lite register map | Host CPU 設定 command ring base/size、doorbell、interrupt/status、profile/debug register |
+| DRAM AXI master | Command Engine / Host interface 直接從 DRAM fetch command buffer / descriptor，並回寫 completion/status buffer |
+
+控制流程是：Host 在 DRAM 建 command ring，透過 AXI-Lite 寫 register 並敲 doorbell；Command Engine 用 DRAM AXI master 拉 descriptor，dispatch 給 engines，完成後回寫 status 並更新 interrupt/status。
 
 ---
 

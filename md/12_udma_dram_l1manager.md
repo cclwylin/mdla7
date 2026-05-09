@@ -42,13 +42,14 @@ l1mgr.write(addr, src, bytes);
 
 `L1Manager` 是 non-CONV engine / UDMA 到 L1Mesh 的入口 arbiter。
 
-L1Manager 入口 priority 目前定義為：
+L1Manager 入口 arbitration policy **v1 frozen = round-robin**：
 
-| Priority | Traffic |
-|---:|---|
-| 1 | Requant writeback / parameter read |
-| 2 | EWE / POOL / TNPS |
-| 3 | UDMA background load/store |
+| Rule | Meaning |
+|---|---|
+| participants | Requant / EWE / POOL / TNPS / UDMA non-CONV traffic |
+| read / write | read side 與 write side 各自 round-robin |
+| skip rule | empty / stalled master 直接 skip，grant 給下一個 eligible master |
+| CONV bypass | CONV ACT_R / WGT_R 不參與 L1Manager round-robin，直接接 L1Mesh |
 
 目前 SystemC implementation 還是簡化 router：
 
@@ -62,7 +63,7 @@ else:
 ```
 
 也就是說，HW spec 已定義 CONV direct read path 與 L1Manager
-non-CONV 入口 priority；SystemC 尚未做完整 port-accurate arbitration。
+non-CONV 入口 round-robin arbitration；SystemC 尚未做完整 port-accurate arbitration。
 這是刻意簡化，因為現階段重點是：
 
 - functional correctness
