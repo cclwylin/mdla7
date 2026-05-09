@@ -722,7 +722,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         if engine in ("conv", "requant"):
             return engine
         if engine in ("ewe", "pool", "tnps"):
-            return "consumer"
+            return "ewe/pool/tnps"
         return engine
 
     def _decorate_task_meta(engine: str, tasks: list) -> list:
@@ -852,7 +852,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
     def _microblock_payload() -> dict:
         """HTML-only view that re-buckets engine tasks by microblock stage."""
-        lane_order = ["load", "conv", "requant", "consumer", "store"]
+        lane_order = ["load", "conv", "requant", "ewe/pool/tnps", "store"]
         lanes = {name: {"tasks": []} for name in lane_order}
 
         def layer_info(idx: int) -> tuple[int, int, str]:
@@ -885,8 +885,6 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                     meta = task[-1]
                     mflags = int(meta.get("flags", 0) or 0)
                     if not (mflags & 0x10):
-                        continue
-                    if mflags & 0x20:
                         continue
                     if not int(meta.get("stream_flags", 0) or 0):
                         continue
@@ -925,9 +923,9 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         tnps_ops = {"d2spac", "trnps", "reshape", "concat"}
         assign_dense_engine("conv", "conv", conv_ops)
         assign_dense_engine("requant", "requant", conv_ops)
-        assign_dense_engine("ewe", "consumer", ewe_ops)
-        assign_dense_engine("pool", "consumer", pool_ops)
-        assign_dense_engine("tnps", "consumer", tnps_ops)
+        assign_dense_engine("ewe", "ewe/pool/tnps", ewe_ops)
+        assign_dense_engine("pool", "ewe/pool/tnps", pool_ops)
+        assign_dense_engine("tnps", "ewe/pool/tnps", tnps_ops)
 
         udma_counts: dict[tuple[str, int], int] = {}
         for engine, stage in (("udma_r", "load"), ("udma_w", "store")):

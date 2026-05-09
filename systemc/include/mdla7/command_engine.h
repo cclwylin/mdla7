@@ -65,15 +65,6 @@ SC_MODULE(CommandEngine) {
         while (true) {
             while (desc_in.num_available() > 0 && pending.size() < LOOKAHEAD_LIMIT) {
                 Descriptor d = desc_in.read();
-                // Stream descriptors may issue out of order, so reserve their
-                // signal tag as soon as they enter the lookahead window.
-                // Normal descriptors issue strictly in order; reserving their
-                // tags here is unsafe across 8-bit tag wrap because an older
-                // completion of the same tag can arrive while the newer
-                // descriptor is merely sitting in pending. Reserve those at
-                // issue time instead.
-                if ((d.hdr.flags & DF_STREAM) && d.hdr.signal_tag)
-                    tag_done[d.hdr.signal_tag] = false;
                 pending.push_back(d);
             }
 
@@ -85,12 +76,12 @@ SC_MODULE(CommandEngine) {
                 // may be bypassed. Normal descriptors keep in-order issue
                 // because many schedules reuse fixed L1 regions.
                 if (!(it->hdr.flags & DF_STREAM)) {
-                    if (it == pending.begin() && waits_ready(*it)) {
+                    if (it == pending.begin() && waits_ready(pending.begin(), it)) {
                         best = it;
                     }
                     break;
                 }
-                if (!waits_ready(*it)) {
+                if (!waits_ready(pending.begin(), it)) {
                     if (stream_tail_priority(*it))
                         tail_waiting = true;
                     continue;
@@ -121,10 +112,16 @@ SC_MODULE(CommandEngine) {
         }
     }
 
-    bool waits_ready(const Descriptor& d) const {
+    bool waits_ready(std::deque<Descriptor>::const_iterator begin,
+                     std::deque<Descriptor>::const_iterator self) const {
+        const Descriptor& d = *self;
         for (int w = 0; w < d.hdr.wait_count; ++w) {
             uint8_t tg = d.hdr.wait_tags[w];
             if (!tag_done[tg]) return false;
+            for (auto it = begin; it != self; ++it) {
+                if (it->hdr.signal_tag == tg)
+                    return false;
+            }
         }
         return true;
     }
@@ -185,10 +182,11 @@ SC_MODULE(CommandEngine) {
         }
         std::cout << "\n";
 
-        // Stream signal tags were marked pending when the descriptor entered
-        // the lookahead window. Normal in-order descriptors are reserved here
-        // to avoid corrupting tag state across 8-bit wrap.
-        if (!(d.hdr.flags & DF_STREAM) && d.hdr.signal_tag)
+        // Reserve signal tags at issue time. waits_ready() also checks older
+        // pending descriptors with the same signal tag, so stream consumers
+        // cannot observe stale done state, while future wrapped tags do not
+        // poison already-issued work.
+        if (d.hdr.signal_tag)
             tag_done[d.hdr.signal_tag] = false;
         // queue this task's signal_tag for the engine (FIFO pairing).
         pending_tags[d.hdr.op_class()].push(d.hdr.signal_tag);
