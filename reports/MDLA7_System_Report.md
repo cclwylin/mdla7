@@ -2,9 +2,9 @@
 
 Generated PPT: `reports/MDLA7_System_Report.pptx`
 
-## Slide 1: Title
-- MDLA7 SystemC Model and Performance Optimization
-- Architecture, throughput, tuning history, regression status, and synthesis gaps.
+## Slide 1: System Block Diagram
+- Replaced title page with the MDLA7 system block diagram based on `spec/mdla7.drawio`.
+- Shows Host, Command Engine, CONV/Requant/EWE/POOL/TNPS, L1Mesh, L1_Manager, UDMA, and DRAM dataflow.
 
 ## Slide 2: Executive Summary
 - SystemC model is functional and profileable.
