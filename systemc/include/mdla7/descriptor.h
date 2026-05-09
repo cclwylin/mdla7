@@ -15,8 +15,9 @@ enum OpClass : uint8_t {
     OC_REQUANT = 1,
     OC_EWE     = 2,
     OC_POOL    = 3,
-    OC_UDMA    = 4,
-    OC_NUM     = 5,
+    OC_TNPS    = 4,
+    OC_UDMA    = 5,
+    OC_NUM     = 6,
 };
 
 enum DType : uint8_t {
@@ -39,6 +40,17 @@ enum UdmaMode : uint8_t {
     UM_DEPTH_TO_SPACE = 5,
     UM_ACT_DECOMP_COPY = 6,
     UM_ACT_COMP_COPY   = 7,
+};
+
+enum TnpsMode : uint8_t {
+    TM_LINEAR_COPY    = 0,
+    TM_STRIDED_2D     = 1,
+    TM_INDEXED_GATHER = 2,
+    TM_SCATTER_CONCAT = 3,
+    TM_STRIDED_SLICE  = 4,
+    TM_DEPTH_TO_SPACE = 5,
+    TM_SPACE_TO_DEPTH = 6,
+    TM_TRANSPOSE      = 7,
 };
 
 enum PoolMode : uint8_t {
@@ -224,11 +236,29 @@ struct UdmaBody {
 };
 static_assert(sizeof(UdmaBody) == 48, "UdmaBody must be 48 bytes");
 
+struct TnpsBody {
+    uint8_t  mode;            // TnpsMode
+    uint8_t  direction;       // reserved; mirrors UdmaBody for helper reuse
+    uint16_t _r0;
+    uint32_t src_addr;
+    uint32_t dst_addr;
+    uint32_t length;          // bytes or element bytes, mode-dependent
+    uint32_t src_stride;
+    uint32_t dst_stride;
+    uint16_t num_chunks;
+    uint16_t _r1;
+    uint32_t idx_table_addr;
+    uint16_t slice_begin[4];
+    uint16_t slice_end[4];
+};
+static_assert(sizeof(TnpsBody) == 48, "TnpsBody must be 48 bytes");
+
 union DescriptorBody {
     ConvBody    conv;
     RequantBody requant;
     EweBody     ewe;
     PoolBody    pool;
+    TnpsBody    tnps;
     UdmaBody    udma;
     uint8_t     raw[48];
 };

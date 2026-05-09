@@ -1043,6 +1043,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     requant: '#f5a142',
     ewe:     '#3ec56e',
     pool:    '#a945e8',
+    tnps:    '#00a6a6',
   }};
   const svg     = document.getElementById('gantt-svg');
   const gGrid   = document.getElementById('gantt-grid');

@@ -9,6 +9,7 @@
 #include "mdla7/descriptor.h"
 #include "mdla7/memory.h"
 #include "mdla7/udma.h"
+#include "mdla7/tnps.h"
 #include "mdla7/conv_engine.h"
 #include "mdla7/requant_engine.h"
 #include "mdla7/ewe_pool.h"
@@ -25,6 +26,7 @@ public:
     sc_core::sc_fifo<DescriptorBody> requant_cfg{"requant_cfg", 4};
     sc_core::sc_fifo<DescriptorBody> ewe_cfg{"ewe_cfg", 4};
     sc_core::sc_fifo<DescriptorBody> pool_cfg{"pool_cfg", 4};
+    sc_core::sc_fifo<DescriptorBody> tnps_cfg{"tnps_cfg", 4};
     sc_core::sc_fifo<DescriptorBody> udma_cfg{"udma_cfg", 4};
 
     // CONV → Requant chain: 16 lanes of INT32 partial sums (§3A.5).
@@ -51,6 +53,7 @@ public:
     sc_core::sc_fifo<uint8_t> requant_done{"requant_done", 4};
     sc_core::sc_fifo<uint8_t> ewe_done{"ewe_done", 4};
     sc_core::sc_fifo<uint8_t> pool_done{"pool_done", 4};
+    sc_core::sc_fifo<uint8_t> tnps_done{"tnps_done", 4};
     sc_core::sc_fifo<uint8_t> udma_done{"udma_done", 4};
 
     // Modules.
@@ -58,6 +61,7 @@ public:
     Dram          dram;
     L1Manager     l1mgr;
     Udma          udma;
+    TnpsEngine    tnps;
     ConvEngine    conv;
     RequantEngine requant;
     EweEngine     ewe;
@@ -77,6 +81,7 @@ public:
         dram   ("dram", dram_bytes),
         l1mgr  ("l1mgr",    l1mesh, dram),
         udma   ("udma",     l1mgr),
+        tnps   ("tnps",     l1mgr),
         conv   ("conv",     l1mgr),
         requant("requant",  l1mgr),
         ewe    ("ewe",      l1mgr),
@@ -111,12 +116,14 @@ public:
         cmd.requant_cfg_out(requant_cfg); requant.cfg_in(requant_cfg);
         cmd.ewe_cfg_out(ewe_cfg);       ewe.cfg_in(ewe_cfg);
         cmd.pool_cfg_out(pool_cfg);     pool.cfg_in(pool_cfg);
+        cmd.tnps_cfg_out(tnps_cfg);     tnps.cfg_in(tnps_cfg);
         cmd.udma_cfg_out(udma_cfg);     udma.cfg_in(udma_cfg);
 
         conv.done_tag_out(conv_done);       cmd.conv_done(conv_done);
         requant.done_tag_out(requant_done); cmd.requant_done(requant_done);
         ewe.done_tag_out(ewe_done);         cmd.ewe_done(ewe_done);
         pool.done_tag_out(pool_done);       cmd.pool_done(pool_done);
+        tnps.done_tag_out(tnps_done);       cmd.tnps_done(tnps_done);
         udma.done_tag_out(udma_done);       cmd.udma_done(udma_done);
 
         cmd.conv_dtype_latch = &conv   .last_dtype;

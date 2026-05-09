@@ -2,7 +2,7 @@
 """Render a Gantt chart of an MDLA7 simulation profile.
 
 Reads <build>/<model>.profile.json (written by test_model) and draws:
-  - one row per engine (UDMA / CONV / Requant / EWE / POOL)
+  - one row per engine (UDMA R/W / CONV / Requant / EWE / POOL / TNPS)
   - one bar per task interval (start_ns, end_ns)
   - dashed vertical lines at each layer's `cycles_cum` boundary
   - sidebar showing per-engine busy% and per-layer ops
@@ -29,13 +29,15 @@ HERE       = Path(__file__).resolve().parent
 SYSTEMC    = HERE.parent
 DEFAULT_IN = SYSTEMC / "build" / "program.profile.json"
 
-ENGINE_ORDER  = ["udma", "conv", "requant", "ewe", "pool"]
+ENGINE_ORDER  = ["udma_r", "udma_w", "conv", "requant", "ewe", "pool", "tnps"]
 ENGINE_COLORS = {
-    "udma":    "#9673a6",   # purple — DMA
+    "udma_r":  "#4287f5",   # blue — DMA read
+    "udma_w":  "#7c4dff",   # purple — DMA write
     "conv":    "#82b366",   # green  — main compute
     "requant": "#d6b656",   # yellow — chain consumer
     "ewe":     "#b85450",   # red    — element-wise
     "pool":    "#6c8ebf",   # blue   — spatial pooling
+    "tnps":    "#00a6a6",   # teal   — tensor permutation
 }
 
 

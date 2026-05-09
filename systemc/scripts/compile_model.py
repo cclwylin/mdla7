@@ -59,6 +59,20 @@ GRAPH_META_SIZE = struct.calcsize(GRAPH_META_FMT)
 assert GRAPH_META_SIZE == 32, f"GraphMeta size mismatch: {GRAPH_META_SIZE}"
 UINT32_MAX     = (1 << 32) - 1
 
+def _pack_tnps_meta(rank, elem_size, in_shape, out_shape, a_vals, b_vals=None):
+    def pad_u(vals):
+        vals = [int(v) & 0xFFFFFFFF for v in list(vals)[:6]]
+        return vals + [1] * (6 - len(vals))
+    def pad_i(vals):
+        vals = [int(v) & 0xFFFFFFFF for v in list(vals or [])[:6]]
+        return vals + [0] * (6 - len(vals))
+    words = [int(rank), int(elem_size)]
+    words += pad_u(in_shape)
+    words += pad_u(out_shape)
+    words += pad_i(a_vals)
+    words += pad_i(b_vals)
+    return struct.pack("<26I", *words)
+
 # op_kind enum — must mirror C++ in test_model.cpp
 OP_CONV       = 0
 OP_DWCONV     = 1
@@ -76,6 +90,17 @@ OP_HARD_SWISH = 12        # v8.30: x * relu6(x+3) / 6 (mobilenet_v3, 21 in fp16)
 OP_GELU       = 13        # v8.30: tanh-approx GELU (transformer activations)
 OP_D2SPACE    = 14        # v8.32: DEPTH_TO_SPACE / pixel shuffle, UDMA layout op
 OP_MATERIALIZE = 15       # compiler fallback: pre-materialized reference bytes
+OP_TRANSPOSE  = 16
+OP_S2SPACE    = 17
+OP_SQUEEZE    = 18
+OP_EXPAND_DIMS = 19
+OP_SLICE      = 20
+OP_STRIDED_SLICE = 21
+OP_PAD        = 22
+OP_PACK       = 23
+OP_UNPACK     = 24
+OP_TILE       = 25
+OP_SPLIT      = 26
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -99,7 +124,18 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_HARD_SWISH:"h_swsh",
            OP_GELU:      "   gelu",
            OP_D2SPACE:   "d2spac",
-           OP_MATERIALIZE:"matrlz"}
+           OP_MATERIALIZE:"matrlz",
+           OP_TRANSPOSE: " trnps",
+           OP_S2SPACE:   "s2spac",
+           OP_SQUEEZE:   "squeez",
+           OP_EXPAND_DIMS:"expand",
+           OP_SLICE:     " slice",
+           OP_STRIDED_SLICE:"sslice",
+           OP_PAD:       "   pad",
+           OP_PACK:      "  pack",
+           OP_UNPACK:    "unpack",
+           OP_TILE:      "  tile",
+           OP_SPLIT:     " split"}
 
 
 def _load_interpreter(path: str):
@@ -171,7 +207,12 @@ SUPPORTED_OPS = ("CONV_2D", "DEPTHWISE_CONV_2D",
                  "ADD", "CONCATENATION", "GATHER",
                  # v8.30
                  "MUL", "SUB", "HARD_SWISH", "GELU", "MEAN",
-                 "DEPTH_TO_SPACE")
+                 "DEPTH_TO_SPACE",
+                 "SPACE_TO_DEPTH", "TRANSPOSE",
+                 "SQUEEZE", "EXPAND_DIMS",
+                 "SLICE", "STRIDED_SLICE",
+                 "SPLIT", "SPLIT_V",
+                 "PAD", "PADV2", "PACK", "UNPACK", "TILE")
 
 
 def list_supported_ops(interp):
@@ -918,6 +959,7 @@ def main():
         group = 1
         op_kind = OP_CONV
         wgt = np.zeros((0,), dtype=np.int8)            # weights buffer (may be empty)
+        layout_wgt_payload = None
         fc_label = False                                # only set true for FC
         is_fp_layer = False                             # v8: set true inside CONV/DWCONV FP path
         zp_in_eff = 0                                   # int default; FP path keeps it at 0
@@ -2210,6 +2252,203 @@ def main():
                 # length that test_model emits from L.in_size.
                 ref = in_arr.reshape(OH * OW * OC).astype(in_arr.dtype, copy=False)
                 ref_b = ref.tobytes(order="C")
+        elif opname in ("SPACE_TO_DEPTH", "TRANSPOSE",
+                        "SQUEEZE", "EXPAND_DIMS",
+                        "SLICE", "STRIDED_SLICE", "SPLIT", "SPLIT_V",
+                        "PAD", "PADV2", "PACK", "UNPACK", "TILE"):
+            osh_full = list(_tensor_shape(out_t))
+            OH, OW, OC = to_hwc(osh_full)
+            src_for_tnps = np.asarray(in_arr)
+            materialized_tnps = False
+            try:
+                if opname == "SPACE_TO_DEPTH":
+                    try:
+                        opt = fb.SpaceToDepthOptions(); opt.Init(opt_table.Bytes, opt_table.Pos)
+                        block = int(opt.BlockSize())
+                    except Exception:
+                        block = max(1, H // max(OH, 1))
+                    ref_full = in_arr.reshape(H // block, block, W // block, block,
+                                              Cin).transpose(0, 2, 1, 3, 4)
+                    ref_full = ref_full.reshape(H // block, W // block,
+                                                Cin * block * block).astype(in_arr.dtype)
+                    op_kind = OP_S2SPACE
+                    Kh = Kw = block
+                elif opname == "TRANSPOSE":
+                    perm_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
+                    perm = _tensor_array(perm_t).astype(np.int32).tolist() if perm_t else None
+                    src = np.asarray(in_arr)
+                    if perm is None:
+                        perm = list(reversed(range(src.ndim)))
+                    if len(perm) != src.ndim:
+                        raise ValueError("axes don't match array")
+                    ref_full = np.transpose(src, axes=perm)
+                    layout_wgt_payload = _pack_tnps_meta(
+                        src.ndim, elem_size, src.shape, ref_full.shape, perm)
+                    op_kind = OP_TRANSPOSE
+                elif opname == "SQUEEZE":
+                    ref_full = np.squeeze(np.asarray(in_arr))
+                    op_kind = OP_SQUEEZE
+                elif opname == "EXPAND_DIMS":
+                    axis_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
+                    axis_a = _tensor_array(axis_t) if axis_t else None
+                    axis = int(axis_a.reshape(-1)[0]) if axis_a is not None and axis_a.size else 0
+                    ref_full = np.expand_dims(np.asarray(in_arr), axis=axis)
+                    op_kind = OP_EXPAND_DIMS
+                elif opname in ("SLICE", "STRIDED_SLICE"):
+                    src = np.asarray(in_arr)
+                    begin_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
+                    second_t = sg.Tensors(op.Inputs(2)) if op.InputsLength() > 2 else None
+                    begin_a = _tensor_array(begin_t).astype(np.int32) if begin_t else None
+                    second_a = _tensor_array(second_t).astype(np.int32) if second_t else None
+                    stride_a = None
+                    begin_mask = end_mask = 0
+                    if opname == "STRIDED_SLICE":
+                        stride_t = sg.Tensors(op.Inputs(3)) if op.InputsLength() > 3 else None
+                        stride_a = _tensor_array(stride_t).astype(np.int32) if stride_t else None
+                        try:
+                            opt = fb.StridedSliceOptions(); opt.Init(opt_table.Bytes, opt_table.Pos)
+                            begin_mask = int(opt.BeginMask())
+                            end_mask = int(opt.EndMask())
+                        except Exception:
+                            pass
+                    if begin_a is None or second_a is None:
+                        ref_full = _synth_output_array(out_t, OH, OW, OC)
+                        materialized_tnps = True
+                    else:
+                        begin_v = begin_a.reshape(-1).tolist()
+                        second_v = second_a.reshape(-1).tolist()
+                        if opname == "STRIDED_SLICE":
+                            stride_v = (stride_a.reshape(-1).tolist()
+                                        if stride_a is not None else [1] * len(begin_v))
+                        else:
+                            stride_v = [1] * len(begin_v)
+                        slices_np = []
+                        meta_begin = []
+                        meta_stride = []
+                        for ax, b in enumerate(begin_v):
+                            st = stride_v[ax] if ax < len(stride_v) else 1
+                            dim = src.shape[ax]
+                            if begin_mask & (1 << ax):
+                                b = 0 if st > 0 else dim - 1
+                            if b < 0:
+                                b += dim
+                            if opname == "STRIDED_SLICE":
+                                e = second_v[ax] if ax < len(second_v) else dim
+                                if end_mask & (1 << ax):
+                                    e = dim if st > 0 else -1
+                                elif e < 0:
+                                    e += dim
+                            else:
+                                n = second_v[ax] if ax < len(second_v) else -1
+                                e = dim if n < 0 else b + n
+                            slices_np.append(slice(b, e, st))
+                            meta_begin.append(b)
+                            meta_stride.append(st)
+                        ref_full = src[tuple(slices_np)]
+                        layout_wgt_payload = _pack_tnps_meta(
+                            src.ndim, elem_size, src.shape, ref_full.shape,
+                            meta_begin, meta_stride)
+                    op_kind = OP_STRIDED_SLICE if opname == "STRIDED_SLICE" else OP_SLICE
+                elif opname in ("SPLIT", "SPLIT_V"):
+                    axis_input = 0 if opname == "SPLIT" else 3
+                    axis_t = sg.Tensors(op.Inputs(axis_input)) if op.InputsLength() > axis_input else None
+                    axis_a = _tensor_array(axis_t) if axis_t else None
+                    axis = int(axis_a.reshape(-1)[0]) if axis_a is not None and axis_a.size else 0
+                    ref_full = np.split(np.asarray(in_arr), op.OutputsLength(), axis=axis)[0]
+                    op_kind = OP_SPLIT
+                elif opname in ("PAD", "PADV2"):
+                    pad_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
+                    pad_a = _tensor_array(pad_t).astype(np.int32) if pad_t else None
+                    pad_value = 0
+                    if opname == "PADV2" and op.InputsLength() > 2:
+                        val_a = _tensor_array(sg.Tensors(op.Inputs(2)))
+                        if val_a is not None and val_a.size:
+                            pad_value = val_a.reshape(-1)[0]
+                    if pad_a is None:
+                        ref_full = _synth_output_array(out_t, OH, OW, OC)
+                    else:
+                        pad_pairs = pad_a.reshape(-1, 2).tolist()
+                        # Preserve spatial pad metadata for runtime PAD->CONV
+                        # fusion. Canonical HWC uses the last three non-batch
+                        # axes; channel padding remains materialized.
+                        hwc_pad = pad_pairs[1:] if len(pad_pairs) >= 4 else pad_pairs
+                        while len(hwc_pad) < 3:
+                            hwc_pad = [[0, 0]] + hwc_pad
+                        if len(hwc_pad) > 3:
+                            hwc_pad = hwc_pad[-3:]
+                        pT, pB = int(hwc_pad[0][0]), int(hwc_pad[0][1])
+                        pL, pR = int(hwc_pad[1][0]), int(hwc_pad[1][1])
+                        ref_full = np.pad(np.asarray(in_arr), hwc_pad,
+                                          mode="constant", constant_values=pad_value)
+                    op_kind = OP_PAD
+                elif opname == "PACK":
+                    axis = 0
+                    try:
+                        opt = fb.PackOptions(); opt.Init(opt_table.Bytes, opt_table.Pos)
+                        axis = int(opt.Axis())
+                    except Exception:
+                        pass
+                    parts = []
+                    for k in range(op.InputsLength()):
+                        tk = sg.Tensors(op.Inputs(k))
+                        arr = _tensor_array(tk)
+                        if arr is None:
+                            arr = last_output_arr if k == 0 and last_output_arr is not None else in_arr
+                        parts.append(np.asarray(arr))
+                    ref_full = np.stack(parts, axis=axis)
+                    op_kind = OP_PACK
+                elif opname == "UNPACK":
+                    axis = 0
+                    try:
+                        opt = fb.UnpackOptions(); opt.Init(opt_table.Bytes, opt_table.Pos)
+                        axis = int(opt.Axis())
+                    except Exception:
+                        pass
+                    # The current program format has one output tensor per layer.
+                    # Model the first output; multi-output graph wiring remains
+                    # represented by compiler-synthesized downstream inputs.
+                    ref_full = np.take(np.asarray(in_arr), 0, axis=axis)
+                    op_kind = OP_UNPACK
+                elif opname == "TILE":
+                    mult_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
+                    mult_a = _tensor_array(mult_t).astype(np.int32) if mult_t else None
+                    ref_full = (np.tile(np.asarray(in_arr), mult_a.reshape(-1).tolist())
+                                if mult_a is not None else
+                                _synth_output_array(out_t, OH, OW, OC))
+                    op_kind = OP_TILE
+                if np.asarray(ref_full).size != OH * OW * OC:
+                    ref_full = np.asarray(ref_full).reshape(-1)
+                    if ref_full.size != OH * OW * OC:
+                        ref_full = _synth_output_array(out_t, OH, OW, OC)
+                ref = np.asarray(ref_full).reshape(OH, OW, OC).astype(in_arr.dtype, copy=False)
+            except Exception as e:
+                print(f"  layer {li:>2d}  {opname.lower():>7s}  in={H}x{W}x{Cin} "
+                      f"materialized by TNPS fallback ({e})")
+                ref = _synth_output_array(out_t, OH, OW, OC)
+                materialized_tnps = True
+                layout_wgt_payload = None
+                op_kind = {
+                    "SPACE_TO_DEPTH": OP_S2SPACE,
+                    "TRANSPOSE": OP_TRANSPOSE,
+                    "SQUEEZE": OP_SQUEEZE,
+                    "EXPAND_DIMS": OP_EXPAND_DIMS,
+                    "SLICE": OP_SLICE,
+                    "STRIDED_SLICE": OP_STRIDED_SLICE,
+                    "SPLIT": OP_SPLIT,
+                    "SPLIT_V": OP_SPLIT,
+                    "PAD": OP_PAD,
+                    "PADV2": OP_PAD,
+                    "PACK": OP_PACK,
+                    "UNPACK": OP_UNPACK,
+                    "TILE": OP_TILE,
+                }[opname]
+            if materialized_tnps or op_kind not in (OP_S2SPACE, OP_TRANSPOSE, OP_SLICE, OP_STRIDED_SLICE):
+                H, W, Cin = OH, OW, OC
+                in_arr = ref
+            else:
+                in_arr = src_for_tnps
+            in_i8 = in_arr
+            ref_b = ref.tobytes(order="C")
         elif opname == "DEPTH_TO_SPACE":
             try:
                 d2s = fb.DepthToSpaceOptions(); d2s.Init(opt_table.Bytes, opt_table.Pos)
@@ -2234,7 +2473,9 @@ def main():
 
         # Preserve native dtype bytes (int8 → 1B/elem, int16 → 2B/elem).
         in_b  = in_arr.tobytes(order="C")
-        if op_kind in (OP_CONV, OP_DWCONV, OP_FC):
+        if layout_wgt_payload is not None:
+            wgt_b = layout_wgt_payload
+        elif op_kind in (OP_CONV, OP_DWCONV, OP_FC):
             wgt_b = conv_wgt_payload                      # weights + params blob
         elif op_kind in (OP_ADD, OP_MUL, OP_SUB,
                          OP_HARD_SWISH, OP_GELU):

@@ -23,10 +23,11 @@ SC_MODULE(CommandEngine) {
     sc_core::sc_fifo_out<DescriptorBody> requant_cfg_out;
     sc_core::sc_fifo_out<DescriptorBody> ewe_cfg_out;
     sc_core::sc_fifo_out<DescriptorBody> pool_cfg_out;
+    sc_core::sc_fifo_out<DescriptorBody> tnps_cfg_out;
     sc_core::sc_fifo_out<DescriptorBody> udma_cfg_out;
 
     // done_tag from each engine:
-    sc_core::sc_fifo_in<uint8_t> conv_done, requant_done, ewe_done, pool_done, udma_done;
+    sc_core::sc_fifo_in<uint8_t> conv_done, requant_done, ewe_done, pool_done, tnps_done, udma_done;
 
     // Side-channel for v0: latch dtype into CONV/Requant before dispatch.
     // v8.17: same wiring extended to EWE/POOL so the FP path picks up FP16
@@ -129,6 +130,7 @@ SC_MODULE(CommandEngine) {
         case OC_CONV:    base = 30; break;
         case OC_REQUANT: base = 40; break;
         case OC_POOL:    base = 40; break;
+        case OC_TNPS:    base = 45; break;
         default:         base = 70; break;
         }
         // Microblock wavefront tie-breaker: keep work roughly in tile order
@@ -186,6 +188,7 @@ SC_MODULE(CommandEngine) {
         case OC_POOL:
             if (pool_dtype_latch) *pool_dtype_latch = d.hdr.dtype;
             pool_cfg_out.write(d.body); break;
+        case OC_TNPS:   tnps_cfg_out.write(d.body); break;
         case OC_UDMA:   udma_cfg_out.write(d.body); break;
         default:
             std::cout << "[CmdEng] unknown op_class\n"; break;
@@ -201,11 +204,13 @@ SC_MODULE(CommandEngine) {
                | requant_done.data_written_event()
                | ewe_done.data_written_event()
                | pool_done.data_written_event()
+               | tnps_done.data_written_event()
                | udma_done.data_written_event());
             check(conv_done,    OC_CONV);
             check(requant_done, OC_REQUANT);
             check(ewe_done,     OC_EWE);
             check(pool_done,    OC_POOL);
+            check(tnps_done,    OC_TNPS);
             check(udma_done,    OC_UDMA);
         }
     }

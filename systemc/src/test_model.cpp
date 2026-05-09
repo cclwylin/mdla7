@@ -61,8 +61,19 @@ enum OpKindEnum : uint16_t {
     OK_SUB        = 11,       // v8.30: element-wise binary subtract
     OK_HARD_SWISH = 12,       // v8.30: unary x * relu6(x+3) / 6 (mobilenet_v3)
     OK_GELU       = 13,       // v8.30: unary x * Φ(x), tanh-approx (transformers)
-    OK_D2SPACE    = 14,       // v8.32: DEPTH_TO_SPACE / pixel shuffle via UDMA
+    OK_D2SPACE    = 14,       // v8.32: DEPTH_TO_SPACE / pixel shuffle via TNPS
     OK_MATERIALIZE = 15,      // compiler fallback: pre-materialized output bytes
+    OK_TRANSPOSE  = 16,
+    OK_S2SPACE    = 17,
+    OK_SQUEEZE    = 18,
+    OK_EXPAND_DIMS = 19,
+    OK_SLICE      = 20,
+    OK_STRIDED_SLICE = 21,
+    OK_PAD        = 22,
+    OK_PACK       = 23,
+    OK_UNPACK     = 24,
+    OK_TILE       = 25,
+    OK_SPLIT      = 26,
 };
 inline const char* op_name(uint16_t k) {
     switch (k) {
@@ -82,6 +93,17 @@ inline const char* op_name(uint16_t k) {
         case OK_GELU:       return "   gelu";
         case OK_D2SPACE:    return "d2spac";
         case OK_MATERIALIZE:return "matrlz";
+        case OK_TRANSPOSE:  return " trnps";
+        case OK_S2SPACE:    return "s2spac";
+        case OK_SQUEEZE:    return "squeez";
+        case OK_EXPAND_DIMS:return "expand";
+        case OK_SLICE:      return " slice";
+        case OK_STRIDED_SLICE:return "sslice";
+        case OK_PAD:        return "   pad";
+        case OK_PACK:       return "  pack";
+        case OK_UNPACK:     return "unpack";
+        case OK_TILE:       return "  tile";
+        case OK_SPLIT:      return " split";
     }
     return "??unknown";
 }
@@ -149,7 +171,7 @@ Descriptor make_udma_act_decomp(uint32_t src, uint32_t dst, uint32_t raw_bytes,
     return d;
 }
 
-Descriptor make_udma_d2s(uint32_t src, uint32_t dst,
+[[maybe_unused]] Descriptor make_udma_d2s(uint32_t src, uint32_t dst,
                          uint16_t in_h, uint16_t in_w, uint16_t in_c,
                          uint16_t block, uint8_t elem_size,
                          uint8_t signal_tag, uint8_t wait_a = 0) {
@@ -173,6 +195,81 @@ Descriptor make_udma_d2s(uint32_t src, uint32_t dst,
     u.slice_begin[1] = in_c;
     u.slice_begin[2] = block;
     u.slice_begin[3] = out_c;
+    return d;
+}
+
+Descriptor make_tnps(uint32_t src, uint32_t dst, uint32_t bytes,
+                     uint8_t signal_tag, uint8_t wait_a = 0, uint8_t wait_b = 0,
+                     uint8_t mode = TM_LINEAR_COPY) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_TNPS;
+    d.hdr.dtype = DT_INT8x8;
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = (wait_a ? 1 : 0) + (wait_b ? 1 : 0);
+    d.hdr.wait_tags[0] = wait_a;
+    d.hdr.wait_tags[1] = wait_b;
+    auto& t = d.body.tnps;
+    t.mode = mode;
+    t.src_addr = src;
+    t.dst_addr = dst;
+    t.length = bytes;
+    return d;
+}
+
+Descriptor make_tnps_d2s(uint32_t src, uint32_t dst,
+                         uint16_t in_h, uint16_t in_w, uint16_t in_c,
+                         uint16_t block, uint8_t elem_size,
+                         uint8_t signal_tag, uint8_t wait_a = 0) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_TNPS;
+    d.hdr.dtype = DT_INT8x8;
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& t = d.body.tnps;
+    const uint16_t out_c = uint16_t(in_c / std::max<uint16_t>(1, block * block));
+    t.mode = TM_DEPTH_TO_SPACE;
+    t.src_addr = src;
+    t.dst_addr = dst;
+    t.length = elem_size;
+    t.src_stride = uint32_t(in_w) * in_c * elem_size;
+    t.dst_stride = uint32_t(in_w) * block * out_c * elem_size;
+    t.num_chunks = in_h;
+    t.slice_begin[0] = in_w;
+    t.slice_begin[1] = in_c;
+    t.slice_begin[2] = block;
+    t.slice_begin[3] = out_c;
+    return d;
+}
+
+Descriptor make_tnps_s2d(uint32_t src, uint32_t dst,
+                         uint16_t in_h, uint16_t in_w, uint16_t in_c,
+                         uint16_t block, uint16_t out_c, uint8_t elem_size,
+                         uint8_t signal_tag, uint8_t wait_a = 0) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_TNPS;
+    d.hdr.dtype = DT_INT8x8;
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& t = d.body.tnps;
+    t.mode = TM_SPACE_TO_DEPTH;
+    t.src_addr = src;
+    t.dst_addr = dst;
+    t.length = elem_size;
+    t.num_chunks = in_h;
+    t.slice_begin[0] = in_w;
+    t.slice_begin[1] = in_c;
+    t.slice_begin[2] = block;
+    t.slice_begin[3] = out_c;
+    return d;
+}
+
+Descriptor make_tnps_meta(uint8_t mode, uint32_t src, uint32_t dst,
+                          uint32_t bytes, uint32_t meta_addr,
+                          uint8_t signal_tag, uint8_t wait_a = 0) {
+    Descriptor d = make_tnps(src, dst, bytes, signal_tag, wait_a, 0, mode);
+    d.body.tnps.idx_table_addr = meta_addr;
     return d;
 }
 
@@ -717,6 +814,8 @@ int sc_main(int argc, char* argv[]) {
     // suppressed as producer->consumer intermediate boundaries.
     std::vector<size_t> ewe_count_at_layer_end(N, 0);
     size_t ewe_count_so_far = 0;
+    std::vector<size_t> tnps_count_at_layer_end(N, 0);
+    size_t tnps_count_so_far = 0;
 
     // v8.13: L1-resident layer fusion state. When the previous layer was a
     // single-tile CONV/DWCONV/FC and the current layer's input shape+dtype
@@ -894,6 +993,25 @@ int sc_main(int argc, char* argv[]) {
             (!conservative_mul_graph && S.op_kind == OK_MUL) ||
             S.op_kind == OK_AVG_POOL || S.op_kind == OK_MAX_POOL ||
             S.op_kind == OK_D2SPACE)
+            producer_no_store[k] = true;
+    }
+
+    // PAD -> CONV: keep the unpadded producer output in L1 and let CONV's
+    // boundary pad logic synthesize the halo. This removes the intermediate
+    // TNPS materialization (not just overlaps it) for patterns such as
+    // sd_decoder L15 -> L16 PAD -> L17 CONV.
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        if (P.op_kind != OK_PAD || !is_conv_class_meta(S))
+            continue;
+        if (P.dtype != S.dtype || P.out_h != S.in_h ||
+            P.out_w != S.in_w || P.out_c != S.in_c)
+            continue;
+        const bool spatial_pad =
+            (P.p_t || P.p_b || P.p_l || P.p_r) &&
+            P.p_t <= 7 && P.p_b <= 7 && P.p_l <= 7 && P.p_r <= 7;
+        if (spatial_pad)
             producer_no_store[k] = true;
     }
 
@@ -1135,6 +1253,30 @@ int sc_main(int argc, char* argv[]) {
     }
 
     for (uint32_t i = 0; i < N; ++i) {
+        if (i > 0 && is_conv_class_meta(metas[i]) &&
+            metas[i - 1].op_kind == OK_PAD && udma_w_skipped[i - 1] &&
+            fuse_prev_is_conv_class && fuse_prev_single_tile &&
+            fuse_prev_dtype == metas[i].dtype) {
+            auto& C = metas[i];
+            const auto& P = metas[i - 1];
+            const uint32_t padded_h = uint32_t(fuse_prev_out_h) + P.p_t + P.p_b;
+            const uint32_t padded_w = uint32_t(fuse_prev_out_w) + P.p_l + P.p_r;
+            if (padded_h == C.in_h && padded_w == C.in_w &&
+                fuse_prev_out_c == C.in_c &&
+                uint32_t(C.p_t) + P.p_t <= 7 &&
+                uint32_t(C.p_b) + P.p_b <= 7 &&
+                uint32_t(C.p_l) + P.p_l <= 7 &&
+                uint32_t(C.p_r) + P.p_r <= 7) {
+                C.in_h = fuse_prev_out_h;
+                C.in_w = fuse_prev_out_w;
+                C.p_t = uint8_t(C.p_t + P.p_t);
+                C.p_b = uint8_t(C.p_b + P.p_b);
+                C.p_l = uint8_t(C.p_l + P.p_l);
+                C.p_r = uint8_t(C.p_r + P.p_r);
+                C.in_size = fuse_prev_l1_out_size;
+                mark_flow_edge(i - 1, i);
+            }
+        }
         const auto& L = metas[i];
         // v8 / v8.10: per-dtype element width.  FP layers now store FP16 in
         // DRAM/L1 (2 B/elem); compute uses FP32 internally.
@@ -1365,7 +1507,7 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             }
 
-            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_tnps(N, 0);
             std::vector<uint8_t> slot_done(STREAM_SLOTS, 0);
             uint8_t prev_store = 0;
             TileCommand stream_tc{};
@@ -1537,15 +1679,15 @@ int sc_main(int argc, char* argv[]) {
                         const uint8_t add_req_tag = alloc_tag();
                         const uint8_t add_st_tag = alloc_tag();
 
-                        emit_stream(make_udma_d2s(output_addr, input_addr,
+                        emit_stream(make_tnps_d2s(output_addr, input_addr,
                                                   uint16_t(out_rows), A.out_w, A.out_c,
                                                   block, uint8_t(elem), d2s_tag, req_tag),
                                     mb, end + 1, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0),
                                     true);
                         acc[end + 1].sram_r += out_bytes;
                         acc[end + 1].sram_w += add_tile_bytes;
-                        ++udma_count_so_far;
-                        last_udma[end + 1] = udma_count_so_far;
+                        ++tnps_count_so_far;
+                        last_tnps[end + 1] = tnps_count_so_far;
                         udma_w_skipped[end + 1] = true;
                         udma_w_streamed[end + 1] = true;
                         mark_flow_edge(end + 1, end + 2);
@@ -1612,6 +1754,7 @@ int sc_main(int argc, char* argv[]) {
             if (stream_to_d2s_add) {
                 udma_count_at_layer_end[end + 1] = last_udma[end + 1];
                 udma_count_at_layer_end[end + 2] = last_udma[end + 2];
+                tnps_count_at_layer_end[end + 1] = last_tnps[end + 1];
                 tiles_h_per_layer[end + 1] = uint16_t((H + tile_oh - 1) / tile_oh);
                 tiles_h_per_layer[end + 2] = uint16_t((H + tile_oh - 1) / tile_oh);
             }
@@ -1752,7 +1895,7 @@ int sc_main(int argc, char* argv[]) {
                 acc[k].sram_w += bb.scale_lut + bb.corr + bb.pure_wgt;
             }
 
-            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_tnps(N, 0);
             uint8_t prev_tile_done = 0;
             uint8_t group_done = 0;
             uint16_t tile_id = 0;
@@ -2531,7 +2674,7 @@ int sc_main(int argc, char* argv[]) {
                 program.push_back(d);
             };
 
-            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_tnps(N, 0);
             const uint8_t params_tag = alloc_tag();
             const uint8_t wgt_tag = alloc_tag();
             program.push_back(make_udma(A.dram_wgt + uint32_t(pure_wgt),
@@ -2635,15 +2778,15 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_streamed[i] = true;
 
                 const uint8_t d2s_tag = alloc_tag();
-                emit_stream(make_udma_d2s(L1_CONV_OUT, D.dram_out + d2s_dram_off,
+                emit_stream(make_tnps_d2s(L1_CONV_OUT, D.dram_out + d2s_dram_off,
                                           uint16_t(this_oh), A.out_w, A.out_c,
                                           block, uint8_t(elem), d2s_tag, req_tag),
                             mb, i + 1, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0),
                             true);
                 acc[i + 1].sram_r += out_bytes;
                 acc[i + 1].dram_w += d2s_bytes;
-                ++udma_count_so_far;
-                last_udma[i + 1] = udma_count_so_far;
+                ++tnps_count_so_far;
+                last_tnps[i + 1] = tnps_count_so_far;
                 d2s_done = d2s_tag;
                 slot_done = d2s_tag;
             }
@@ -2658,6 +2801,7 @@ int sc_main(int argc, char* argv[]) {
             udma_count_at_layer_end[i + 1] = last_udma[i + 1];
             requant_count_at_layer_end[i + 1] = 0;
             ewe_count_at_layer_end[i + 1] = 0;
+            tnps_count_at_layer_end[i + 1] = last_tnps[i + 1];
             layer_done_tag[i] = conv_done;
             layer_done_tag[i + 1] = d2s_done;
             mark_flow_edge(i, i + 1);
@@ -4083,13 +4227,11 @@ int sc_main(int argc, char* argv[]) {
             } else {
                 const uint8_t d2s_tag = alloc_tag();
                 const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
-                program.push_back(make_udma_d2s(L.dram_in, L.dram_out,
+                program.push_back(make_tnps_d2s(L.dram_in, L.dram_out,
                                                 L.in_h, L.in_w, L.in_c,
                                                 block, uint8_t(elem_size),
                                                 d2s_tag, wait_prev));
                 acc[i].dram_w += L.ref_size;
-                ++udma_count_so_far;
-                udma_count_at_layer_end[i] = udma_count_so_far;
                 layer_done_tag[i] = d2s_tag;
             }
             fuse_prev_l1_out_addr   = 0;
@@ -4682,6 +4824,74 @@ int sc_main(int argc, char* argv[]) {
             else                  chain_alt = 0;
             break;
         }
+        case OK_TRANSPOSE:
+        case OK_S2SPACE:
+        case OK_SQUEEZE:
+        case OK_EXPAND_DIMS:
+        case OK_SLICE:
+        case OK_STRIDED_SLICE:
+        case OK_SPLIT:
+        case OK_PAD:
+        case OK_PACK:
+        case OK_UNPACK:
+        case OK_TILE: {
+            flush_pending();
+            if (producer_no_store[i]) {
+                udma_w_skipped[i] = true;
+                udma_w_streamed[i] = true;
+                layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                if (L.op_kind == OK_PAD && i + 1 < N && is_conv_class_meta(metas[i + 1])) {
+                    if (i > 0)
+                        mark_flow_edge(i - 1, i);
+                    mark_flow_edge(i, i + 1);
+                    // Preserve the previous producer's L1-resident output so
+                    // the following CONV can fold this PAD into its halo.
+                } else {
+                    fuse_prev_l1_out_addr   = 0;
+                    fuse_prev_l1_out_size   = 0;
+                    fuse_prev_single_tile   = false;
+                    fuse_prev_is_conv_class = false;
+                    clear_prev_binary_ewe_live();
+                    chain_alt = 0;
+                }
+                break;
+            }
+            const uint32_t elem_size = (L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8
+                                     || L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8) ? 2u : 1u;
+            const uint8_t tnps_tag = alloc_tag();
+            const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
+            if (L.op_kind == OK_S2SPACE) {
+                const uint16_t block = L.k_h ? L.k_h : 1;
+                program.push_back(make_tnps_s2d(L.dram_in, L.dram_out,
+                                                L.in_h, L.in_w, L.in_c,
+                                                block, L.out_c, uint8_t(elem_size),
+                                                tnps_tag, wait_prev));
+            } else if ((L.op_kind == OK_TRANSPOSE ||
+                        L.op_kind == OK_SLICE ||
+                        L.op_kind == OK_STRIDED_SLICE) && L.wgt_size >= 104) {
+                const uint8_t mode = (L.op_kind == OK_TRANSPOSE)
+                                   ? TM_TRANSPOSE : TM_STRIDED_SLICE;
+                program.push_back(make_tnps_meta(mode, L.dram_in, L.dram_out,
+                                                 L.ref_size, L.dram_wgt,
+                                                 tnps_tag, wait_prev));
+                acc[i].dram_r += L.wgt_size;
+            } else {
+                program.push_back(make_tnps(L.dram_in, L.dram_out, L.ref_size,
+                                            tnps_tag, wait_prev));
+            }
+            acc[i].dram_r += L.in_size;
+            acc[i].dram_w += L.ref_size;
+            acc[i].sram_r += L.in_size;
+            acc[i].sram_w += L.ref_size;
+            layer_done_tag[i] = tnps_tag;
+            fuse_prev_l1_out_addr   = 0;
+            fuse_prev_l1_out_size   = 0;
+            fuse_prev_single_tile   = false;
+            fuse_prev_is_conv_class = false;
+            clear_prev_binary_ewe_live();
+            chain_alt = 0;
+            break;
+        }
         case OK_MATERIALIZE: {
             flush_pending();
             if (producer_no_store[i]) {
@@ -4696,32 +4906,14 @@ int sc_main(int argc, char* argv[]) {
                 chain_alt = 0;
                 break;
             }
-            // Materialized fallback layers consume the compiler's reference
-            // bytes as their source. Some fallbacks intentionally break the
-            // normal input-chain semantics (runtime FC, unsupported reduce
-            // axes, descriptor-overflow tensors), so seed dram_in from ref_off
-            // here before the modeled DRAM->L1->DRAM copy.
             sys.dram.write(L.dram_in, file.data() + L.ref_off, L.ref_size);
-            const uint32_t L1_TMP = 0;
-            const uint32_t chunk_max = std::min<uint32_t>(L1_BUDGET / 2, 1u << 20);
-            uint32_t done = 0;
-            uint8_t prev_tag = 0;
-            while (done < L.ref_size) {
-                const uint32_t chunk = std::min<uint32_t>(chunk_max, L.ref_size - done);
-                const uint8_t rd_tag = alloc_tag();
-                const uint8_t wr_tag = alloc_tag();
-                program.push_back(make_udma(uint32_t(L.dram_in + done), L1_TMP,
-                                            chunk, /*dir*/ 0, rd_tag, prev_tag));
-                program.push_back(make_udma(L1_TMP, uint32_t(L.dram_out + done),
-                                            chunk, /*dir*/ 1, wr_tag, rd_tag));
-                acc[i].dram_r += chunk;
-                acc[i].dram_w += chunk;
-                acc[i].sram_w += chunk;
-                acc[i].sram_r += chunk;
-                prev_tag = wr_tag;
-                done += chunk;
-            }
-            layer_done_tag[i] = prev_tag;
+            const uint8_t tnps_tag = alloc_tag();
+            program.push_back(make_tnps(L.dram_in, L.dram_out, L.ref_size, tnps_tag));
+            acc[i].dram_r += L.ref_size;
+            acc[i].dram_w += L.ref_size;
+            acc[i].sram_r += L.ref_size;
+            acc[i].sram_w += L.ref_size;
+            layer_done_tag[i] = tnps_tag;
             fuse_prev_l1_out_addr   = 0;
             fuse_prev_l1_out_size   = 0;
             fuse_prev_single_tile   = false;
@@ -4747,48 +4939,27 @@ int sc_main(int argc, char* argv[]) {
             }
             // Pure DRAM→DRAM passthrough; bytes already in their final layout.
             const uint8_t st_tag = alloc_tag();
-            program.push_back(make_udma(L.dram_in, L.dram_out, L.in_size,
-                                        /*dir*/ 1, st_tag));
+            program.push_back(make_tnps(L.dram_in, L.dram_out, L.in_size,
+                                        st_tag));
             acc[i].dram_r += L.in_size;
             acc[i].dram_w += L.in_size;
             layer_done_tag[i] = st_tag;
             break;
         }
         case OK_CONCAT: {
-            auto emit_concat_barrier = [&]() {
-                const uint8_t prev_done = (i > 0) ? layer_done_tag[i - 1] : 0;
-                if (!prev_done) return;
-                const uint8_t barrier_tag = alloc_tag();
-                program.push_back(make_udma(0, L.dram_out, 1,
-                                            /*dir*/ 1, barrier_tag, prev_done));
-                acc[i].sram_r += 1;
-                acc[i].dram_w += 1;
-                layer_done_tag[i] = barrier_tag;
-            };
-            if (conservative_mul_graph) {
-                // MUL-heavy graphs (YOLO/MobileNet-like) need the previous
-                // store as a scheduling barrier, but CONCAT itself is still a
-                // metadata-only boundary: downstream layers have synthetic
-                // preloaded inputs, so the concat DRAM copy is verification
-                // noise.
-                flush_pending();
-                udma_w_skipped[i] = true;
-                udma_w_streamed[i] = true;
-                layer_done_tag[i] = 0;
-                break;
-            }
-            // v8.34: logical channel concat. compile_model already materializes
-            // the concatenated tensor bytes for each downstream layer's synthetic
-            // dram_in, so this layer's old DRAM→DRAM copy was only an
-            // intermediate verification boundary. Treat concat as metadata-only
-            // and skip the writeback/readback accounting.
-            if (pending.active) {
-                udma_w_skipped[pending.layer_idx] = true;
-                pending.active = false;
-            }
-            udma_w_skipped[i] = true;
-            udma_w_streamed[i] = true;
-            emit_concat_barrier();
+            flush_pending();
+            const uint8_t st_tag = alloc_tag();
+            const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
+            program.push_back(make_tnps(L.dram_in, L.dram_out, L.in_size,
+                                        st_tag, wait_prev, 0,
+                                        TM_SCATTER_CONCAT));
+            // compile_model already packs the concat reference as this layer's
+            // input blob.  Until multi-source TNPS descriptors are emitted,
+            // execute it as a TNPS materialized layout op.
+            program.back().body.tnps.mode = TM_LINEAR_COPY;
+            acc[i].dram_r += L.in_size;
+            acc[i].dram_w += L.in_size;
+            layer_done_tag[i] = st_tag;
             break;
         }
         default:
@@ -4816,10 +4987,12 @@ int sc_main(int argc, char* argv[]) {
             if (oc == OC_UDMA)    ++udma_count_so_far;
             if (oc == OC_REQUANT) ++requant_count_so_far;
             if (oc == OC_EWE)     ++ewe_count_so_far;
+            if (oc == OC_TNPS)    ++tnps_count_so_far;
         }
         udma_count_at_layer_end[i]    = udma_count_so_far;
         requant_count_at_layer_end[i] = requant_count_so_far;
         ewe_count_at_layer_end[i]     = ewe_count_so_far;
+        tnps_count_at_layer_end[i]    = tnps_count_so_far;
     }
     // v8.14: flush any final deferred udma_w (last layer was a single-tile
     // CONV/DWCONV/FC and never had a successor to resolve the pending).
@@ -4990,14 +5163,17 @@ int sc_main(int argc, char* argv[]) {
         const size_t   uk = udma_count_at_layer_end[i];
         const size_t   rk = requant_count_at_layer_end[i];
         const size_t   ek = ewe_count_at_layer_end[i];
+        const size_t   tk = tnps_count_at_layer_end[i];
         const uint64_t udma_end = (uk > 0 && uk <= sys.udma.tasks.size())
                                 ? sys.udma.tasks[uk - 1].second : 0;
         const uint64_t req_end  = (rk > 0 && rk <= sys.requant.tasks.size())
                                 ? sys.requant.tasks[rk - 1].second : 0;
         const uint64_t ewe_end  = (ek > 0 && ek <= sys.ewe.tasks.size())
                                 ? sys.ewe.tasks[ek - 1].second : 0;
+        const uint64_t tnps_end = (tk > 0 && tk <= sys.tnps.tasks.size())
+                                ? sys.tnps.tasks[tk - 1].second : 0;
         const uint64_t prev_ns = uint64_t(prev_done.to_seconds() * 1e9);
-        uint64_t done_ns = std::max(std::max(udma_end, req_end), ewe_end);
+        uint64_t done_ns = std::max(std::max(std::max(udma_end, req_end), ewe_end), tnps_end);
         if (done_ns == 0) done_ns = prev_ns;
         const uint64_t cyc_total = done_ns;
         const uint64_t cyc_layer = (done_ns > prev_ns) ? (done_ns - prev_ns) : 0;
@@ -5083,6 +5259,7 @@ int sc_main(int argc, char* argv[]) {
         {"requant", cyc(sys.requant.busy_time),       &sys.requant.tasks},
         {"ewe",     cyc(sys.ewe    .busy_time),       &sys.ewe    .tasks},
         {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks},
+        {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks},
     };
     // v7.1: aggregate engine utilization (sum-busy / (N_lanes * total_cycles)).
     // v8.4: 6 lanes now (udma_r/udma_w split).

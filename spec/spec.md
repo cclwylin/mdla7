@@ -39,10 +39,10 @@ MDLA7 是一個類 Edge-TPU 的 NN 加速器，採用「RISC-V host + 中央 con
 | Compute | **Requant Engine** | — | INT8/INT32 重新量化（scale + shift + zero-point）`[TBD]` |
 | Compute | **EWE Engine** | — | Element-Wise（add / mul / activation, ReLU 系），**64 elem/cyc** |
 | Compute | **POOL Engine** | — | Max / Avg pooling `[TBD]` |
-| Compute | **TNPS Engine** | — | Tensor 軸重排 / transpose（permute、dim swap、NHWC↔NCHW、attention Q/K/V 重排）；data-movement only，不做 MAC `[TBD]` |
+| Compute | **TNPS Engine** | 8R + 8W Payload | Tensor 軸重排 / transpose / slice / space-depth / concat materialize；data-movement only，不做 MAC |
 | Mem ctrl | **L1_Manager** | non-CONV 中央仲裁 | Requant / EWE / POOL / TNPS + UDMA + L1Mesh SRAM 之間的 traffic arbiter；CONV ACT/WGT read bypass |
 | On-chip mem | **L1Mesh SRAM** | **3 MB @ 1.3 GHz** | 2 x 4x4 banked SRAM NoC 工作 buffer（activation / weight tile）；dual mesh fabric shares one 16-bank SRAM backend |
-| DMA | **UDMA** | 5 op modes | DRAM ↔ on-chip 搬運；含 LINEAR / STRIDED_2D / INDEXED_GATHER / SCATTER_CONCAT / STRIDED_SLICE（見 §3A.9） |
+| DMA | **UDMA** | copy / codec modes | DRAM ↔ on-chip 搬運；主要負責 LINEAR / STRIDED_2D / ACT compression-decompression。Tensor layout 類 op 由 TNPS 接手（見 §3A.7b / §3A.9） |
 | Off-chip | **DRAM (LPDDR5X-10667)** | **4 GB** | host shared / model weight / activation tensor；JEDEC LPDDR5X，10.667 Gbps/pin，dual-channel x32 → 85.3 GB/s peak |
 
 ---
@@ -560,16 +560,30 @@ replacement for the EWE/POOL arithmetic described above.
 
 ---
 
-## 3A.7b TNPS Engine — proposal
+## 3A.7b TNPS Engine
 
 ### 用途
 
-軸重排 / transpose / permute。常見場景：
+軸重排 / transpose / permute / tensor data movement。TNPS 已在 SystemC model 中作為獨立 engine 接到 Command Engine，profile / Gantt 也有 `tnps` lane。常見場景：
 - **Attention path**：`[B, S, H, D]` → `[B, H, S, D]`（split heads），以及 Q·Kᵀ 之前的 `[B, H, S, D]` → `[B, H, D, S]`。
 - **Layout 轉換**：NHWC ↔ NCHW（外部 framework 偶爾要求 NCHW 輸出）。
 - **Conv → FC 銜接**：`[B, H, W, C]` flatten 前的維度重排（多數情況 RESHAPE 即可，但若有 channel-last 排序需求則走 TNPS）。
+- **Pixel shuffle 類 op**：`DEPTH_TO_SPACE` / `SPACE_TO_DEPTH`。
+- **Tensor movement op**：`SLICE` / `STRIDED_SLICE` / `CONCAT` / `PACK` / `UNPACK` / `TILE` 等由 TNPS lane 計 cycle；其中部分先以 materialized layout path 保 functional correctness。
 
 設計 rationale：把 transpose 從 UDMA 的 STRIDED_SLICE / SCATTER_CONCAT path 拆出來成獨立 engine，避免 UDMA 在 transformer block 內被 attention reshape 拖到 DRAM round-trip。TNPS 走 L1↔L1，純 on-chip。
+
+### 目前 SystemC coverage
+
+| OP | TNPS 實作狀態 |
+|---|---|
+| `DEPTH_TO_SPACE` | 真 TNPS kernel |
+| `SPACE_TO_DEPTH` | 真 TNPS kernel |
+| `TRANSPOSE` | metadata-driven TNPS kernel，支援最多 6D |
+| `SLICE` / `STRIDED_SLICE` | metadata-driven TNPS kernel，支援 begin/end/stride |
+| `RESHAPE` / `SQUEEZE` / `EXPAND_DIMS` | metadata-only 能 fuse 時不寫 DRAM；需要 materialize 時走 TNPS linear path |
+| `CONCATENATION` | 目前由 compiler 產生 packed tensor，runtime 走 TNPS materialized layout path；multi-source descriptor 尚未保存 |
+| `PAD` / `PACK` / `UNPACK` / `TILE` / `SPLIT` | 先走 TNPS materialized layout path |
 
 ### 操作模型
 
@@ -577,11 +591,11 @@ replacement for the EWE/POOL arithmetic described above.
 |---|---|
 | 輸入 / 輸出 | **L1Mesh ↔ L1Mesh**（不直接觸 DRAM；如需要，由 UDMA 接力） |
 | 軸數 | 最多 **6D**（cover NCHW + batch + head + spatial 細分） |
-| Permute 表達 | descriptor 帶 6-byte `axis_perm[6]`（input axis index → output position） |
+| Permute 表達 | TNPS metadata table 帶 `axis_perm[6]`（output axis k 取 input axis `axis_perm[k]`） |
 | Stride | 任意 stride（不限 power-of-2）；HW 內部 6 個 nested counter |
 | Dtype 支援 | INT8 / INT16 / FP8 / FP16 / BFP16（純 byte-wise 搬運，沒有 numerical op） |
 | In-place | 不支援（src ≠ dst region；L1 budget 端調度） |
-| Broadcast | 不支援（單純重排，不複製） |
+| Broadcast | 不支援在真 kernel；需要複製/填值的 op 先走 materialized path |
 
 ### 算力 / BW
 
@@ -599,9 +613,8 @@ replacement for the EWE/POOL arithmetic described above.
 ### Cycle 模型
 
 ```
-cycles = ceil(total_bytes / 128)
-       + perm_setup_overhead   (估 16 cyc，descriptor decode + counter init)
-       + drain_overhead        (估 8 cyc)
+cycles = ceil((read_bytes + write_bytes) / 128)
+       + setup_overhead        (約 8 cyc)
 ```
 
 無 row-miss penalty（純 L1 操作）。
@@ -616,11 +629,13 @@ cycles = ceil(total_bytes / 128)
 - **Conv → channel-shuffle (ShuffleNet)**：CONV → Requant → TNPS（reshape + permute）→ 下一 CONV。
 - 跟 RESHAPE 的差異：RESHAPE 是純 metadata 改動（DRAM bytes 不動），TNPS 是真實的 byte permute（必須 read-modify-write）。
 
-### `[TBD]`
+### 後續項目
 
-- 是否需要 fuse 連續兩個 transpose（merge perm tables）`[TBD]`
-- 是否支援 quantize-on-the-fly（搬運途中 INT8↔INT16）`[TBD]` — 目前傾向**否**，留給 Requant Engine
-- 6D 上限是否夠（GPT-style head split 偶爾 7D `[B, layers, S, H, D, ...]`）`[TBD]`
+- `CONCATENATION` 改成真正 multi-source TNPS descriptor，而不是 compiler packed tensor。
+- `PAD` / `PACK` / `UNPACK` / `TILE` 從 materialized path 拆成真 kernel。
+- 連續 transpose 是否在 compiler 合併 perm table。
+- 是否支援 quantize-on-the-fly（搬運途中 INT8↔INT16）目前傾向**否**，留給 Requant Engine。
+- 6D 上限是否夠（GPT-style head split 偶爾 7D `[B, layers, S, H, D, ...]`）。
 
 ---
 
@@ -692,15 +707,18 @@ Host 在 compile time 構出整張 NN graph 的 task 依賴關係（CONV →requ
 
 ## 3A.9 UDMA Op Modes
 
-UDMA 不只是線性 copy；為了支援 transformer / detector / inception 系列模型，必須提供下列 5 種 op mode：
+UDMA 是 DRAM ↔ L1 的搬運與 activation codec engine；tensor layout / transpose 類 op 由 TNPS 負責。UDMA 保留部分 legacy data-move mode 供 fallback 或 debug，但主路徑分工如下：
 
 | Mode | 行為 | 用途 / 對應模型 op |
 |---|---|---|
 | `LINEAR_COPY` | `dst[i] = src[i]`，一段連續 byte | 一般 weight / activation 預載 |
-| `STRIDED_2D` | 2D tile 含 src/dst stride | CONV tile preload、transpose |
-| `INDEXED_GATHER` | `dst[i] = src[idx_table[i] × elem_size]` | **token embedding lookup**（BERT / DistilBERT / MobileBERT / Albert） |
-| `SCATTER_CONCAT` | 多個 source 寫到 dst 連續區段 | **concat**（Inception / DenseNet / YOLO / EfficientDet BiFPN） |
-| `STRIDED_SLICE` | 從大 tensor 取子區段（含 begin/end/stride 各軸） | **patch embedding**（ViT / MobileViT）、tensor slice |
+| `STRIDED_2D` | 2D tile 含 src/dst stride | CONV tile preload / row copy |
+| `INDEXED_GATHER` | `dst[i] = src[idx_table[i] × elem_size]` | legacy gather fallback；新 tensor layout path 可轉 TNPS |
+| `SCATTER_CONCAT` | 多個 source 寫到 dst 連續區段 | legacy concat fallback；主路徑轉 TNPS |
+| `STRIDED_SLICE` | 從大 tensor 取子區段 | legacy slice fallback；主路徑轉 TNPS |
+| `DEPTH_TO_SPACE` | NHWC pixel shuffle | legacy D2S fallback；主路徑轉 TNPS |
+| `ACT_DECOMP_COPY` | compressed ACT in DRAM → raw ACT in L1 | activation decompression read |
+| `ACT_COMP_COPY` | raw ACT in L1 → DRAM | compression write path；目前 DRAM W compression off，計 raw bytes |
 
 ### UDMA descriptor body 修訂
 
@@ -718,7 +736,7 @@ slice_begin[4] (16×4) -- STRIDED_SLICE 各軸起點（最多 4D tensor）
 slice_end[4] (16×4)
 ```
 
-→ 仍 fit 在 48 byte body 內（合計約 360 bit，剩餘給 reserved）。
+→ 仍 fit 在 48 byte body 內。UDMA body 與 TNPS body 目前欄位形狀相近，方便 compiler/runtime 共用部分 helper。
 
 ### v0 / v1 切分
 
@@ -726,9 +744,11 @@ slice_end[4] (16×4)
 |---|---|---|
 | `LINEAR_COPY` | ✓ | |
 | `STRIDED_2D` | ✓ | |
-| `INDEXED_GATHER` | | ✓（解 NLP transformer） |
-| `SCATTER_CONCAT` | | ✓（解 Inception / DenseNet / YOLO） |
-| `STRIDED_SLICE` | | ✓（解 ViT patch embed） |
+| `INDEXED_GATHER` | ✓ legacy | TNPS 化 |
+| `SCATTER_CONCAT` | ✓ legacy | TNPS multi-source descriptor |
+| `STRIDED_SLICE` | ✓ legacy | TNPS metadata kernel 已上主路徑 |
+| `DEPTH_TO_SPACE` | ✓ legacy | TNPS kernel 已上主路徑 |
+| `ACT_DECOMP_COPY` / `ACT_COMP_COPY` | ✓ | compression policy tuning |
 
 ---
 
@@ -797,13 +817,29 @@ count_include_pad (1) | reserved
 #### TNPS body
 
 ```
-in_addr (32) | out_addr (32) |
-in_shape  (16×6)  — d0..d5（先後存 input dim 大小，未用維度填 1） |
-out_shape (16×6)  — derived from axis_perm but stored explicitly for HW |
-axis_perm (4×6)   — output axis k 取自 input axis axis_perm[k]（0..5） |
-elem_size (4)     — 1 / 2 / 4 byte per element（dtype-derived） |
-reserved
+mode (8)           -- LINEAR / STRIDED_2D / GATHER / CONCAT / SLICE / D2S / S2D / TRANSPOSE
+src_addr (32)
+dst_addr (32)
+length (32)        -- bytes 或 elem_size，依 mode 決定
+src_stride (32)
+dst_stride (32)
+num_chunks (16)
+idx_table_addr (32) -- metadata table / index table / concat source table
+slice_begin[4] (16×4)
+slice_end[4]   (16×4)
 ```
+
+`TRANSPOSE` / `SLICE` 的 6D metadata table 目前由 compiler 放在 layer weight blob，`idx_table_addr` 指到該 table：
+
+```
+rank (32) | elem_size (32) |
+in_shape[6] (32×6) |
+out_shape[6] (32×6) |
+a[6] (32×6) | b[6] (32×6)
+```
+
+對 `TRANSPOSE`：`a[] = axis_perm`。  
+對 `SLICE` / `STRIDED_SLICE`：`a[] = begin`，`b[] = stride`。
 
 #### UDMA body
 
@@ -949,7 +985,8 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 | Requant / EWE / POOL | `sc_module XxxEngine` | initiator（對 L1_Manager）+ target（對 Command Engine config） |
 | L1_Manager | `sc_module L1Manager` | multi-port target / arbiter |
 | L1Mesh SRAM | `sc_module L1Mesh` | target（plain memory） |
-| UDMA | `sc_module UDMA` | initiator 雙向；內部含 5 個 op-mode handler（v0 只實作 LINEAR + STRIDED_2D；GATHER/CONCAT/SLICE 留 v1） |
+| UDMA | `sc_module UDMA` | DRAM ↔ L1 copy / ACT codec；layout 類 op 已逐步移到 TNPS |
+| TNPS | `sc_module TnpsEngine` | tensor permutation / packing engine；profile / Gantt 以 `tnps` lane 顯示 |
 | DRAM | `sc_module DRAM` | target（含 latency model） |
 
 ### 5.2 介面選擇
