@@ -54,7 +54,6 @@ SC_MODULE(CommandEngine) {
 
     SC_HAS_PROCESS(CommandEngine);
     CommandEngine(sc_core::sc_module_name nm) : sc_module(nm) {
-        for (int i = 0; i < 256; ++i) tag_done[i] = true;   // start state
         SC_THREAD(dispatch);
         SC_THREAD(collect);
     }
@@ -117,7 +116,7 @@ SC_MODULE(CommandEngine) {
         const Descriptor& d = *self;
         for (int w = 0; w < d.hdr.wait_count; ++w) {
             uint8_t tg = d.hdr.wait_tags[w];
-            if (!tag_done[tg]) return false;
+            if (tag_pending[tg] != 0) return false;
             for (auto it = begin; it != self; ++it) {
                 if (it->hdr.signal_tag == tg)
                     return false;
@@ -187,7 +186,7 @@ SC_MODULE(CommandEngine) {
         // cannot observe stale done state, while future wrapped tags do not
         // poison already-issued work.
         if (d.hdr.signal_tag)
-            tag_done[d.hdr.signal_tag] = false;
+            ++tag_pending[d.hdr.signal_tag];
         // queue this task's signal_tag for the engine (FIFO pairing).
         pending_tags[d.hdr.op_class()].push(d.hdr.signal_tag);
 
@@ -271,7 +270,10 @@ SC_MODULE(CommandEngine) {
                 t = pending_tags[cls].front();
                 pending_tags[cls].pop();
             }
-            if (t) { tag_done[t] = true; tag_changed.notify();
+            if (t) {
+                if (tag_pending[t] > 0)
+                    --tag_pending[t];
+                tag_changed.notify();
                      last_activity = sc_core::sc_time_stamp();
                      tag_fire_time[t] = last_activity;
                      std::cout << "[CmdEng] engine " << int(cls)
@@ -281,7 +283,7 @@ SC_MODULE(CommandEngine) {
         }
     }
 
-    bool tag_done[256];
+    uint16_t tag_pending[256]{};
     std::queue<uint8_t> pending_tags[OC_NUM];
     sc_core::sc_event tag_changed;
     // Time of the most recent tag completion. Used by test harness to report

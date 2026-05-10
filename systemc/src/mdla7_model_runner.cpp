@@ -887,6 +887,16 @@ int sc_main(int argc, char* argv[]) {
                    C.input0_tensor >= 0 &&
                    C.input0_tensor == P.output_tensor;
         };
+    auto graph_input1_is_exact_producer =
+        [&](uint32_t producer_layer, uint32_t consumer_layer) -> bool {
+            if (!graph_metas) return false;
+            if (producer_layer >= N || consumer_layer >= N) return false;
+            const auto& P = graph_metas[producer_layer];
+            const auto& C = graph_metas[consumer_layer];
+            return C.producer1_layer == int32_t(producer_layer) &&
+                   C.input1_tensor >= 0 &&
+                   C.input1_tensor == P.output_tensor;
+        };
     for (uint32_t ci = 0; ci < N; ++ci) {
         if (conservative_mul_graph) break;
         const auto& C = metas[ci];
@@ -1127,7 +1137,16 @@ int sc_main(int argc, char* argv[]) {
                 G.last_consumer_layer > int32_t(k) &&
                 G.last_consumer_layer < int32_t(N) &&
                 metas[uint32_t(G.last_consumer_layer)].op_kind == OK_CONCAT;
-            if ((binary_ewe && has_later_consumer) ||
+            const bool feeds_softmax =
+                (k + 1 < N && metas[k + 1].op_kind == OK_SOFTMAX &&
+                 graph_input0_is_exact_producer(k, k + 1)) ||
+                (G.first_consumer_layer >= 0 &&
+                 G.first_consumer_layer < int32_t(N) &&
+                 metas[uint32_t(G.first_consumer_layer)].op_kind == OK_SOFTMAX) ||
+                (G.last_consumer_layer >= 0 &&
+                 G.last_consumer_layer < int32_t(N) &&
+                 metas[uint32_t(G.last_consumer_layer)].op_kind == OK_SOFTMAX);
+            if ((binary_ewe && has_later_consumer && !feeds_softmax) ||
                 (non_binary_suppressible && G.consumer_count > 0 && ends_at_logical_concat))
                 producer_no_store[k] = true;
         }
@@ -1441,7 +1460,7 @@ int sc_main(int argc, char* argv[]) {
                 return full_working_set > L1_BUDGET ||
                        uint64_t(A.ref_size) + 4096 > L1_BUDGET;
             };
-            const bool stream_to_d2s_add =
+            bool stream_to_d2s_add =
                 (end + 2 < N)
                 && metas[end + 1].op_kind == OK_D2SPACE
                 && (metas[end + 2].op_kind == OK_ADD || metas[end + 2].op_kind == OK_MUL
@@ -1454,6 +1473,15 @@ int sc_main(int argc, char* argv[]) {
                 && metas[end + 2].in_h == metas[end + 1].out_h
                 && metas[end + 2].in_w == metas[end + 1].out_w
                 && metas[end + 2].in_c == metas[end + 1].out_c;
+            bool d2s_add_uses_d2s_as_input0 = stream_to_d2s_add;
+            bool d2s_add_uses_d2s_as_input1 = false;
+            if (stream_to_d2s_add && graph_metas) {
+                const bool conv_feeds_d2s = graph_input0_is_exact_producer(end, end + 1);
+                d2s_add_uses_d2s_as_input0 = graph_input0_is_exact_producer(end + 1, end + 2);
+                d2s_add_uses_d2s_as_input1 = graph_input1_is_exact_producer(end + 1, end + 2);
+                stream_to_d2s_add = conv_feeds_d2s &&
+                    (d2s_add_uses_d2s_as_input0 || d2s_add_uses_d2s_as_input1);
+            }
             // v9.2: enable generic CONV->CONV microblock streaming for plain
             // pointwise linear chains. Spatial 3x3 plain chains still need a
             // stronger line-buffer ownership model; keep those on the
@@ -1771,7 +1799,11 @@ int sc_main(int argc, char* argv[]) {
                         ++udma_count_so_far;
                         last_udma[end + 2] = udma_count_so_far;
 
-                        emit_stream(make_udma(uint32_t(B.dram_wgt + add_dram_off),
+                        const bool d2s_is_b_input =
+                            d2s_add_uses_d2s_as_input1 && !d2s_add_uses_d2s_as_input0;
+                        const uint32_t other_input_dram =
+                            uint32_t((d2s_is_b_input ? B.dram_in : B.dram_wgt) + add_dram_off);
+                        emit_stream(make_udma(other_input_dram,
                                               L1_WGT_STREAM, add_tile_bytes,
                                               /*dir*/ 0, add_b_tag, add_params_tag),
                                     mb, end + 2, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0),
@@ -1784,9 +1816,13 @@ int sc_main(int argc, char* argv[]) {
                         LayerMeta tile_B = B;
                         tile_B.in_h = uint16_t(add_rows);
                         tile_B.out_h = uint16_t(add_rows);
-                        Descriptor ed = make_ewe_add(tile_B, input_addr, L1_WGT_STREAM,
-                                                     output_addr, L1_PARAMS_STREAM,
-                                                     add_b_tag, d2s_tag, add_req_tag);
+                        Descriptor ed = d2s_is_b_input
+                            ? make_ewe_add(tile_B, L1_WGT_STREAM, input_addr,
+                                           output_addr, L1_PARAMS_STREAM,
+                                           add_b_tag, d2s_tag, add_req_tag)
+                            : make_ewe_add(tile_B, input_addr, L1_WGT_STREAM,
+                                           output_addr, L1_PARAMS_STREAM,
+                                           d2s_tag, add_b_tag, add_req_tag);
                         emit_stream(ed, mb, end + 2,
                                     SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0),
                                     true);
@@ -8812,7 +8848,10 @@ int sc_main(int argc, char* argv[]) {
                     tc.elem_size = elem_size;
                     tc.h_tiled = true;
                     tc.suppress_store = suppress_producer_store;
-                    tc.stream_descriptors = !conservative_int8_rgb_tail;
+                    // Only true L1 handoffs join stream lookahead. Materialized
+                    // binary tiles reuse shared scratch and must drain in order
+                    // before later layers can allocate the same L1 region.
+                    tc.stream_descriptors = suppress_producer_store && !conservative_int8_rgb_tail;
                     tc.initial_wait_tag = prev_l1_hazard_tag;
                     tc.input_a_preloaded = preloaded_a;
                     tc.output_contiguous = full_output_resident;
@@ -8878,7 +8917,9 @@ int sc_main(int argc, char* argv[]) {
                     tc.elem_size = elem_size;
                     tc.h_tiled = false;
                     tc.suppress_store = suppress_producer_store;
-                    tc.stream_descriptors = !conservative_int8_rgb_tail;
+                    // See the H-tiled path above: non-handoff binary tiles are
+                    // correctness checkpoints, not cross-layer stream work.
+                    tc.stream_descriptors = suppress_producer_store && !conservative_int8_rgb_tail;
                     tc.initial_wait_tag = prev_l1_hazard_tag;
                     tc.in_a_l1 = { L1_IN_A_t0, L1_IN_A_t1 };
                     tc.in_b_l1 = { L1_IN_B_t0, L1_IN_B_t1 };
