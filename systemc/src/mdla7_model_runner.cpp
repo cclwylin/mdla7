@@ -8023,6 +8023,7 @@ int sc_main(int argc, char* argv[]) {
                 fuse_prev_is_conv_class &&
                 fuse_prev_single_tile &&
                 fuse_prev_dtype == L.dtype &&
+                !producer_no_store[i] &&
                 previous_layer_is_graph_producer(i) &&
                 compatible_any_layout_tail(metas[i - 1], L, fuse_prev_l1_out_size);
             if (fused_layout_tail) {
@@ -8201,6 +8202,7 @@ int sc_main(int argc, char* argv[]) {
                 fuse_prev_is_conv_class &&
                 fuse_prev_single_tile &&
                 fuse_prev_dtype == L.dtype &&
+                !producer_no_store[i] &&
                 previous_layer_is_graph_producer(i) &&
                 compatible_any_layout_tail(metas[i - 1], L, fuse_prev_l1_out_size);
             if (fused_layout_tail) {
