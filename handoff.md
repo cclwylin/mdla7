@@ -1,23 +1,13 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-11 04:36:24 CST
+日期時間：2026-05-11 05:37:06 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
-- 最新本機 commit：`72088dc Fix fast-mode microblock pipeline correctness`
-- 最新已 push commit：`31068a7 Remove old MDLA7 system report slides`
-- 前一版 code/doc commit：`9e3f70d Strengthen layout microblock handoffs`
-- 前一版 microblock commit：`3df0b4b Stream layout slice tails in microblocks`
-- FP tiled microblock commit：`8763613 Enable FP tiled conv microblock streaming`
-- 前一版 microblock path commit：`239afe7 Optimize TNPS strided slice tail`
-- Path 7-10 強化 commit：`d51a330 Strengthen microblock paths 7-10`
-- 前一版 microblock tail commit：`a8dd50f Expand microblock fused pipeline tails`
-- Gantt task-meta commit：`a490aab Add task-meta microblock Gantt timeline`
-- Fast-only runner commit：`09d97cb Implement fused microblock fast-only runners`
 - 工作樹仍有非本輪的 `batch/profile_mb_path.html`、
-  `batch/profile_mdla6_pattern.html`、`image/`、
+- `batch/profile_mdla6_pattern.html`、`image/`、
   `reports/uArcSim Implementation by AI.pptx` 本機變更。commit 時不要混入。
 - 本輪另新增 MDLA6 Pattern Profiles 對照圖：
   `batch/chart/mdla6_pattern_ratio_chart.{svg,png}`，由
@@ -30,10 +20,46 @@ Branch：`main`
   `MDLA7 L1 Mesh Evaluation (v0.1)`，三條線是 `conflict/fast`、
   `mesh/fast`、`mesh/conflict`，X 軸依 `mesh/conflict` 由小到大排列。
 
+## 本輪完成
+
+- `CONV/D2SPACE/POOL -> consumer` 大 tensor handoff guard 已改成 exact
+  single-consumer 才保留 no-store，不再因 large upsample/pool tail 把可 fuse
+  的 `producer_no_store` 打掉。
+- `CONV -> D2SPACE -> CONV/DW/FC` 會讓前段 `CONV -> D2SPACE` defer，
+  改由後段 layout/compute handoff 接手，避免 D2SPACE 中間層寫回 DRAM。
+- INT16 stream dtype compatibility 放寬為 `INT16x8 <-> INT16x16` 可 L1
+  handoff，支援 INT16 `MAXPOOL -> CONV` intermediate no-store。
+- INT16 large `MAXPOOL` fallback：非 graph output 時改成 skipped checkpoint，
+  不再把 embedded reference 寫回 DRAM；真正 output 邊界仍會 materialize 供
+  bit-true 驗證。
+- Binary EWE / softmax tail live-range 判斷已補強，`producer -> binary EWE -> softmax` 這類 tail 可保留 no-store。
+
 ## Microblock Path Next-Step
 
 後續新增 path 時，先映射到 reusable microblock pattern，不要再往
 Path 15、Path 16 這種 hardcoded special-case 擴張。
+
+### ETHZ_V6 DRAM_W 掃描 Next-Step
+
+重新掃描 `model/ETHZ_v6` 對應 `batch/output/*.fast.html`，門檻
+`DRAM_W >= 1024 KB` 且排除最後一層：
+
+- 掃到 52/53 個 fast html；缺 `mobilevit_v2_quant.fast.html`。
+- `dped_float L65 mul 48 MB` 是 graph output，不列為 intermediate bug。
+- 注意：`*.fast.html` 可能 stale。`srgan_float L54 d2spac 32 MB` 與
+  `unet_quant L2 maxpool 4 MB` 在最新 `.html/.profile.json` 已是
+  `DRAM_W = 0`，但 fast html 仍保留舊數字。
+
+目前真正值得接著看的大 DRAM_W：
+
+| Priority | Model                                       |                      Layer | Op              |  DRAM_W | 初步方向                                             |
+| -------: | ------------------------------------------- | -------------------------: | --------------- | ------: | ---------------------------------------------------- |
+|        1 | `sd_diffusion_quant`                      | L59/L140/L1318/L1401/L1484 | `mul`         |    8 MB | `mul -> softmax` large tensor tail                 |
+|        2 | `pynet_v2_quant`                          |                       L209 | `conv`        |    6 MB | conv output fanout / tail ownership                  |
+|        3 | `srgan_quant`                             |                        L55 | `conv`        |    3 MB | 可能是 output/side-output live-range，先查 GraphMeta |
+|        4 | `microisp_quant`                          |              L62/L125/L188 | `d2spac`      | 1.99 MB | `D2SPACE -> consumer` layout bridge                |
+|        5 | `sam_float`                               |                    L27/L70 | `pad`         | 1.20 MB | `PAD -> compute` layout bridge                     |
+|        6 | `sd_encoder_quant` / `sd_decoder_quant` |              L282/L283/L47 | `mul/softmax` |    1 MB | softmax tail streaming / no-store                    |
 
 ## MB_Path_Slice Pattern Corpus
 
@@ -50,14 +76,14 @@ streaming_preload -> udma_as_engine -> producer_compute
 目前候選從原本 2922 筆壓到 559 筆，`microblock_pattern_slices.csv`
 也同步濾成同一組 559 筆代表 slice。
 
-| Pattern | Count |
-|---|---:|
-| `fanout_live_range` | 286 |
-| `producer_compute` | 134 |
-| `layout_bridge` | 52 |
-| `consumer_tail` | 44 |
-| `streaming_preload` | 34 |
-| `udma_as_engine` | 9 |
+| Pattern               | Count |
+| --------------------- | ----: |
+| `fanout_live_range` |   286 |
+| `producer_compute`  |   134 |
+| `layout_bridge`     |    52 |
+| `consumer_tail`     |    44 |
+| `streaming_preload` |    34 |
+| `udma_as_engine`    |     9 |
 
 相關腳本：
 
@@ -100,8 +126,12 @@ python3 batch/run_ethz_v6.py --filter dped_float --fast-only --rerun-all --keep-
 ./batch/run_model.py unet_quant --fast-only --keep-intermediate
 ./batch/run_model.py xlsr_quant --fast-only
 ./batch/run_model.py midas_v3_quant --fast-only
+./batch/run_model.py model/ETHZ_v6/srgan_quant.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py model/ETHZ_v6/srgan_float.tflite --fast-only --no-build --keep-intermediate
+./batch/run_model.py unet_int16 --fast-only --no-build --keep-intermediate
+./batch/run_model.py unet_quant --fast-only --no-build --keep-intermediate
+./batch/run_model.py llama2_quant.cut --fast-only --no-build --keep-intermediate
 ```
-
 
 ## 快速命令
 
