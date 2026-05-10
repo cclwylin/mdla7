@@ -5285,9 +5285,15 @@ int sc_main(int argc, char* argv[]) {
             // preserved IN region.  Only attempted for single-tile fits.
             // Enabled for INT and FP; FP rounding drift across fused chains
             // is absorbed by the 5%/5% per-layer tolerance below.
+            const bool fp_spatial_ewe_to_fc =
+                fuse_prev_is_binary_ewe &&
+                is_fp &&
+                L.op_kind == OK_FC &&
+                (L.in_h > 1 || L.in_w > 1 || L.out_h > 1 || L.out_w > 1);
             const bool fuse_eligible =
                 fuse_prev_is_conv_class &&
                 fuse_prev_single_tile &&
+                !fp_spatial_ewe_to_fc &&
                 fuse_prev_dtype  == L.dtype &&
                 fuse_prev_out_h  == L.in_h  &&
                 fuse_prev_out_w  == L.in_w  &&
