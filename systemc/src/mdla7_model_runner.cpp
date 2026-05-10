@@ -211,6 +211,22 @@ Descriptor make_tnps_meta(uint8_t mode, uint32_t src, uint32_t dst,
     return d;
 }
 
+Descriptor make_tnps_slice_2d(uint32_t src, uint32_t dst,
+                              uint16_t rows, uint16_t col_off,
+                              uint32_t row_bytes, uint32_t src_stride,
+                              uint32_t dst_stride,
+                              uint8_t signal_tag, uint8_t wait_a = 0) {
+    Descriptor d = make_tnps(src, dst, row_bytes, signal_tag, wait_a, 0,
+                             TM_STRIDED_SLICE);
+    auto& t = d.body.tnps;
+    t.src_stride = src_stride;
+    t.dst_stride = dst_stride;
+    t.slice_begin[0] = 0;
+    t.slice_end[0] = rows;
+    t.slice_begin[1] = col_off;
+    return d;
+}
+
 Descriptor make_pool(const LayerMeta& L,
                      uint32_t in_addr, uint32_t out_addr,
                      uint8_t wait_a, uint8_t signal_tag) {
@@ -328,10 +344,11 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]\n";
+                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt] [--no-microblock]\n";
         return 2;
     }
     bool quiet = false;
+    bool enable_microblocks = true;
     L1TimingMode l1_timing_mode = L1TimingMode::FastEstimate;
     for (int ai = 2; ai < argc; ++ai) {
         const std::string arg = argv[ai];
@@ -345,10 +362,12 @@ int sc_main(int argc, char* argv[]) {
             l1_timing_mode = L1TimingMode::MeshConflict;
         } else if (arg == "--l1-timing=mesh-opt" || arg == "--l1-mesh-opt") {
             l1_timing_mode = L1TimingMode::MeshOptimistic;
+        } else if (arg == "--no-microblock" || arg == "--disable-microblock") {
+            enable_microblocks = false;
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]\n";
+                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt] [--no-microblock]\n";
             return 2;
         }
     }
@@ -2949,18 +2968,21 @@ int sc_main(int argc, char* argv[]) {
                         is_int16_stream_dtype(consumer_dtype));
             };
             const auto& B0 = metas[i + 1];
-            if (!conv_class || !is_binary_ewe(B0)) return false;
+            const bool direct_pool_tail = is_pool(B0);
+            if (!conv_class || (!is_binary_ewe(B0) && !direct_pool_tail)) return false;
             if (!producer_no_store[i]) return false;
             if (!stream_dtype_compatible(A.dtype, B0.dtype)) return false;
             if (A.out_h != B0.in_h || A.out_w != B0.in_w || A.out_c != B0.in_c) return false;
-            if (B0.in_h != B0.out_h || B0.in_w != B0.out_w || B0.in_c != B0.out_c) return false;
-            if (B0.wgt_size < 48) return false;
+            if (!direct_pool_tail) {
+                if (B0.in_h != B0.out_h || B0.in_w != B0.out_w || B0.in_c != B0.out_c) return false;
+                if (B0.wgt_size < 48) return false;
+            }
             if (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8) return false;
             if (graph_metas && graph_metas[i + 1].producer0_layer != int32_t(i))
                 return false;
 
-            uint32_t ewe_end = i + 1;
-            while (ewe_end + 1 < N && is_binary_ewe(metas[ewe_end + 1])) {
+            uint32_t ewe_end = direct_pool_tail ? i : (i + 1);
+            while (!direct_pool_tail && ewe_end + 1 < N && is_binary_ewe(metas[ewe_end + 1])) {
                 const auto& P = metas[ewe_end];
                 const auto& C = metas[ewe_end + 1];
                 if (!producer_no_store[ewe_end]) break;
@@ -3039,8 +3061,9 @@ int sc_main(int argc, char* argv[]) {
                 return true;
             }();
             const uint32_t pool_tail_idx =
-                (!d2s_tail && !unary_tail && ewe_end + 1 < N && is_pool(metas[ewe_end + 1]))
-                    ? (ewe_end + 1) : N;
+                direct_pool_tail ? (i + 1) :
+                ((!d2s_tail && !unary_tail && ewe_end + 1 < N && is_pool(metas[ewe_end + 1]))
+                    ? (ewe_end + 1) : N);
             const bool pool_tail = [&]() -> bool {
                 if (pool_tail_idx >= N) return false;
                 const auto& P = metas[ewe_end];
@@ -3100,7 +3123,8 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             const uint64_t full_out_bytes =
                 uint64_t(A.out_h) * A.out_w * A.out_c * elem;
-            if (2ull * full_out_bytes + pure_wgt + params_blob + safety <= L1_BUDGET)
+            if (!direct_pool_tail &&
+                2ull * full_out_bytes + pure_wgt + params_blob + safety <= L1_BUDGET)
                 return false;
 
             const uint32_t stream_out_h = pool_tail ? uint32_t(metas[pool_tail_idx].out_h)
@@ -3263,7 +3287,7 @@ int sc_main(int argc, char* argv[]) {
                     pool_tail ? consumer_oh * metas[pool_tail_idx].out_w *
                                     metas[pool_tail_idx].out_c * elem
                               : tile_out_bytes;
-                const uint32_t final_dram_out_off =
+            const uint32_t final_dram_out_off =
                     pool_tail ? oh_done * metas[pool_tail_idx].out_w *
                                     metas[pool_tail_idx].out_c * elem
                               : dram_out_off;
@@ -4763,41 +4787,153 @@ int sc_main(int argc, char* argv[]) {
             return true;
         };
 
-        if (try_stream_conv_concat_pointwise()) {
+        if (enable_microblocks && try_stream_conv_concat_pointwise()) {
             continue;
         }
 
-        if (try_stream_conv_fanout()) {
+        if (enable_microblocks && i + 1 < N &&
+            (metas[i + 1].op_kind == OK_AVG_POOL || metas[i + 1].op_kind == OK_MAX_POOL) &&
+            try_stream_conv_ewe()) {
             continue;
         }
 
-        if (try_stream_pointwise_slice_fanout()) {
+        if (enable_microblocks && try_stream_conv_fanout()) {
             continue;
         }
 
-        if (try_stream_conv_ewe()) {
+        if (enable_microblocks && try_stream_pointwise_slice_fanout()) {
             continue;
         }
 
-        if (try_stream_ewe_conv()) {
+        if (enable_microblocks && try_stream_conv_ewe()) {
             continue;
         }
 
-        if (try_stream_conv_d2s()) {
+        if (enable_microblocks && try_stream_ewe_conv()) {
             continue;
         }
 
-        if (try_stream_binary_ewe_chain()) {
+        if (enable_microblocks && try_stream_conv_d2s()) {
             continue;
         }
 
-        if (try_stream_pool_consumer()) {
+        if (enable_microblocks && try_stream_binary_ewe_chain()) {
             continue;
         }
 
-        if (try_stream_conv_chain()) {
+        if (enable_microblocks && try_stream_pool_consumer()) {
             continue;
         }
+
+        if (enable_microblocks && try_stream_conv_chain()) {
+            continue;
+        }
+
+        auto is_linear_layout_tail = [&](const LayerMeta& T) -> bool {
+            return T.op_kind == OK_RESHAPE ||
+                   T.op_kind == OK_SQUEEZE ||
+                   T.op_kind == OK_EXPAND_DIMS ||
+                   T.op_kind == OK_SPLIT ||
+                   T.op_kind == OK_SLICE ||
+                   T.op_kind == OK_STRIDED_SLICE;
+        };
+
+        auto compatible_linear_layout_tail =
+            [&](const LayerMeta& P, const LayerMeta& T, uint64_t producer_bytes) -> bool {
+                if (!is_linear_layout_tail(T)) return false;
+                if (P.dtype != T.dtype) return false;
+                if (producer_bytes == 0 || T.ref_size == 0) return false;
+                if (T.in_size != producer_bytes) return false;
+                if (T.ref_size > producer_bytes) return false;
+                if ((T.op_kind == OK_SLICE || T.op_kind == OK_STRIDED_SLICE) && T.wgt_size >= 104)
+                    return false;
+                if (T.op_kind == OK_SPLIT && T.wgt_size >= 104)
+                    return false;
+                return true;
+            };
+
+        auto compatible_meta_layout_tail =
+            [&](const LayerMeta& P, const LayerMeta& T, uint64_t producer_bytes) -> bool {
+                if (P.dtype != T.dtype) return false;
+                if (producer_bytes == 0 || T.ref_size == 0) return false;
+                if (T.in_size != producer_bytes) return false;
+                if (T.ref_size > producer_bytes) return false;
+                return (T.op_kind == OK_SPLIT ||
+                        T.op_kind == OK_SLICE ||
+                        T.op_kind == OK_STRIDED_SLICE ||
+                        T.op_kind == OK_TRANSPOSE) &&
+                       T.wgt_size >= 104;
+            };
+
+        auto make_layout_tail_desc =
+            [&](const LayerMeta& T, uint32_t src, uint32_t dst, uint32_t bytes,
+                uint8_t signal_tag, uint8_t wait_tag) -> Descriptor {
+                if (compatible_meta_layout_tail(T, T, T.in_size)) {
+                    const uint8_t mode = (T.op_kind == OK_TRANSPOSE)
+                                       ? TM_TRANSPOSE : TM_STRIDED_SLICE;
+                    return make_tnps_meta(mode, src, dst, bytes, T.dram_wgt,
+                                          signal_tag, wait_tag);
+                }
+                return make_tnps(src, dst, bytes, signal_tag, wait_tag);
+            };
+
+        auto compatible_any_layout_tail =
+            [&](const LayerMeta& P, const LayerMeta& T, uint64_t producer_bytes) -> bool {
+                if (compatible_linear_layout_tail(P, T, producer_bytes))
+                    return true;
+                if (compatible_meta_layout_tail(P, T, producer_bytes))
+                    return true;
+                return false;
+            };
+
+        struct ChannelSliceTail {
+            bool valid = false;
+            uint32_t layer_idx = 0;
+            uint32_t c0 = 0;
+            uint32_t c = 0;
+            uint32_t in_c = 0;
+            uint32_t rows = 0;
+            uint32_t elem = 1;
+        };
+
+        auto channel_slice_tail_for =
+            [&](const LayerMeta& P, uint32_t tail_idx, uint64_t producer_bytes) -> ChannelSliceTail {
+                ChannelSliceTail out{};
+                if (tail_idx >= N) return out;
+                const auto& T = metas[tail_idx];
+                if (!compatible_meta_layout_tail(P, T, producer_bytes)) return out;
+                if (T.wgt_size < 104 || uint64_t(T.wgt_off) + 104 > file.size()) return out;
+                uint32_t raw[26] = {};
+                std::memcpy(raw, file.data() + T.wgt_off, sizeof(raw));
+                const uint32_t rank = std::min<uint32_t>(raw[0], 6);
+                const uint32_t elem = raw[1] ? raw[1] : 1;
+                if (rank < 3) return out;
+                const uint32_t* in_shape = raw + 2;
+                const uint32_t* out_shape = raw + 8;
+                const int32_t* begin = reinterpret_cast<const int32_t*>(raw + 14);
+                const int32_t* stride = reinterpret_cast<const int32_t*>(raw + 20);
+                for (uint32_t d = 0; d + 1 < rank; ++d) {
+                    if (begin[d] != 0 || (stride[d] != 0 && stride[d] != 1)) return out;
+                    if (in_shape[d] != out_shape[d]) return out;
+                }
+                const uint32_t cd = rank - 1;
+                if (stride[cd] != 0 && stride[cd] != 1) return out;
+                if (out_shape[cd] == 0 || in_shape[cd] == 0) return out;
+                if (uint32_t(std::max<int32_t>(begin[cd], 0)) + out_shape[cd] > in_shape[cd])
+                    return out;
+                uint64_t rows = 1;
+                for (uint32_t d = 0; d + 1 < rank; ++d)
+                    rows *= in_shape[d] ? in_shape[d] : 1;
+                if (rows != uint64_t(P.out_h) * P.out_w) return out;
+                out.valid = true;
+                out.layer_idx = tail_idx;
+                out.c0 = uint32_t(std::max<int32_t>(begin[cd], 0));
+                out.c = out_shape[cd];
+                out.in_c = in_shape[cd];
+                out.rows = uint32_t(rows);
+                out.elem = elem;
+                return out;
+            };
 
         auto try_stream_fc_oc_slices = [&]() -> bool {
             const auto& A = metas[i];
@@ -4826,6 +4962,9 @@ int sc_main(int argc, char* argv[]) {
             const uint64_t in_bytes = uint64_t(A.in_c) * elem;
             const uint64_t out_bytes = uint64_t(A.out_c) * elem;
             const uint64_t safety = 65536;
+            const bool has_layout_tail =
+                (i + 1 < N) && compatible_linear_layout_tail(A, metas[i + 1], out_bytes);
+            const auto* layout_tail = has_layout_tail ? &metas[i + 1] : nullptr;
 
             uint32_t tile_oc = std::min<uint32_t>(256, A.out_c);
             if (tile_oc >= 16) tile_oc = (tile_oc / 16) * 16;
@@ -4857,7 +4996,7 @@ int sc_main(int argc, char* argv[]) {
                 return false;
 
             const bool suppress_producer_store = producer_no_store[i];
-            std::vector<size_t> last_udma(N, 0), last_req(N, 0);
+            std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_tnps(N, 0);
             const uint8_t params_tag = alloc_tag();
             Descriptor pd = make_udma(A.dram_wgt + uint32_t(pure_wgt),
                                       L1_PARAMS_FC, uint32_t(params_blob),
@@ -4965,7 +5104,36 @@ int sc_main(int argc, char* argv[]) {
                 ++requant_count_so_far;
                 last_req[i] = requant_count_so_far;
 
-                if (suppress_producer_store) {
+                if (has_layout_tail) {
+                    const auto& T = *layout_tail;
+                    const uint64_t tail_begin = uint64_t(oc_done) * elem;
+                    const uint64_t tail_end = tail_begin + out_slice_bytes;
+                    const uint64_t copy_begin = std::min<uint64_t>(tail_begin, T.ref_size);
+                    const uint64_t copy_end = std::min<uint64_t>(tail_end, T.ref_size);
+                    if (copy_end > copy_begin) {
+                        const uint32_t copy_off = uint32_t(copy_begin - tail_begin);
+                        const uint32_t copy_bytes = uint32_t(copy_end - copy_begin);
+                        const uint8_t tnps_tag = alloc_tag();
+                        Descriptor td = make_tnps(out_l1 + copy_off,
+                                                  uint32_t(uint64_t(T.dram_out) + copy_begin),
+                                                  copy_bytes, tnps_tag, req_tag);
+                        mark_stream(td, i + 1, mb,
+                                    SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(td);
+                        acc[i + 1].sram_r += copy_bytes;
+                        acc[i + 1].dram_w += copy_bytes;
+                        ++tnps_count_so_far;
+                        last_tnps[i + 1] = tnps_count_so_far;
+                        prev_done = tnps_tag;
+                        slot_free_tag[slot] = tnps_tag;
+                    } else {
+                        prev_done = req_tag;
+                        slot_free_tag[slot] = req_tag;
+                    }
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                    mark_flow_edge(i, i + 1);
+                } else if (suppress_producer_store) {
                     udma_w_skipped[i] = true;
                     udma_w_streamed[i] = true;
                     prev_done = req_tag;
@@ -4996,6 +5164,32 @@ int sc_main(int argc, char* argv[]) {
             udma_count_at_layer_end[i] = last_udma[i];
             requant_count_at_layer_end[i] = last_req[i];
 
+            if (has_layout_tail) {
+                const auto& T = *layout_tail;
+                layer_done_tag[i + 1] = prev_done;
+                tnps_count_at_layer_end[i + 1] = last_tnps[i + 1];
+                tiles_h_per_layer[i + 1] = 1;
+                tiles_oc_per_layer[i + 1] = 1;
+                acc[i + 1].sram_w += T.ref_size;
+                if (T.ref_size < out_bytes) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                }
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_done_tag      = prev_done;
+                fuse_prev_out_h         = T.out_h;
+                fuse_prev_out_w         = T.out_w;
+                fuse_prev_out_c         = T.out_c;
+                fuse_prev_dtype         = T.dtype;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
+                ++i;
+                return true;
+            }
+
             fuse_prev_l1_out_addr = L1_OUT_FC;
             fuse_prev_l1_out_size = uint32_t(out_bytes);
             fuse_prev_done_tag = prev_done;
@@ -5010,7 +5204,7 @@ int sc_main(int argc, char* argv[]) {
             return true;
         };
 
-        if (try_stream_fc_oc_slices()) {
+        if (enable_microblocks && try_stream_fc_oc_slices()) {
             continue;
         }
 
@@ -5337,8 +5531,14 @@ int sc_main(int argc, char* argv[]) {
             // push it inline (multi-tile, no fusion source).
             const bool single_tile_layer = (tile_oh == L.out_h) && (tile_oc == L.out_c);
             const bool suppress_producer_store = producer_no_store[i];
+            const uint64_t conv_out_bytes_total =
+                uint64_t(L.out_h) * L.out_w * L.out_c * out_elem;
+            const ChannelSliceTail tiled_layout_tail =
+                (!single_tile_layer && suppress_producer_store && tile_oc == L.out_c && i + 1 < N)
+                    ? channel_slice_tail_for(L, i + 1, conv_out_bytes_total)
+                    : ChannelSliceTail{};
             const bool skip_transient_requant_write =
-                suppress_producer_store && !single_tile_layer;
+                suppress_producer_store && !single_tile_layer && !tiled_layout_tail.valid;
             const uint16_t planned_tiles_h = uint16_t((L.out_h + tile_oh - 1) / tile_oh);
             const uint16_t planned_tiles_oc = uint16_t((L.out_c + tile_oc - 1) / tile_oc);
             const bool pointwise_ws_candidate =
@@ -5682,6 +5882,44 @@ int sc_main(int argc, char* argv[]) {
                     if (!skip_transient_requant_write)
                         acc[i].sram_w += this_out_bytes;
 
+                    uint8_t layout_tail_tag = 0;
+                    if (tiled_layout_tail.valid && this_oc == L.out_c) {
+                        const auto& T = metas[tiled_layout_tail.layer_idx];
+                        const uint32_t rows = this_oh * L.out_w;
+                        const uint32_t row_bytes = tiled_layout_tail.c * tiled_layout_tail.elem;
+                        const uint32_t src_stride = L.out_c * tiled_layout_tail.elem;
+                        const uint32_t dst_stride = tiled_layout_tail.c * tiled_layout_tail.elem;
+                        const uint32_t dst_off =
+                            uint32_t(uint64_t(oh_done) * L.out_w *
+                                     tiled_layout_tail.c * tiled_layout_tail.elem);
+                        layout_tail_tag = alloc_tag();
+                        Descriptor td = make_tnps_slice_2d(
+                            tile_l1_out, uint32_t(T.dram_out + dst_off),
+                            uint16_t(rows),
+                            uint16_t(tiled_layout_tail.c0 * tiled_layout_tail.elem),
+                            row_bytes, src_stride, dst_stride,
+                            layout_tail_tag, req_tag);
+                        Microblock mb{};
+                        mb.id = tile_id;
+                        mb.slot = tile_slot;
+                        mb.rows = this_oh;
+                        mb.elems = rows * tiled_layout_tail.c;
+                        mb.bytes = rows * row_bytes;
+                        mark_stream(td, tiled_layout_tail.layer_idx, mb,
+                                    SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
+                        program.push_back(td);
+                        acc[tiled_layout_tail.layer_idx].sram_r += rows * row_bytes;
+                        acc[tiled_layout_tail.layer_idx].sram_w += rows * row_bytes;
+                        acc[tiled_layout_tail.layer_idx].dram_w += rows * row_bytes;
+                        if (oh_done == 0)
+                            acc[tiled_layout_tail.layer_idx].dram_r += T.wgt_size;
+                        ++tnps_count_so_far;
+                        tnps_count_at_layer_end[tiled_layout_tail.layer_idx] = tnps_count_so_far;
+                        layer_done_tag[tiled_layout_tail.layer_idx] = layout_tail_tag;
+                        preemitted_layout_layer[tiled_layout_tail.layer_idx] = true;
+                        mark_flow_edge(i, tiled_layout_tail.layer_idx);
+                    }
+
                     // UDMA tile-out: linear when full OC, strided when sliced.
                     const uint64_t out_dram_base =
                         uint64_t(L.dram_out)
@@ -5745,7 +5983,9 @@ int sc_main(int argc, char* argv[]) {
                         acc[i].dram_w += this_out_bytes;
                     }
 
-                    prev_store = suppress_producer_store ? req_tag : store_tag;
+                    prev_store = suppress_producer_store
+                               ? (layout_tail_tag ? layout_tail_tag : req_tag)
+                               : store_tag;
                     if (pingpong_tiles && oc_done + this_oc == L.out_c) {
                         slot_free_tag[tile_slot] = prev_store;
                     }
@@ -5755,7 +5995,7 @@ int sc_main(int argc, char* argv[]) {
                 oh_done += this_oh;
                 ++tile_id;
             }
-            if (suppress_producer_store && !single_tile_layer && prev_store) {
+            if (suppress_producer_store && !single_tile_layer && !tiled_layout_tail.valid && prev_store) {
                 const uint8_t barrier_tag = alloc_tag();
                 program.push_back(make_store_barrier(i, last_l1_out_addr, L.dram_out,
                                                      barrier_tag, prev_store));
@@ -7079,6 +7319,45 @@ int sc_main(int argc, char* argv[]) {
         case OK_PACK:
         case OK_UNPACK:
         case OK_TILE: {
+            const bool fused_layout_tail =
+                enable_microblocks &&
+                fuse_prev_is_conv_class &&
+                fuse_prev_single_tile &&
+                fuse_prev_dtype == L.dtype &&
+                compatible_any_layout_tail(metas[i - 1], L, fuse_prev_l1_out_size);
+            if (fused_layout_tail) {
+                if (pending.active) {
+                    udma_w_skipped[pending.layer_idx] = true;
+                    pending.active = false;
+                }
+                Microblock mb{};
+                mb.id = 0;
+                mb.slot = 0;
+                mb.elems = L.ref_size / std::max<uint32_t>(1u, (L.dtype == DT_INT16x16 ||
+                    L.dtype == DT_INT16x8 || L.dtype == DT_FP16 ||
+                    L.dtype == DT_BFP16 || L.dtype == DT_FP8) ? 2u : 1u);
+                mb.bytes = L.ref_size;
+                const uint8_t tnps_tag = alloc_tag();
+                Descriptor td = make_layout_tail_desc(L, fuse_prev_l1_out_addr,
+                                                      L.dram_out, L.ref_size,
+                                                      tnps_tag, fuse_prev_done_tag);
+                mark_stream(td, i, mb, SMF_COMPUTE | SMF_FINAL_TILE);
+                program.push_back(td);
+                acc[i].sram_r += L.ref_size;
+                acc[i].sram_w += L.ref_size;
+                acc[i].dram_w += L.ref_size;
+                ++tnps_count_so_far;
+                tnps_count_at_layer_end[i] = tnps_count_so_far;
+                layer_done_tag[i] = tnps_tag;
+                mark_flow_edge(i - 1, i);
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
+                break;
+            }
             flush_pending();
             if (producer_no_store[i]) {
                 udma_w_skipped[i] = true;
@@ -7144,7 +7423,8 @@ int sc_main(int argc, char* argv[]) {
                                                 tnps_tag, wait_prev));
             } else if ((L.op_kind == OK_TRANSPOSE ||
                         L.op_kind == OK_SLICE ||
-                        L.op_kind == OK_STRIDED_SLICE) && L.wgt_size >= 104) {
+                        L.op_kind == OK_STRIDED_SLICE ||
+                        L.op_kind == OK_SPLIT) && L.wgt_size >= 104) {
                 const uint8_t mode = (L.op_kind == OK_TRANSPOSE)
                                    ? TM_TRANSPOSE : TM_STRIDED_SLICE;
                 program.push_back(make_tnps_meta(mode, L.dram_in, L.dram_out,
@@ -7200,6 +7480,47 @@ int sc_main(int argc, char* argv[]) {
         }
         case OK_RESHAPE:
         case OK_GATHER: {
+            const bool fused_layout_tail =
+                L.op_kind == OK_RESHAPE &&
+                enable_microblocks &&
+                fuse_prev_is_conv_class &&
+                fuse_prev_single_tile &&
+                fuse_prev_dtype == L.dtype &&
+                compatible_any_layout_tail(metas[i - 1], L, fuse_prev_l1_out_size);
+            if (fused_layout_tail) {
+                if (pending.active) {
+                    udma_w_skipped[pending.layer_idx] = true;
+                    pending.active = false;
+                }
+                const uint32_t elem_size = (L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8
+                                         || L.dtype == DT_FP16 || L.dtype == DT_BFP16
+                                         || L.dtype == DT_FP8) ? 2u : 1u;
+                Microblock mb{};
+                mb.id = 0;
+                mb.slot = 0;
+                mb.elems = L.ref_size / elem_size;
+                mb.bytes = L.ref_size;
+                const uint8_t tnps_tag = alloc_tag();
+                Descriptor td = make_layout_tail_desc(L, fuse_prev_l1_out_addr,
+                                                      L.dram_out, L.ref_size,
+                                                      tnps_tag, fuse_prev_done_tag);
+                mark_stream(td, i, mb, SMF_COMPUTE | SMF_FINAL_TILE);
+                program.push_back(td);
+                acc[i].sram_r += L.ref_size;
+                acc[i].sram_w += L.ref_size;
+                acc[i].dram_w += L.ref_size;
+                ++tnps_count_so_far;
+                tnps_count_at_layer_end[i] = tnps_count_so_far;
+                layer_done_tag[i] = tnps_tag;
+                mark_flow_edge(i - 1, i);
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
+                break;
+            }
             flush_pending();
             if (producer_no_store[i]) {
                 udma_w_skipped[i] = true;

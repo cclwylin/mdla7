@@ -412,7 +412,60 @@ L22 slot=1 mb=4 store
 
 ---
 
-## 15.10 Cleaner architecture 的方向
+## 15.10 Layer 到 Microblock 的分工
+
+從高階 layer graph 到 microblock wavefront，可以這樣看：
+
+```text
+Layer graph
+  ↓  Compiler / graph compiler
+Layer fuse / graph-level fuse
+  ↓  Compiler / tiler
+Tile split
+  ↓  Compiler + Command Engine ABI
+Tile-level fuse / L1 handoff
+  ↓  Command Engine
+Microblock pipeline / wavefront
+```
+
+分工重點：
+
+| 階段 | 主要負責者 | 做什麼 |
+|---|---|---|
+| `Layer graph` | Compiler | parse TFLite graph，建立 tensor producer / consumer relation |
+| `Layer fuse / graph-level fuse` | Compiler | 決定哪些 layer boundary 合法 fuse，哪些 output 是 intermediate |
+| `Tile split` | Compiler / tiler | 根據 L1 budget、H/OC/K 方向決定 tile shape |
+| `Tile-level fuse / L1 handoff` | Compiler + Command Engine ABI | 用 metadata / descriptor contract 表示 producer tile 可以留在 L1，不必寫回 DRAM |
+| `Microblock pipeline / wavefront` | Command Engine | 展開 UDMA_R、CONV、Requant、EWE、POOL、TNPS、UDMA_W descriptors，分配 L1 slot 和 dependency tags |
+
+一句話：
+
+```text
+Compiler decides what can be fused.
+Command Engine decides how fused tiles become engine microblocks.
+```
+
+目前 prototype 還不是完全產品化切法。實作上：
+
+| 模組 | 目前做的事 |
+|---|---|
+| `compile_model.py` | TFLite -> `LayerMeta` / `GraphMeta` / weights / reference output |
+| `test_model.cpp` scheduler | layer fuse decision、tile split、L1 handoff、microblock descriptor expansion |
+| Command Engine model | dependency tag scheduling、engine dispatch arbitration |
+
+未來 cleaner architecture 會把更多 tile / microblock expansion 收斂到 Command Engine：
+
+```text
+Compiler:
+  Layer graph -> fused groups -> tile plan -> descriptor template / microblock hints
+
+Command Engine:
+  descriptor template -> actual microblock descriptors -> runtime dependency scheduling
+```
+
+---
+
+## 15.11 Cleaner architecture 的方向
 
 目前 TileCommand expansion 在 `test_model.cpp`，比較像 test harness scheduler。handoff 希望未來改成：
 
@@ -434,7 +487,7 @@ Command Engine internally expands microblocks
 
 ---
 
-## 15.11 Debug checklist
+## 15.12 Debug checklist
 
 | 問題 | 檢查 |
 |---|---|

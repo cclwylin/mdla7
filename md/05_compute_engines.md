@@ -1057,6 +1057,17 @@ cycles = ceil(out_elems/lanes) * 64
 
 所以某些模型 tail 的 pooling 可能不是完全免費。
 
+Scheduler 也能把 POOL 放進 microblock fused tail：
+
+- `CONV/Requant -> EWE -> POOL`：用 POOL output row 切 microblock，再反推
+  producer rows，支援 real-window / global pool 的保守 handoff。
+- `POOL -> ADD/MUL/SUB`：POOL output tile 直接作為 binary EWE input-A。
+- `POOL -> GELU/HARD_SWISH`：POOL output tile 直接作為 unary EWE input。
+- `POOL -> D2SPACE`：POOL output tile 交給 TNPS D2S。
+
+POOL 仍是獨立 engine；microblock fuse 只是 Command Engine 用 L1 slot 和
+dependency tag 串起 producer / consumer，省掉中間 DRAM checkpoint。
+
 ---
 
 ## 5.31 TNPS / D2SPACE 在目前 notebook 的位置
@@ -1067,6 +1078,11 @@ TNPS engine 現在是 layout transform 的主路徑之一，負責 transpose / s
 - `CONV/FC/DWCONV -> DEPTH_TO_SPACE -> consumer`：TNPS tiled streaming path。
 - standalone / non-CONV producer D2SPACE：TNPS `TM_DEPTH_TO_SPACE`。
 - UDMA `UM_DEPTH_TO_SPACE`：legacy / debug fallback。
+
+另外，若 GraphMeta 確認 `TRANSPOSE/PACK/UNPACK/SPLIT` 只是 intermediate
+layout handoff，scheduler 可 suppress 這個 DRAM checkpoint，讓後續 compute
+consumer 代表 functional verification anchor。這是 layout handoff model，不等於
+任意 transpose tile kernel 已完全實作。
 
 所以本章讀 compute engines 時要記得：D2SPACE 不一定在同一個 module 做；看 producer/consumer pattern 決定。
 

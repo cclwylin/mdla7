@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import time
@@ -91,6 +92,88 @@ def _fit_cell(value: str, width: int = 54) -> str:
     return f"{value[:left]}…{value[-right:]}"
 
 
+def _microblock_metrics_for(model_path: Path) -> dict[str, str]:
+    paths = _artefact_paths(model_path)
+    prof = paths["prof"]
+    if not prof.exists():
+        return {
+            "fuse_hit": "no",
+            "fuse_flows": "",
+            "streamed_layers": "",
+            "mb_hit": "no",
+            "mb_count": "0",
+            "mb_layers": "",
+            "mb_stages": "",
+        }
+    try:
+        data = json.loads(prof.read_text())
+    except Exception:
+        return {
+            "fuse_hit": "profile-error",
+            "fuse_flows": "",
+            "streamed_layers": "",
+            "mb_hit": "profile-error",
+            "mb_count": "0",
+            "mb_layers": "",
+            "mb_stages": "",
+        }
+
+    layers_json = data.get("layers") or []
+    flow_members: dict[int, list[int]] = {}
+    streamed_layers: list[int] = []
+    for idx, layer in enumerate(layers_json):
+        if not isinstance(layer, dict):
+            continue
+        lid = int(layer.get("id", idx) or idx)
+        flow = int(layer.get("flow", lid) if layer.get("flow") is not None else lid)
+        flow_members.setdefault(flow, []).append(lid)
+        if layer.get("streamed"):
+            streamed_layers.append(lid)
+    fused_flows = [
+        f"F{flow}:" + "+".join(f"L{x}" for x in members)
+        for flow, members in sorted(flow_members.items())
+        if len(members) > 1
+    ]
+
+    task_meta = data.get("task_meta") or {}
+    seen: set[tuple[int, int]] = set()
+    layers: set[int] = set()
+    stages: set[str] = set()
+    for engine, metas in task_meta.items():
+        if not isinstance(metas, list):
+            continue
+        for meta in metas:
+            if not isinstance(meta, dict):
+                continue
+            flags = int(meta.get("flags") or 0)
+            stream_flags = int(meta.get("stream_flags") or 0)
+            if not (flags & 0x10) or not stream_flags:
+                continue
+            layer = int(meta.get("layer") or 0)
+            mb = int(meta.get("mb") or 0)
+            seen.add((layer, mb))
+            layers.add(layer)
+            if engine in ("udma_r", "udma_w"):
+                if stream_flags & 0x8:
+                    stages.add("store")
+                else:
+                    stages.add("load")
+            elif engine in ("ewe", "pool", "tnps"):
+                stages.add("consumer")
+            else:
+                stages.add(str(engine))
+    return {
+        "fuse_hit": "yes" if fused_flows or streamed_layers else "no",
+        "fuse_flows": ";".join(fused_flows),
+        "streamed_layers": ";".join(f"L{x}" for x in streamed_layers),
+        "mb_hit": "yes" if seen else "no",
+        "mb_count": str(len(seen)),
+        "mb_layers": ";".join(f"L{x}" for x in sorted(layers)),
+        "mb_stages": "+".join(s for s in ("load", "conv", "requant", "consumer", "store")
+                              if s in stages),
+    }
+
+
 def _row_print(s: str) -> None:
     sys.stdout.write("\r\033[2K" + s + "\n")
     sys.stdout.flush()
@@ -107,7 +190,8 @@ def run_corpus(*,
                default_csv_out: Path,
                profile_html: str,
                profile_title: str,
-               recursive: bool = False) -> None:
+               recursive: bool = False,
+               microblock_metrics: bool = False) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(default_model_dir),
                     help=f"directory containing {corpus_name} .tflite models")
@@ -165,19 +249,22 @@ def run_corpus(*,
         for pat, prow in prior_full.items():
             if pat not in seen:
                 merged.append(prow)
+        fields = [
+            "pattern",
+            "mdla7_ms",
+            "mdla7_conflict_ms",
+            "mdla7_mesh_ms",
+            "status",
+            "conflict_status",
+            "mesh_status",
+        ]
+        if microblock_metrics:
+            fields.extend([
+                "fuse_hit", "fuse_flows", "streamed_layers",
+                "mb_hit", "mb_count", "mb_layers", "mb_stages",
+            ])
         with csv_path.open("w", newline="") as f:
-            w = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "pattern",
-                    "mdla7_ms",
-                    "mdla7_conflict_ms",
-                    "mdla7_mesh_ms",
-                    "status",
-                    "conflict_status",
-                    "mesh_status",
-                ],
-            )
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
             w.writerows(merged)
 
@@ -199,13 +286,18 @@ def run_corpus(*,
             cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
             suffix = (cached.get("status", "ok") if args.fast_only
                       else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}")
+            model_path = model_dir / f"{pat}.tflite"
+            mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
+            mb_suffix = (f" fuse={mb.get('fuse_hit', 'no')}"
+                         f" mb={mb.get('mb_count', '0')}:{mb.get('mb_stages', '')}"
+                         if microblock_metrics else "")
             display_pat = _fit_cell(pat)
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                        f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
                        f"conflict={_ms_cell(cached_conflict_ms)} "
                        f"mesh={_ms_cell(cached_mesh_ms)} cached  "
-                       f"{suffix}")
-            rows_out.append({
+                       f"{suffix}{mb_suffix}")
+            row = {
                 "pattern": pat,
                 "mdla7_ms": cached.get("mdla7_ms", ""),
                 "mdla7_conflict_ms": cached_conflict_ms,
@@ -213,7 +305,9 @@ def run_corpus(*,
                 "status": cached.get("status", "ok"),
                 "conflict_status": cached_conflict_status,
                 "mesh_status": cached_mesh_status,
-            })
+            }
+            row.update(mb)
+            rows_out.append(row)
             _checkpoint(rows_out)
             continue
 
@@ -235,12 +329,17 @@ def run_corpus(*,
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
         suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
+        model_path = model_dir / f"{pat}.tflite"
+        mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
+        mb_suffix = (f" fuse={mb.get('fuse_hit', 'no')}"
+                     f" mb={mb.get('mb_count', '0')}:{mb.get('mb_stages', '')}"
+                     if microblock_metrics else "")
         display_pat = _fit_cell(pat)
         _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                    f"fast={ms_str} conflict={conflict_str} mesh={mesh_str}  "
                    f"({elapsed:5.1f}s)  "
-                   f"{suffix}")
-        rows_out.append({
+                   f"{suffix}{mb_suffix}")
+        row = {
             "pattern": pat,
             "mdla7_ms": f"{ms:.3f}" if ms is not None else "",
             "mdla7_conflict_ms": f"{conflict_ms:.3f}" if conflict_ms is not None else "",
@@ -248,11 +347,12 @@ def run_corpus(*,
             "status": status,
             "conflict_status": conflict_status,
             "mesh_status": mesh_status,
-        })
+        }
+        row.update(mb)
+        rows_out.append(row)
         _checkpoint(rows_out)
 
         if not args.keep_bin:
-            model_path = model_dir / f"{pat}.tflite"
             for bin_path in (_artefact_paths(model_path)["prog"],
                              OUT_DIR / f"{pat}.conflict.bin",
                              OUT_DIR / f"{pat}.mesh.bin"):

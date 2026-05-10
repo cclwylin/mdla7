@@ -35,4 +35,5 @@ if __name__ == "__main__":
         profile_html="profile_mb_path.html",
         profile_title="MDLA7 MB Path Slice Profiles",
         recursive=True,
+        microblock_metrics=True,
     )

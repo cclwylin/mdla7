@@ -277,9 +277,12 @@ layout op fail 時，先判斷它實際走哪個 engine：
 |---|---|
 | `CONV -> final D2SPACE` | Requant descriptor 的 store mode / final DRAM address |
 | intermediate / standalone D2SPACE | TNPS `TM_DEPTH_TO_SPACE` descriptor |
+| `TRANSPOSE/PACK/UNPACK/SPLIT -> compute` intermediate handoff | GraphMeta no-store classification / downstream synthetic input |
 | legacy fallback | UDMA `UM_DEPTH_TO_SPACE` descriptor |
 
-確認 engine 後，再看 compiler reference 是否同一 mapping。
+確認 engine 後，再看 compiler reference 是否同一 mapping。GraphMeta no-store
+只代表中間 DRAM checkpoint 被 suppress，不代表 UDMA 或 TNPS 已經執行完整
+layout transform tile kernel；functional correctness 由後續 consumer layer verify。
 
 ---
 

@@ -197,6 +197,15 @@ Tile fuse 是 layer-level。Microblock fuse 是更細的 tile / block-level over
 ADD / MUL / SUB
 ```
 
+也常見在 fused consumer tail：
+
+```text
+CONV/Requant -> EWE -> POOL
+POOL -> EWE / TNPS
+layout/TNPS -> compute consumer
+fanout producer -> multiple branch consumers
+```
+
 一顆大 tensor 如果放不進 2 MB L1，就要切 microblock：
 
 ```text
@@ -222,6 +231,7 @@ UDMA_R(tile+1) overlaps EWE(tile) overlaps UDMA_W(tile-1)
 | `dram_w` | intermediate tile output 是否被 suppress |
 | `sram_r/sram_w` | L1 traffic 是否符合 2-input + 1-output |
 | Gantt | UDMA_R、EWE、UDMA_W 是否形成 staggered wavefront |
+| `task_meta` | 第二張 microblock Gantt 是否能看到 load / compute / store stage |
 
 Microblock fuse 的 bug 常見是：
 
@@ -232,6 +242,17 @@ Microblock fuse 的 bug 常見是：
 | final tile 標記錯 | layer done time 太早 |
 | suppress store 後沒有 barrier | 下一層可能提早開始 |
 | tile size 太大 | L1 overflow 或 fallback |
+| POOL window row 算錯 | real-window/global pool output mismatch |
+| layout no-store 用錯 | transpose/pack/unpack 後 consumer shape 對不上 |
+
+目前 10 條 path 的 debug 方向：
+
+| Path 類型 | 優先看 |
+|---|---|
+| CONV/EWE/POOL tail | producer rows、pool kernel/stride/pad、slot ping-pong |
+| POOL producer tail | pool output bytes、consumer input shape、GraphMeta direct consumer |
+| layout -> compute | GraphMeta consumer、是否只是 intermediate checkpoint |
+| fanout | branch 是否共用 logical input、concat boundary 是否真的是 downstream consumer |
 
 ---
 

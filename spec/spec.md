@@ -523,8 +523,9 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 - CONV → Requant 是硬接 chain，**所有 conv layer 都必跑 Requant**（不可 bypass）。若 layer 不需要 quant，Requant lane 走 identity（scale=1, shift=0, zp=0）。
 - CONV → Requant → EWE / POOL 不在硬體 chain 上 fused；但 scheduler 可對大型
   `CONV -> EWE(ADD/MUL/SUB)` residual 邊界做 microblock streaming handoff，
-  省掉 CONV intermediate DRAM store / EWE input-A reload。POOL halo/window
-  邊界仍走保守 tiling。
+  省掉 CONV intermediate DRAM store / EWE input-A reload。`CONV/Requant -> EWE -> POOL`
+  tail 現在可用 POOL output row 切 microblock，再反推 producer rows，支援
+  real-window / global pool 的保守 row-tiled handoff。
 
 ---
 
@@ -612,7 +613,25 @@ replacement for the EWE/POOL arithmetic described above.
 | `SLICE` / `STRIDED_SLICE` | metadata-driven TNPS kernel，支援 begin/end/stride |
 | `RESHAPE` / `SQUEEZE` / `EXPAND_DIMS` | metadata-only 能 fuse 時不寫 DRAM；需要 materialize 時走 TNPS linear path |
 | `CONCATENATION` | 目前由 compiler 產生 packed tensor，runtime 走 TNPS materialized layout path；multi-source descriptor 尚未保存 |
-| `PAD` / `PACK` / `UNPACK` / `TILE` / `SPLIT` | 先走 TNPS materialized layout path |
+| `PACK` / `UNPACK` / `SPLIT` | 若 GraphMeta 確認是 intermediate layout handoff，scheduler 可 suppress DRAM checkpoint；否則走 TNPS materialized layout path |
+| `PAD` / `TILE` | 先走 TNPS materialized layout path；`PAD -> CONV` safe subset 可 fold 成 consumer halo |
+
+### Microblock fused consumer paths
+
+SystemC scheduler 目前已打通 10 條 conservative microblock path：
+
+| Path | Pipeline | 實作邊界 |
+|---|---|---|
+| 1 | `CONV/DW/FC -> Requant -> store/forward` | 基本 tiled compute path |
+| 2 | `CONV -> Requant -> EWE ADD/MUL/SUB -> store/forward` | residual row microblock handoff |
+| 3 | `CONV -> Requant -> D2SPACE` | final D2SPACE 可由 Requant store swizzle；intermediate 走 TNPS |
+| 4 | `ADD/MUL/SUB -> ADD/MUL/SUB -> store/forward` | binary EWE chain ping-pong |
+| 5 | `ADD/MUL/SUB chain -> D2SPACE` | EWE chain tail 接 TNPS D2S |
+| 6 | `CONV/Requant -> EWE -> unary EWE` | supports GELU / HARD_SWISH tail |
+| 7 | `CONV/Requant -> EWE -> POOL/TNPS consumer` | POOL output-row microblock，反推 producer rows |
+| 8 | `POOL -> unary/binary EWE/TNPS consumer` | POOL producer row microblock tail |
+| 9 | `TNPS/layout -> compute consumer` | GraphMeta-confirmed layout handoff no-store；任意 permute tile kernel 仍是後續工作 |
+| 10 | `producer tile -> multiple consumers / concat fanout` | safe CONV/DW/FC fanout subset；通用 live-range ownership 仍待補強 |
 
 ### D2SPACE 放在哪裡做
 

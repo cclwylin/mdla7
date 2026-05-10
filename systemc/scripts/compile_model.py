@@ -1018,6 +1018,13 @@ def main():
         # fusion in mdla7_model_runner.cpp.  Falls back to fresh rng on first layer or
         # whenever the chain breaks (skipped op, shape mismatch).
         expected_dtype = np_in_dt   # FP conv/FC paths may override this later
+        if (opname in ("SPACE_TO_DEPTH", "TRANSPOSE",
+                       "SQUEEZE", "EXPAND_DIMS",
+                       "SLICE", "STRIDED_SLICE", "SPLIT", "SPLIT_V",
+                       "PAD", "PADV2", "PACK", "UNPACK", "TILE")
+            and last_output_arr is not None
+            and last_output_arr.dtype == expected_dtype):
+            H, W, Cin = last_output_arr.shape
         if (last_output_arr is not None
             and last_output_arr.shape == (H, W, Cin)
             and last_output_arr.dtype == expected_dtype):
@@ -1458,28 +1465,37 @@ def main():
                 if wgt.dtype == np.uint8:
                     wgt = (wgt.astype(np.int16) - 128).astype(np.int8)
                 FC_out, FC_in = wgt.shape
-                # Reshape inputs / weights to a 1×1 conv.
-                H = W = 1
+                # Reshape inputs / weights to a 1×1 conv.  Keep the leading
+                # batch/sequence product as H so transformer FC such as
+                # [1,77,768] -> [1,77,2304] can feed row-aware layout tails.
+                native_in_shape = list(_tensor_shape(in_t))
+                fc_rows = 1
+                if len(native_in_shape) >= 2 and native_in_shape[-1] == FC_in:
+                    for dim in native_in_shape[:-1]:
+                        fc_rows *= max(1, int(dim))
+                H = max(1, fc_rows)
+                W = 1
                 Cin = FC_in
-                OH = OW = 1
+                OH = H
+                OW = 1
                 OC = FC_out
                 Kh = Kw = 1
                 s_h = s_w = 1
                 pT = pB = pL = pR = 0
                 group = 1
                 wgt = wgt.reshape(OC, 1, 1, Cin)            # OHWI for our compute
-                # v8.13: respect the chain — the top-of-loop in_arr is already
-                # shape (1, 1, FC_in). Only fall back to rng if the chain isn't
-                # a (1,1,Cin) match (e.g. shape changed via RESHAPE just before).
+                # v8.13/v8.41: respect the chain — the top-of-loop in_arr is
+                # already shape (H,1,FC_in) for row-aware FC. Only fall back to
+                # rng if the chain isn't a match.
                 expected_dtype_fc = np.int16 if is_int16 else np.int8
                 if (last_output_arr is not None
-                    and last_output_arr.shape == (1, 1, Cin)
+                    and last_output_arr.shape == (H, W, Cin)
                     and last_output_arr.dtype == expected_dtype_fc):
                     in_arr = last_output_arr
                 else:
-                    in_arr = (rng.integers(-128, 128, size=(1, 1, Cin), dtype=np.int16)
+                    in_arr = (rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
                               if is_int16
-                              else rng.integers(-8, 8, size=(1, 1, Cin), dtype=np.int8))
+                              else rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8))
                 in_i8 = in_arr
                 op_kind = OP_FC     # dispatched through CONV engine, labelled "fc"
                 fc_label = True
@@ -2370,11 +2386,32 @@ def main():
                             meta_begin, meta_stride)
                     op_kind = OP_STRIDED_SLICE if opname == "STRIDED_SLICE" else OP_SLICE
                 elif opname in ("SPLIT", "SPLIT_V"):
-                    axis_input = 0 if opname == "SPLIT" else 3
+                    src = np.asarray(in_arr)
+                    axis_input = 0 if opname == "SPLIT" else 2
                     axis_t = sg.Tensors(op.Inputs(axis_input)) if op.InputsLength() > axis_input else None
                     axis_a = _tensor_array(axis_t) if axis_t else None
                     axis = int(axis_a.reshape(-1)[0]) if axis_a is not None and axis_a.size else 0
-                    ref_full = np.split(np.asarray(in_arr), op.OutputsLength(), axis=axis)[0]
+                    if axis < 0:
+                        axis += src.ndim
+                    if axis < 0 or axis >= src.ndim:
+                        axis = 0
+                    first_size = None
+                    if opname == "SPLIT_V" and op.InputsLength() > 1:
+                        size_t = sg.Tensors(op.Inputs(1))
+                        size_a = _tensor_array(size_t)
+                        if size_a is not None and size_a.size:
+                            sizes = [int(x) for x in size_a.reshape(-1).tolist()]
+                            first_size = sizes[0] if sizes else None
+                    if first_size is None:
+                        first_size = src.shape[axis] // max(1, op.OutputsLength())
+                    slices_np = [slice(None)] * src.ndim
+                    slices_np[axis] = slice(0, first_size, 1)
+                    ref_full = src[tuple(slices_np)]
+                    meta_begin = [0] * src.ndim
+                    meta_stride = [1] * src.ndim
+                    layout_wgt_payload = _pack_tnps_meta(
+                        src.ndim, elem_size, src.shape, ref_full.shape,
+                        meta_begin, meta_stride)
                     op_kind = OP_SPLIT
                 elif opname in ("PAD", "PADV2"):
                     pad_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
@@ -2462,11 +2499,13 @@ def main():
                     "UNPACK": OP_UNPACK,
                     "TILE": OP_TILE,
                 }[opname]
-            if materialized_tnps or op_kind not in (OP_S2SPACE, OP_TRANSPOSE, OP_SLICE, OP_STRIDED_SLICE):
+            if materialized_tnps or op_kind not in (OP_S2SPACE, OP_TRANSPOSE, OP_SLICE, OP_STRIDED_SLICE, OP_SPLIT):
                 H, W, Cin = OH, OW, OC
                 in_arr = ref
             else:
                 in_arr = src_for_tnps
+                if op_kind == OP_SPLIT:
+                    H, W, Cin = to_hwc(list(np.asarray(src_for_tnps).shape))
             in_i8 = in_arr
             ref_b = ref.tobytes(order="C")
         elif opname == "DEPTH_TO_SPACE":

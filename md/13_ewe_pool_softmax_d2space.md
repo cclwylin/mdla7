@@ -165,6 +165,19 @@ Large pool 也可能 height tiled。注意：
 
 若 pool output off-by-one，先看 rounding；若整片錯，先看 kernel / stride / sentinel。
 
+POOL 現在也可以當 microblock producer / consumer tail：
+
+| Pattern | Scheduler 行為 |
+|---|---|
+| `CONV/Requant -> EWE -> POOL` | 以 POOL output row 切 microblock，反推 EWE / CONV 需要的 producer rows |
+| `POOL -> ADD/MUL/SUB` | POOL output tile 直接作為 binary EWE input-A |
+| `POOL -> GELU/HARD_SWISH` | POOL output tile 直接作為 unary EWE input |
+| `POOL -> D2SPACE` | POOL output tile 交給 TNPS D2S |
+
+這些 path 不代表 POOL 硬接在 CONV/Requant datapath 後面；POOL 仍是獨立 engine。
+差別在於 Command Engine 用 dependency tag 和 L1 slot ownership，把 producer
+tile 直接交給 consumer，省掉中間 DRAM checkpoint。
+
 ---
 
 ## 13.8 DEPTH_TO_SPACE
@@ -221,9 +234,10 @@ CONV -> DEPTH_TO_SPACE -> ADD
 | op | 常見實作 |
 |---|---|
 | RESHAPE | byte passthrough or DRAM copy |
-| CONCAT | materialized concat / UDMA concat / barrier |
+| CONCAT | materialized concat / TNPS concat / barrier |
 | GATHER | numpy materialized reference + UDMA copy |
 | MATRLZ | compiler pre-materialized reference + chunked `DRAM -> L1 -> DRAM` UDMA copy |
+| TRANSPOSE / PACK / UNPACK / SPLIT | TNPS/materialized layout；若 GraphMeta 確認是 intermediate handoff，可 suppress DRAM checkpoint |
 
 要記住：
 
@@ -264,6 +278,7 @@ graph node、timing movement、PASS/FAIL verification，但不表示 EWE/POOL/CO
 | D2SPACE 都從 TNPS 移走 | 只有 `CONV -> final D2SPACE` 併入 Requant final-store；intermediate / standalone 仍由 TNPS 做 |
 | MEAN 必須有專屬 engine | 目前可 route via avg-pool-like path |
 | CONCAT 一定只是 pointer alias | 多數情況需要 materialize 或 barrier |
+| Layout no-store 等於 transpose kernel 完成 | 不是；GraphMeta handoff no-store 是 intermediate checkpoint suppress，任意 layout tile kernel 還是後續工作 |
 | softmax cycle 很小 | 大 tensor softmax 是三 pass，可能很重 |
 
 ---
@@ -275,7 +290,8 @@ Non-CONV op 是模型完整度的關鍵：
 ```text
 EWE handles element-wise / nonlinear / softmax
 POOL handles spatial reductions
-UDMA handles data movement transforms
+TNPS handles layout movement
+UDMA handles DRAM/L1 movement and fallback copies
 ```
 
 Debug 時先判斷 op 是 compute 還是 layout，再追 input producer、params、output writer。

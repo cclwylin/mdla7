@@ -43,8 +43,8 @@ def normalise_pattern(pat: str) -> str:
     return s
 
 
-def load_metrics(paths: list[Path]) -> dict[str, tuple[str, str, str, str, str]]:
-    out: dict[str, tuple[str, str, str, str, str]] = {}
+def load_metrics(paths: list[Path]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
     for path in paths:
         if not path.exists():
             continue
@@ -60,7 +60,20 @@ def load_metrics(paths: list[Path]) -> dict[str, tuple[str, str, str, str, str]]
                            row.get("mesh_ms") or "").strip()
                 if not pat:
                     continue
-                out[normalise_pattern(pat)] = (pat, cx, ms, conflict_ms, mesh_ms)
+                out[normalise_pattern(pat)] = {
+                    "pattern": pat,
+                    "cx": cx,
+                    "ms": ms,
+                    "conflict_ms": conflict_ms,
+                    "mesh_ms": mesh_ms,
+                    "fuse_hit": (row.get("fuse_hit") or "").strip(),
+                    "fuse_flows": (row.get("fuse_flows") or "").strip(),
+                    "streamed_layers": (row.get("streamed_layers") or "").strip(),
+                    "mb_hit": (row.get("mb_hit") or "").strip(),
+                    "mb_count": (row.get("mb_count") or "").strip(),
+                    "mb_layers": (row.get("mb_layers") or "").strip(),
+                    "mb_stages": (row.get("mb_stages") or "").strip(),
+                }
     return out
 
 
@@ -126,8 +139,12 @@ def _link_label(stem: str) -> str:
 
 
 def _row_from_metric(stem: str,
-                     metric: tuple[str, str, str, str, str]) -> dict[str, object] | None:
-    pat, cx, csv_ms, csv_conflict_ms, csv_mesh_ms = metric
+                     metric: dict[str, str]) -> dict[str, object] | None:
+    pat = metric.get("pattern", stem)
+    cx = metric.get("cx", "")
+    csv_ms = metric.get("ms", "")
+    csv_conflict_ms = metric.get("conflict_ms", "")
+    csv_mesh_ms = metric.get("mesh_ms", "")
     html = _first_existing_output_path(stem, ".html")
     if html is None and not csv_ms:
         return None
@@ -175,6 +192,13 @@ def _row_from_metric(stem: str,
         "conflict_ratio": conflict_ratio,
         "mesh_ratio": mesh_ratio,
         "mesh_conflict_ratio": mesh_conflict_ratio,
+        "fuse_hit": metric.get("fuse_hit", ""),
+        "fuse_flows": metric.get("fuse_flows", ""),
+        "streamed_layers": metric.get("streamed_layers", ""),
+        "mb_hit": metric.get("mb_hit", ""),
+        "mb_count": metric.get("mb_count", ""),
+        "mb_layers": metric.get("mb_layers", ""),
+        "mb_stages": metric.get("mb_stages", ""),
     }
 
 
@@ -200,8 +224,16 @@ def collect_rows(metrics_csvs: list[Path],
             continue
         if allowed is not None and stem not in allowed:
             continue
-        pat, cx, csv_ms, csv_conflict_ms, csv_mesh_ms = metrics.get(
-            stem, (stem, "", "", "", ""))
+        metric = metrics.get(stem, {
+            "pattern": stem, "cx": "", "ms": "", "conflict_ms": "", "mesh_ms": "",
+            "fuse_hit": "", "fuse_flows": "", "streamed_layers": "",
+            "mb_hit": "", "mb_count": "", "mb_layers": "", "mb_stages": "",
+        })
+        pat = metric.get("pattern", stem)
+        cx = metric.get("cx", "")
+        csv_ms = metric.get("ms", "")
+        csv_conflict_ms = metric.get("conflict_ms", "")
+        csv_mesh_ms = metric.get("mesh_ms", "")
         our_ms = load_our_ms(stem, csv_ms)
         conflict_ms = None
         if csv_conflict_ms:
@@ -246,6 +278,13 @@ def collect_rows(metrics_csvs: list[Path],
             "conflict_ratio": conflict_ratio,
             "mesh_ratio": mesh_ratio,
             "mesh_conflict_ratio": mesh_conflict_ratio,
+            "fuse_hit": metric.get("fuse_hit", ""),
+            "fuse_flows": metric.get("fuse_flows", ""),
+            "streamed_layers": metric.get("streamed_layers", ""),
+            "mb_hit": metric.get("mb_hit", ""),
+            "mb_count": metric.get("mb_count", ""),
+            "mb_layers": metric.get("mb_layers", ""),
+            "mb_stages": metric.get("mb_stages", ""),
         })
     def key(row: dict[str, object]):
         ratio = row.get("ratio")
@@ -281,12 +320,19 @@ def main() -> None:
     title = args.title
     show_cx = not args.hide_cx
     show_cx_json = "true" if show_cx else "false"
+    show_mb = any(r.get("fuse_hit") or r.get("mb_hit") or r.get("mb_count") or r.get("mb_stages")
+                  for r in rows)
+    show_mb_json = "true" if show_mb else "false"
     default_sort_key = "ratio" if show_cx else "mesh_ratio"
     default_sort_key_json = json.dumps(default_sort_key)
     cx_headers = """
       <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>""" if show_cx else ""
     ratio_headers = """
       <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>""" if show_cx else ""
+    mb_headers = """
+      <th><button class="sort-btn" data-sort-key="fuse_hit">fuse <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mb_count">mb <span class="sort-mark"></span></button></th>
+      <th><button class="sort-btn" data-sort-key="mb_stages">mb stages <span class="sort-mark"></span></button></th>""" if show_mb else ""
     live_csv = DEFAULT_REGRESSION_CSV
     for path in reversed(metrics_csvs):
         if path.parent.resolve() == OUT_DIR.resolve():
@@ -352,6 +398,7 @@ tr:hover td {{ background:#f4f7fb; }}
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
 {ratio_headers}
+{mb_headers}
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_conflict_ratio">mesh/conflict <span class="sort-mark"></span></button></th>
@@ -365,6 +412,7 @@ const EMBEDDED_ROWS = {rows_json};
 const LIVE_CSV = {live_csv_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
 const SHOW_CX = {show_cx_json};
+const SHOW_MB = {show_mb_json};
 const DEFAULT_SORT_KEY = {default_sort_key_json};
 let rows = EMBEDDED_ROWS.slice();
 let sortState = {{ key: DEFAULT_SORT_KEY, dir: "desc", default: true }};
@@ -431,7 +479,8 @@ function sortRows(xs) {{
       let cmp = 0;
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
-          key === "mesh_ratio" || key === "mesh_conflict_ratio") {{
+          key === "mesh_ratio" || key === "mesh_conflict_ratio" ||
+          key === "mb_count") {{
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -464,6 +513,9 @@ function sortValue(r, key) {{
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
   if (key === "mesh_ms") return r.mesh_ms;
+  if (key === "fuse_hit") return r.fuse_hit || "";
+  if (key === "mb_count") return r.mb_count;
+  if (key === "mb_stages") return r.mb_stages || "";
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
   return r.pattern;
@@ -492,6 +544,8 @@ function render() {{
   for (const r of sortRows(rows.slice())) {{
     const parts = [r.pattern, r.stem || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   r.fuse_hit || "", r.fuse_flows || "", r.streamed_layers || "",
+                   r.mb_count || "", r.mb_stages || "",
                    fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
     if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
     const allText = parts.join(" ").toLowerCase();
@@ -504,6 +558,7 @@ function render() {{
       `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` +
       (SHOW_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
+      (SHOW_MB ? `<td>${{esc(r.fuse_hit || "")}}</td><td class="num">${{esc(r.mb_count || "")}}</td><td>${{esc(r.mb_stages || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtConflictRatio(r))}}</td>` +
       `<td class="num">${{esc(fmtMeshRatio(r))}}</td>` +
       `<td class="num">${{esc(fmtMeshConflictRatio(r))}}</td>`;
@@ -532,7 +587,14 @@ function csvParse(text) {{
       cx: row.mdla6_cx || row.CX || "",
       ms: row.mdla7_ms || "",
       conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
-      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || ""
+      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || "",
+      fuse_hit: row.fuse_hit || "",
+      fuse_flows: row.fuse_flows || "",
+      streamed_layers: row.streamed_layers || "",
+      mb_hit: row.mb_hit || "",
+      mb_count: row.mb_count || "",
+      mb_layers: row.mb_layers || "",
+      mb_stages: row.mb_stages || ""
     }};
   }}
   return out;
@@ -580,7 +642,14 @@ async function refreshFromOutput() {{
         ratio: null,
         conflict_ratio: null,
         mesh_ratio: null,
-        mesh_conflict_ratio: null
+        mesh_conflict_ratio: null,
+        fuse_hit: (cx[stem] && cx[stem].fuse_hit) || "",
+        fuse_flows: (cx[stem] && cx[stem].fuse_flows) || "",
+        streamed_layers: (cx[stem] && cx[stem].streamed_layers) || "",
+        mb_hit: (cx[stem] && cx[stem].mb_hit) || "",
+        mb_count: (cx[stem] && cx[stem].mb_count) || "",
+        mb_layers: (cx[stem] && cx[stem].mb_layers) || "",
+        mb_stages: (cx[stem] && cx[stem].mb_stages) || ""
       }});
     }}
     if (next.length) rows = next;
