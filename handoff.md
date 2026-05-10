@@ -1,6 +1,6 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-10 05:49:40 CST
+日期時間：2026-05-10 11:35:34 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
@@ -19,17 +19,24 @@ Branch：`main`
   - microblock stage timeline
 - `task_meta` 已從 Command Engine trace 到 profile JSON，Gantt 用 descriptor metadata 判斷 microblock。
 - `run_*.py` 已統一支援 `--fast-only`。
-- Path 1-10 已可用：
-  - CONV/DW/FC -> Requant -> store/forward
-  - CONV -> Requant -> binary EWE ADD/MUL/SUB -> store/forward
-  - CONV -> Requant -> D2SPACE
-  - Binary EWE chain -> store/forward
-  - Binary EWE chain -> D2SPACE
-  - CONV/Requant -> binary EWE -> unary EWE(HARD_SWISH/GELU) -> store/forward
-  - CONV/Requant -> EWE -> POOL/TNPS consumer（synthetic coverage 已 hit；tested corpus 尚未 hit）
-  - POOL -> unary/binary EWE/TNPS consumer
-  - TNPS/layout -> compute consumer handoff for safe GraphMeta boundaries
-  - producer tile -> multiple consumers / concat fanout safe subset
+- Microblock engine path 狀態：
+
+| Path | Microblock engine pipeline | 狀態 |
+|---|---|---|
+| 1 | `CONV/DW/FC -> Requant -> store/forward` | Done |
+| 2 | `CONV -> Requant -> EWE ADD/MUL/SUB -> store/forward` | Done |
+| 3 | `CONV -> Requant -> D2SPACE` | Done |
+| 4 | `Binary EWE chain -> store/forward` | Done |
+| 5 | `Binary EWE chain -> D2SPACE` | Done |
+| 6 | `CONV -> Requant -> EWE ADD -> unary EWE/ReLU -> store/forward` | Done |
+| 7 | `CONV -> Requant -> EWE ADD -> pool/tnps consumer` | Done；`pool_tail` corpus reach 還需要自然模型覆蓋 |
+| 8 | `POOL -> unary/EWE/TNPS consumer` | Done basic path |
+| 9 | `TNPS/layout -> CONV` / `layout producer -> compute consumer` | Partial；`sslice -> conv` 還需要真正 L1 slice-feed 泛化 |
+| 10 | `producer -> multiple consumers / concat fanout` | Done；包含 direct fanout、concat pointwise、Requant direct packed concat |
+| 11 | `UDMA_R activation preload -> CONV/Requant` head/tail streaming | Done；3x3 和 1x1 都已套用 |
+| 12 | `Requant -> packed concat L1 -> pointwise CONV` | Done；不再需要 TNPS pack descriptor |
+| 13 | `UDMA_W store as microblock tail` | Done |
+| 14 | `UDMA_R/UDMA_W as engine lanes in scheduling/timeline` | Done |
 - 已補強：
   - Binary EWE chain -> unary EWE tail
   - CONV/Requant -> EWE -> real-window/global POOL tail
@@ -39,6 +46,39 @@ Branch：`main`
   - tiled POOL / unary EWE descriptor metadata
   - POOL layer cycle accounting
   - RESHAPE/SQUEEZE/EXPAND_DIMS L1 view passthrough safe subset
+  - Requant strided output mode for direct packed concat L1 writes
+  - UDMA activation streaming preload：用 head-ready / tail-busy descriptor
+    降低 tiled Conv bubble。延伸到 1x1 pointwise Conv 後，
+    `xlsr_quant` fast 從 0.698 ms 改善到 0.497 ms。
+
+## Microblock Path 策略
+
+未來模型一定還會出現更多 layer 組合，但實作不應該一直用
+Path 15、Path 16 這種方式加 special-case。比較正確的方向是把
+engine path 收斂成可重用的 microblock pattern：
+
+| Pattern | 覆蓋範圍 | 狀態 |
+|---|---|---|
+| Producer compute | `CONV/DW/FC/EWE/POOL/TNPS -> L1 tile` | 大多已實作 |
+| Consumer tail | `producer -> EWE/POOL/TNPS/store` | 已實作，部分已泛化 |
+| Layout bridge | `sslice/concat/d2space/transpose -> compute` | Partial；下一個主要整理目標 |
+| Fanout/live-range | `one producer -> multiple consumers` | Partial；safe subset 已實作 |
+| UDMA as engine | `udma_r/udma_w preload/store` 參與 pipeline | Done |
+| Streaming preload | `udma_r head/tail -> compute overlap` | Done |
+
+已知未來可能遇到的 layer 組合，應該映射到這些 pattern，而不是再增加新的
+hardcoded path：
+
+| 未來可能的 path 形狀 | 應落到的實作 pattern |
+|---|---|
+| `CONV -> activation -> POOL -> store` | Consumer tail |
+| `CONV -> Requant -> CONCAT -> CONV` | Packed concat layout bridge |
+| `sslice -> CONV` | Layout bridge with L1 slice-feed |
+| `transpose/layout -> FC/CONV` | Layout bridge |
+| `producer -> two CONV + one EWE` | Fanout/live-range |
+| `POOL -> CONV` | Producer/consumer L1 handoff |
+| `TNPS pack -> CONV/EWE` | Layout bridge |
+| `Requant output -> multi-consumer live range` | Fanout/live-range |
 
 ## 最近驗證
 
@@ -81,7 +121,7 @@ git diff --check
 
 ## Next To-do
 
-Path 7-10 已完成 conservative implementation。下一步若要再加強，可做：
+目前下一步若要再加強，可做：
 
 0. Path 7 POOL tail corpus coverage
    `try_stream_conv_ewe()` 裡已有 `pool_tail` implementation，但掃描目前
@@ -94,17 +134,25 @@ Path 7-10 已完成 conservative implementation。下一步若要再加強，可
    驗證 `3/3 PASS`，profile `task_meta` 顯示 pool layer 2 有 mb stream flags。
    Real corpus 仍需要等自然模型/切片覆蓋這個 topology。
 
-1. True TNPS tiled kernels
-   目前 `TRANSPOSE/PACK/UNPACK/SPLIT` 對 GraphMeta-confirmed intermediate boundary 會做 no-store handoff；任意 layout permute 的真正 tile kernel仍是後續工作。
+1. `sslice/layout -> CONV` true L1 slice-feed
+   L8/L16 已靠 UDMA head/tail streaming 大幅減少 bubble，但仍從 DRAM reload
+   sliced inputs。真正結構性解法是讓 upstream producer tile / packed concat
+   output 的 live range 留在 L1，layout bridge 直接餵後續 Conv。
 
-2. Multi-source concat descriptor
-   現在 concat fanout 可以 suppress intermediate stores，但 CONCAT 本身仍主要靠 compiler packed tensor / materialized layout path。
+2. True TNPS tiled kernels
+   目前 `TRANSPOSE/PACK/UNPACK/SPLIT` 對 GraphMeta-confirmed intermediate
+   boundary 會做 no-store handoff；任意 layout permute 的真正 tile kernel
+   仍是後續工作。
 
-3. FC partial-K accumulation
+3. Multi-source concat / packed layout bridge cleanup
+   目前 concat pointwise path 已可用 Requant direct packed L1 output；
+   任意 concat source mix 仍需要更通用的 layout bridge / ownership model。
+
+4. FC partial-K accumulation
    GPT2 L2 已有 FC OC-slice microblock；若要做到真正 K-slice，CONV engine
    需要支援多段 partial sum accumulate，再由最後一段觸發 Requant。
 
-4. Wider fanout ownership model
+5. Wider fanout ownership model
    目前 fanout 放寬到 safe CONV/DW/FC subset；任意 producer multiple-consumer 仍需更完整的 live-range / slot ownership。
 
 ## 快速命令

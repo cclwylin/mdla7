@@ -40,6 +40,8 @@ enum UdmaMode : uint8_t {
     UM_DEPTH_TO_SPACE = 5,
     UM_ACT_DECOMP_COPY = 6,
     UM_ACT_COMP_COPY   = 7,
+    UM_ACT_DECOMP_STREAM_HEAD = 8,
+    UM_ACT_DECOMP_STREAM_TAIL = 9,
 };
 
 enum TnpsMode : uint8_t {
@@ -51,6 +53,7 @@ enum TnpsMode : uint8_t {
     TM_DEPTH_TO_SPACE = 5,
     TM_SPACE_TO_DEPTH = 6,
     TM_TRANSPOSE      = 7,
+    TM_CHANNEL_PACK   = 8,
 };
 
 enum PoolMode : uint8_t {
@@ -139,6 +142,8 @@ enum StreamMetaFlags : uint8_t {
 enum RequantStoreMode : uint8_t {
     RQ_STORE_LINEAR = 0,
     RQ_STORE_D2SPACE = 1,
+    RQ_STORE_SKIP = 2,
+    RQ_STORE_STRIDED_2D = 3,
 };
 
 enum ConvDataflowMode : uint8_t {

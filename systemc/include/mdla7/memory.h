@@ -117,6 +117,9 @@ public:
         AccessTicket t = write_async(offset, src, n);
         wait_ticket(t);
     }
+    void write_instant(uint32_t offset, const void* src, uint32_t n) {
+        std::memcpy(&mem[offset], src, n);
+    }
     AccessTicket read_async(uint32_t offset, void* dst, uint32_t n) {
         std::memcpy(dst, &mem[offset], n);
         return in_process() ? AccessTicket{schedule_latency(offset, n, true)}
@@ -126,6 +129,41 @@ public:
         std::memcpy(&mem[offset], src, n);
         return in_process() ? AccessTicket{schedule_latency(offset, n, false)}
                             : AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket write_strided_rows(uint32_t dst, const void* src,
+                                    uint32_t rows, uint32_t src_row,
+                                    uint32_t dst_row, uint32_t dst_col) {
+        if (!rows || !src_row || !dst_row || dst_col + src_row > dst_row)
+            return AccessTicket{sc_core::sc_time_stamp()};
+        const auto* s = static_cast<const uint8_t*>(src);
+        for (uint32_t r = 0; r < rows; ++r) {
+            std::memcpy(&mem[dst + uint64_t(r) * dst_row + dst_col],
+                        s + uint64_t(r) * src_row,
+                        src_row);
+        }
+        return in_process() ? AccessTicket{schedule_latency(dst + dst_col, rows * src_row, false)}
+                            : AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket channel_pack(uint32_t src, uint32_t dst,
+                              uint32_t rows, uint32_t src_row,
+                              uint32_t src_stride, uint32_t dst_row,
+                              uint32_t dst_col) {
+        if (!rows || !src_row || !dst_row || dst_col + src_row > dst_row)
+            return AccessTicket{sc_core::sc_time_stamp()};
+        if (!src_stride) src_stride = src_row;
+        for (uint32_t r = 0; r < rows; ++r) {
+            std::memcpy(&mem[dst + uint64_t(r) * dst_row + dst_col],
+                        &mem[src + uint64_t(r) * src_stride],
+                        src_row);
+        }
+        if (!in_process()) return AccessTicket{sc_core::sc_time_stamp()};
+        const sc_core::sc_time src_done =
+            (src_stride == src_row)
+                ? schedule_latency(src, rows * src_row, true)
+                : schedule_latency(src, rows * src_stride, true);
+        const sc_core::sc_time dst_done =
+            schedule_latency(dst, rows * dst_row, false);
+        return AccessTicket{std::max(src_done, dst_done)};
     }
     static void wait_ticket(const AccessTicket& t) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
@@ -571,6 +609,9 @@ public:
         std::memcpy(dst, &mem[addr - DRAM_BASE], raw_n);
         if (in_process()) impose_latency(addr, compressed_n);
     }
+    void read_compressed_instant(uint32_t addr, void* dst, uint32_t raw_n) {
+        std::memcpy(dst, &mem[addr - DRAM_BASE], raw_n);
+    }
     void write(uint32_t addr, const void* src, uint32_t n) {
         std::memcpy(&mem[addr - DRAM_BASE], src, n);
         if (in_process()) impose_latency(addr, n);
@@ -668,8 +709,18 @@ public:
         else if (addr_in_dram(addr)) dram_.read_compressed(addr, dst, raw_n, compressed_n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
     }
+    void read_compressed_instant(uint32_t addr, void* dst, uint32_t raw_n) {
+        if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
+        else if (addr_in_dram(addr)) dram_.read_compressed_instant(addr, dst, raw_n);
+        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+    }
     void write(uint32_t addr, const void* src, uint32_t n) {
         if (addr_in_l1mesh(addr)) mesh_.write(addr, src, n);
+        else if (addr_in_dram(addr)) dram_.write(addr, src, n);
+        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+    }
+    void write_instant(uint32_t addr, const void* src, uint32_t n) {
+        if (addr_in_l1mesh(addr)) mesh_.write_instant(addr, src, n);
         else if (addr_in_dram(addr)) dram_.write(addr, src, n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
     }
@@ -687,6 +738,23 @@ public:
     AccessTicket write_async(uint32_t addr, const void* src, uint32_t n) {
         if (addr_in_l1mesh(addr)) return mesh_.write_async(addr, src, n);
         write(addr, src, n);
+        return AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket write_strided_rows(uint32_t dst, const void* src,
+                                    uint32_t rows, uint32_t src_row,
+                                    uint32_t dst_row, uint32_t dst_col) {
+        if (addr_in_l1mesh(dst))
+            return mesh_.write_strided_rows(dst, src, rows, src_row, dst_row, dst_col);
+        SC_REPORT_ERROR("L1Manager", "write_strided_rows requires L1Mesh dst address");
+        return AccessTicket{sc_core::sc_time_stamp()};
+    }
+    AccessTicket channel_pack(uint32_t src, uint32_t dst,
+                              uint32_t rows, uint32_t src_row,
+                              uint32_t src_stride, uint32_t dst_row,
+                              uint32_t dst_col) {
+        if (addr_in_l1mesh(src) && addr_in_l1mesh(dst))
+            return mesh_.channel_pack(src, dst, rows, src_row, src_stride, dst_row, dst_col);
+        SC_REPORT_ERROR("L1Manager", "channel_pack requires L1Mesh addresses");
         return AccessTicket{sc_core::sc_time_stamp()};
     }
     static void wait_ticket(const AccessTicket& t) { L1Mesh::wait_ticket(t); }

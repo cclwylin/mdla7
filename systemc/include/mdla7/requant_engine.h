@@ -60,11 +60,19 @@ SC_MODULE(RequantEngine) {
             const uint32_t OC_layer = r.scale_count ? r.scale_count : OC;   // params blob covers full layer
             const uint32_t oc_start = r.oc_start;
             const uint64_t total = uint64_t(OH) * OW * OC;
+            const bool skip_l1_write = (r._r[0] == RQ_STORE_SKIP);
             const bool d2s_store_req = (r._r[0] == RQ_STORE_D2SPACE);
+            const bool strided_store_req = (r._r[0] == RQ_STORE_STRIDED_2D);
             const uint32_t d2s_block = d2s_store_req ? std::max<uint32_t>(1, r._r[1]) : 1;
             const uint32_t d2s_out_c = d2s_store_req
                 ? uint32_t(r._r[2] | (uint16_t(r._r[3]) << 8))
                 : OC;
+            const uint32_t strided_dst_row = strided_store_req
+                ? uint32_t(r._r[1] | (uint16_t(r._r[2]) << 8))
+                : 0;
+            const uint32_t strided_dst_col = strided_store_req
+                ? uint32_t(r._r[3] | (uint16_t(r._r[4]) << 8))
+                : 0;
             const bool d2s_store =
                 d2s_store_req && d2s_out_c && OC == d2s_out_c * d2s_block * d2s_block;
             std::cout << "[Requant] " << OH << "x" << OW << "x" << OC
@@ -168,8 +176,8 @@ SC_MODULE(RequantEngine) {
             const uint64_t dst_total = d2s_store
                 ? uint64_t(OH) * d2s_block * OW * d2s_block * d2s_out_c
                 : total;
-            std::vector<int16_t> out16(int16_out ? dst_total : 0);
-            std::vector<int8_t>  out8 (int16_out ? 0         : dst_total);
+            std::vector<int16_t> out16((!skip_l1_write && int16_out) ? dst_total : 0);
+            std::vector<int8_t>  out8 ((!skip_l1_write && !int16_out) ? dst_total : 0);
             // v8.7 + v8.8: chain backpressure at LANES throughput.
             uint64_t reads = 0;
             for (uint32_t oh = 0; oh < OH; ++oh)
@@ -197,22 +205,46 @@ SC_MODULE(RequantEngine) {
                 int32_t v = scaled + zp_out;
                 if (v < a_min) v = a_min;
                 if (v > a_max) v = a_max;
-                size_t idx = (oh * OW + ow) * OC + oc;
-                if (d2s_store) {
-                    const uint32_t q = d2s_out_c ? (oc / d2s_out_c) : 0;
-                    const uint32_t real_oc = d2s_out_c ? (oc % d2s_out_c) : oc;
-                    const uint32_t bh = d2s_block ? (q / d2s_block) : 0;
-                    const uint32_t bw = d2s_block ? (q % d2s_block) : 0;
-                    const uint32_t out_h = oh * d2s_block + bh;
-                    const uint32_t out_w = ow * d2s_block + bw;
-                    idx = (uint64_t(out_h) * (OW * d2s_block) + out_w) * d2s_out_c + real_oc;
+                if (!skip_l1_write) {
+                    size_t idx = (oh * OW + ow) * OC + oc;
+                    if (d2s_store) {
+                        const uint32_t q = d2s_out_c ? (oc / d2s_out_c) : 0;
+                        const uint32_t real_oc = d2s_out_c ? (oc % d2s_out_c) : oc;
+                        const uint32_t bh = d2s_block ? (q / d2s_block) : 0;
+                        const uint32_t bw = d2s_block ? (q % d2s_block) : 0;
+                        const uint32_t out_h = oh * d2s_block + bh;
+                        const uint32_t out_w = ow * d2s_block + bw;
+                        idx = (uint64_t(out_h) * (OW * d2s_block) + out_w) * d2s_out_c + real_oc;
+                    }
+                    if (int16_out) out16[idx] = int16_t(v);
+                    else           out8 [idx] = int8_t (v);
                 }
-                if (int16_out) out16[idx] = int16_t(v);
-                else           out8 [idx] = int8_t (v);
                 if (++reads % LANES == 0) wait(1, sc_core::SC_NS);
             }
-            if (int16_out) l1mgr.write(r.out_addr, out16.data(), out16.size() * 2);
-            else           l1mgr.write(r.out_addr, out8 .data(), out8 .size());
+            if (!skip_l1_write) {
+                if (strided_store_req && !d2s_store) {
+                    const uint32_t elem = int16_out ? 2u : 1u;
+                    const uint32_t rows = OH * OW;
+                    const uint32_t src_row = OC * elem;
+                    if (strided_dst_row && strided_dst_col + src_row <= strided_dst_row) {
+                        if (int16_out) {
+                            l1mgr.wait_ticket(l1mgr.write_strided_rows(
+                                r.out_addr, out16.data(), rows, src_row,
+                                strided_dst_row, strided_dst_col));
+                        } else {
+                            l1mgr.wait_ticket(l1mgr.write_strided_rows(
+                                r.out_addr, out8.data(), rows, src_row,
+                                strided_dst_row, strided_dst_col));
+                        }
+                    } else {
+                        SC_REPORT_ERROR("RequantEngine", "invalid strided store layout");
+                    }
+                } else if (int16_out) {
+                    l1mgr.write(r.out_addr, out16.data(), out16.size() * 2);
+                } else {
+                    l1mgr.write(r.out_addr, out8 .data(), out8 .size());
+                }
+            }
 
             // v8.6 + v8.8: pipeline overlaps with L1 write at LANES throughput.
             const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - t_begin;

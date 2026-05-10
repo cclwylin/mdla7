@@ -846,8 +846,10 @@ def main():
     # adjacent pairs and skip layer N+1's udma_r (the input is already in L1
     # at layer N's L1_OUT slot).  Models where the chain breaks (skipped FP
     # ADD / HARD_SWISH / etc.) just get a fresh rng draw at the break.
-    last_output_arr = None
     rng = np.random.default_rng(0)
+    last_output_arr = None
+    tensor_values = {}
+    tensor_input_cache = {}
     DTYPE_MAP = {
         fb.TensorType.INT8:    np.int8,
         fb.TensorType.UINT8:   np.uint8,
@@ -907,6 +909,28 @@ def main():
         if dt == np.int16:
             return rng.integers(-128, 128, size=shape, dtype=np.int16)
         return rng.integers(-8, 8, size=shape, dtype=np.int8)
+
+    def _input_array_for_tensor(tensor_idx, shape, dtype):
+        """Return stable synthetic bytes for a graph tensor input."""
+        shape = tuple(int(x) for x in shape)
+        dtype = np.dtype(dtype)
+        if tensor_idx is not None and tensor_idx >= 0:
+            arr = tensor_values.get(int(tensor_idx))
+            if arr is not None and arr.size == int(np.prod(shape)) and arr.dtype == dtype:
+                return arr.reshape(shape)
+            key = (int(tensor_idx), shape, dtype.str)
+            cached = tensor_input_cache.get(key)
+            if cached is not None:
+                return cached
+        if dtype == np.float16:
+            arr = (rng.standard_normal(shape) * 0.5).astype(np.float16)
+        elif dtype == np.int16:
+            arr = rng.integers(-128, 128, size=shape, dtype=np.int16)
+        else:
+            arr = rng.integers(-8, 8, size=shape, dtype=np.int8)
+        if tensor_idx is not None and tensor_idx >= 0:
+            tensor_input_cache[(int(tensor_idx), shape, dtype.str)] = arr
+        return arr
 
     def _tensor_array(t):
         b = _tensor_buffer_bytes(model, t)
@@ -998,12 +1022,8 @@ def main():
             and last_output_arr.shape == (H, W, Cin)
             and last_output_arr.dtype == expected_dtype):
             in_arr = last_output_arr
-        elif is_int16:
-            in_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
-        elif is_fp_input:
-            in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
         else:
-            in_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), expected_dtype)
         in_i8 = in_arr        # legacy name kept for downstream readability
 
         opt_table = op.BuiltinOptions()  # may be None for some ops
@@ -1102,7 +1122,7 @@ def main():
                 and last_output_arr.dtype == np.float16):
                 in_arr = last_output_arr
             else:
-                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
             in_i8 = in_arr
 
             # Bias stays FP32 in the params blob: it's tiny (4·OC bytes) and
@@ -1378,7 +1398,7 @@ def main():
                     and last_output_arr.dtype == np.float16):
                     in_arr = last_output_arr
                 else:
-                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 in_i8 = in_arr
                 op_kind = OP_FC
                 fc_label = True
@@ -1594,8 +1614,8 @@ def main():
                 and last_output_arr.dtype == np.float16):
                 in_arr = last_output_arr
             else:
-                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
-            in_b_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_b_arr = _input_array_for_tensor(int(op.Inputs(1)), (H, W, Cin), np.float16)
 
             try:
                 ao = fb.AddOptions(); ao.Init(opt_table.Bytes, opt_table.Pos)
@@ -1694,10 +1714,8 @@ def main():
             mq_o, sh_o = quantize_multiplier(r_mult_o)
 
             # Synthesize input B (input A reuses the per-layer in_arr).
-            if is_int16:
-                in_b_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
-            else:
-                in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            in_b_arr = _input_array_for_tensor(
+                int(op.Inputs(1)), (H, W, Cin), np.int16 if is_int16 else np.int8)
             # Numpy reference (matches ewe_pool.h::run_add).
             a_v = (in_arr.astype(np.int32) - zp_a_eff) << left_shift
             b_v = (in_b_arr.astype(np.int32) - zp_b_eff) << left_shift
@@ -1729,8 +1747,8 @@ def main():
                 and last_output_arr.dtype == np.float16):
                 in_arr = last_output_arr
             else:
-                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
-            in_b_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_b_arr = _input_array_for_tensor(int(op.Inputs(1)), (H, W, Cin), np.float16)
             try:
                 # Both MulOptions and SubOptions expose FusedActivationFunction.
                 if opname == "MUL":
@@ -1810,10 +1828,8 @@ def main():
             act_max = min(DT_MAX, act_max)
             r_mult_o = scale_a * scale_b / scale_o
             mq_o, sh_o = quantize_multiplier(r_mult_o)
-            if is_int16:
-                in_b_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
-            else:
-                in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            in_b_arr = _input_array_for_tensor(
+                int(op.Inputs(1)), (H, W, Cin), np.int16 if is_int16 else np.int8)
             a_v = in_arr.astype(np.int32) - zp_a_eff
             b_v = in_b_arr.astype(np.int32) - zp_b_eff
             raw = a_v * b_v
@@ -1882,10 +1898,8 @@ def main():
             mq_a, sh_a = quantize_multiplier(r_mult_a)
             mq_b, sh_b = quantize_multiplier(r_mult_b)
             mq_o, sh_o = quantize_multiplier(r_mult_o)
-            if is_int16:
-                in_b_arr = rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
-            else:
-                in_b_arr = rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8)
+            in_b_arr = _input_array_for_tensor(
+                int(op.Inputs(1)), (H, W, Cin), np.int16 if is_int16 else np.int8)
             a_v = (in_arr.astype(np.int32) - zp_a_eff) << left_shift
             b_v = (in_b_arr.astype(np.int32) - zp_b_eff) << left_shift
             sa = multiply_by_quantized_multiplier_np(a_v, mq_a, sh_a)
@@ -1931,7 +1945,7 @@ def main():
                 and last_output_arr.dtype == np.float16):
                 in_arr = last_output_arr
             else:
-                in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
             x = in_arr.astype(np.float32)
             if opname == "GELU":
                 k = np.float32(0.7978845608028654)        # sqrt(2/pi)
@@ -2006,7 +2020,7 @@ def main():
                         and last_output_arr.dtype == np.float16):
                         in_arr = last_output_arr
                     else:
-                        in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                        in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
                     ref = pool_fp_ref(in_arr, Kh, Kw, s_h, s_w,
                                       (pT, pB, pL, pR), op_kind, count_include_pad)
                     ref_b = ref.tobytes(order="C")
@@ -2036,7 +2050,7 @@ def main():
                     and last_output_arr.dtype == np.float16):
                     in_arr = last_output_arr
                 else:
-                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 ref = pool_fp_ref(in_arr, Kh, Kw, s_h, s_w,
                                   (pT, pB, pL, pR), op_kind, count_include_pad)
                 ref_b = ref.tobytes(order="C")
@@ -2062,7 +2076,7 @@ def main():
                     and last_output_arr.dtype == np.float16):
                     in_arr = last_output_arr
                 else:
-                    in_arr = (rng.standard_normal((H, W, Cin)) * 0.5).astype(np.float16)
+                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 in_i8 = in_arr
                 ref = softmax_fp_ref(in_arr)
                 ref_b = ref.tobytes(order="C")
@@ -2129,15 +2143,15 @@ def main():
                 else:
                     dt = np.int8
                 size = int(np.prod(shk))
+                tensor_idx = int(op.Inputs(k))
+                arr = tensor_values.get(tensor_idx)
+                if arr is not None and arr.size == size and arr.dtype == dt:
+                    return arr.reshape(shk)
                 if (k == 0 and last_output_arr is not None
                     and last_output_arr.size == size
                     and last_output_arr.dtype == dt):
                     return last_output_arr.reshape(shk)
-                if dt == np.float16:
-                    return (rng.standard_normal(shk) * 0.5).astype(np.float16)
-                if dt == np.int16:
-                    return rng.integers(-128, 128, size=shk, dtype=np.int16)
-                return rng.integers(-8, 8, size=shk, dtype=np.int8)
+                return _input_array_for_tensor(tensor_idx, shk, dt)
 
             # Build synthesised input slices in their native ranks, concatenate
             # along TFLite's axis, then canonicalise the result back to HWC for
@@ -2588,6 +2602,13 @@ def main():
                 last_output_arr = None      # break chain at unusual shapes
         except Exception:
             last_output_arr = None
+        if output_tensor >= 0:
+            try:
+                tensor_values[int(output_tensor)] = ref.reshape(-1).copy()
+                if last_output_arr is not None:
+                    tensor_values[int(output_tensor)] = last_output_arr.copy()
+            except Exception:
+                pass
 
         # Canonical line — byte-identical with mdla7_model_runner.cpp.
         nelem = OH * OW * OC

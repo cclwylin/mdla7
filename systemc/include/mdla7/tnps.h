@@ -43,6 +43,7 @@ SC_MODULE(TnpsEngine) {
             case TM_DEPTH_TO_SPACE: do_depth_to_space(t); break;
             case TM_SPACE_TO_DEPTH: do_space_to_depth(t); break;
             case TM_TRANSPOSE:      do_transpose_meta(t); break;
+            case TM_CHANNEL_PACK:   do_channel_pack(t); break;
             default:
                 std::cout << "[TNPS] unknown mode=" << int(t.mode) << "\n";
                 wait(10, sc_core::SC_NS);
@@ -99,6 +100,27 @@ SC_MODULE(TnpsEngine) {
             l1mgr.write(d, buf.data(), t.length);
         }
         wait_bytes(uint64_t(t.length) * t.num_chunks);
+    }
+
+    void do_channel_pack(const TnpsBody& t) {
+        const uint32_t src_row = t.length;
+        const uint32_t dst_row = t.dst_stride;
+        const uint32_t dst_col = t.slice_begin[0];
+        const uint32_t rows = t.num_chunks;
+        std::cout << "[TNPS] CHANNEL_PACK  src=0x" << std::hex << t.src_addr
+                  << "  dst=0x" << t.dst_addr << std::dec
+                  << "  rows=" << rows
+                  << "  src_row=" << src_row
+                  << "  dst_row=" << dst_row
+                  << "  dst_col=" << dst_col << "\n";
+        if (!rows || !src_row || !dst_row || dst_col + src_row > dst_row) {
+            wait(8, sc_core::SC_NS);
+            return;
+        }
+        auto ticket = l1mgr.channel_pack(t.src_addr, t.dst_addr, rows, src_row,
+                                         t.src_stride, dst_row, dst_col);
+        L1Manager::wait_ticket(ticket);
+        wait_bytes(uint64_t(rows) * src_row);
     }
 
     struct ConcatEntry { uint32_t src_addr; uint32_t length; };

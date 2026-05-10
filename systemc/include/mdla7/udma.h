@@ -72,6 +72,8 @@ SC_MODULE(Udma) {
             case UM_DEPTH_TO_SPACE: do_depth_to_space(u); break;
             case UM_ACT_DECOMP_COPY: do_act_decomp(u); break;
             case UM_ACT_COMP_COPY:   do_act_comp(u);   break;
+            case UM_ACT_DECOMP_STREAM_HEAD: do_act_decomp_stream_head(u); break;
+            case UM_ACT_DECOMP_STREAM_TAIL: do_act_decomp_stream_tail(u); break;
             default:
                 std::cout << "[UDMA] unknown mode=" << int(u.mode) << "\n";
                 wait(10, sc_core::SC_NS);
@@ -233,6 +235,16 @@ SC_MODULE(Udma) {
         wait(double((raw_bytes + 511) / 512), sc_core::SC_NS);
     }
 
+    void wait_stream_act_slice(uint64_t raw_bytes, uint64_t comp_meta_bytes) {
+        // Row-streaming approximation: the descriptor below already copied the
+        // full functional tile into L1, while these waits reserve the UDMA/ACTC
+        // resource for the prologue or tail byte range.
+        const uint64_t dram_cyc = (effective_read_bytes(uint32_t(comp_meta_bytes)) + 47) / 48 + 50;
+        const uint64_t l1_cyc = (raw_bytes + 255) / 256;
+        const uint64_t codec_cyc = (raw_bytes + 511) / 512;
+        wait(double(std::max(dram_cyc, l1_cyc) + codec_cyc + 16), sc_core::SC_NS);
+    }
+
     void do_act_decomp(const UdmaBody& u) {
         const uint32_t raw_bytes = u.length;
         const uint32_t comp_bytes = u.src_stride ? u.src_stride : raw_bytes;
@@ -250,6 +262,35 @@ SC_MODULE(Udma) {
         wait_act_codec(raw_bytes);
         l1mgr.write(u.dst_addr, buf.data(), raw_bytes);
         wait_bytes(comp_bytes + meta_bytes);
+    }
+
+    void do_act_decomp_stream_head(const UdmaBody& u) {
+        const uint32_t raw_bytes = u.length;
+        const uint32_t comp_bytes = u.src_stride ? u.src_stride : raw_bytes;
+        const uint32_t meta_bytes = u.dst_stride;
+        const uint32_t head_raw = std::min<uint32_t>(u.idx_table_addr ? u.idx_table_addr : raw_bytes,
+                                                     raw_bytes);
+        const uint32_t total_comp_meta = comp_bytes + meta_bytes;
+        const uint32_t head_comp_meta = std::max<uint32_t>(
+            1, uint32_t((uint64_t(total_comp_meta) * head_raw + raw_bytes - 1) / raw_bytes));
+        std::cout << "[UDMA] ACT_STREAM_HEAD  src=0x" << std::hex << u.src_addr
+                  << "  dst=0x" << u.dst_addr << std::dec
+                  << "  raw=" << raw_bytes
+                  << "  head=" << head_raw
+                  << "  comp=" << comp_bytes
+                  << "  meta=" << meta_bytes << " B\n";
+        std::vector<uint8_t> buf(raw_bytes);
+        l1mgr.read_compressed_instant(u.src_addr, buf.data(), raw_bytes);
+        l1mgr.write_instant(u.dst_addr, buf.data(), raw_bytes);
+        wait_stream_act_slice(head_raw, head_comp_meta);
+    }
+
+    void do_act_decomp_stream_tail(const UdmaBody& u) {
+        const uint32_t raw_bytes = u.length;
+        const uint32_t comp_meta_bytes = u.src_stride ? u.src_stride : raw_bytes;
+        std::cout << "[UDMA] ACT_STREAM_TAIL  raw=" << raw_bytes
+                  << "  comp_meta=" << comp_meta_bytes << " B\n";
+        wait_stream_act_slice(raw_bytes, comp_meta_bytes);
     }
 
     void do_act_comp(const UdmaBody& u) {
