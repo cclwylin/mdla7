@@ -296,6 +296,8 @@ def main() -> int:
     ap.add_argument("--model-dir", type=Path, default=Path("model/ETHZ_v6"))
     ap.add_argument("--out-dir", type=Path, default=Path("model/MB_Path_Slice"))
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--max-ops", type=int, default=32,
+                    help="drop candidate ranges longer than this; 0 keeps all")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +335,13 @@ def main() -> int:
         seen.add(key)
         deduped.append(row)
     rows = deduped
+
+    if args.max_ops:
+        rows = [
+            row for row in rows
+            if row["pattern"] == "scan_error"
+            or int(row["end_op"]) - int(row["start_op"]) + 1 <= args.max_ops
+        ]
 
     out_csv = args.out_dir / "microblock_pattern_candidates.csv"
     fields = [

@@ -5,10 +5,11 @@
 目前已產生：
 
 - `microblock_pattern_candidates.csv`
+- `microblock_pattern_slices.csv`
+- 每個 pattern 子目錄下的第一批代表 `.tflite`
 
 這份 CSV 是從 `model/ETHZ_v6/*.tflite` 掃出的 pattern candidate manifest，
-還不是實際切好的 `.tflite` 子模型。下一步要補真正的 FlatBuffer subgraph
-slicer，依照 `suggested_slice` 欄位產生對應小模型。
+`microblock_pattern_slices.csv` 則記錄已切出的代表子模型。
 
 ## 欄位
 
@@ -28,15 +29,19 @@ slicer，依照 `suggested_slice` 欄位產生對應小模型。
 ## 目前 ETHZ V6 掃描結果
 
 已依 `pattern + op_sequence + input_shape` 去重；同構候選只保留第一筆代表項。
+目前候選集也會濾掉太長的 operator range，預設只保留 `max_ops <= 32`，
+避免像 `L9-L71` 這類跨太遠 live-range 被拿來當 microblock slice。
 
 | Pattern | Count |
 |---|---:|
 | `producer_compute` | 1214 |
-| `fanout_live_range` | 762 |
+| `fanout_live_range` | 691 |
 | `udma_as_engine` | 455 |
 | `layout_bridge` | 198 |
 | `consumer_tail` | 161 |
 | `streaming_preload` | 125 |
+
+總候選數：2844。
 
 這六類對應 handoff 裡的 reusable microblock pattern：
 
@@ -49,6 +54,8 @@ slicer，依照 `suggested_slice` 欄位產生對應小模型。
 
 ## 使用方式
 
+掃描候選：
+
 ```bash
 python3 systemc/scripts/scan_microblock_patterns.py
 ```
@@ -59,9 +66,46 @@ python3 systemc/scripts/scan_microblock_patterns.py
 model/MB_Path_Slice/microblock_pattern_candidates.csv
 ```
 
+切出第一批代表 `.tflite`：
+
+```bash
+python3 systemc/scripts/slice_microblock_patterns.py --max-per-pattern 3
+```
+
+全切目前乾淨候選集：
+
+```bash
+python3 systemc/scripts/slice_microblock_patterns.py --max-per-pattern 0
+```
+
+輸出：
+
+```text
+model/MB_Path_Slice/<pattern>/*.tflite
+model/MB_Path_Slice/microblock_pattern_slices.csv
+```
+
+目前已切出 18 個代表 slice，每個 reusable pattern 3 個：
+
+| Pattern | Slice count |
+|---|---:|
+| `producer_compute` | 3 |
+| `consumer_tail` | 3 |
+| `layout_bridge` | 3 |
+| `fanout_live_range` | 3 |
+| `udma_as_engine` | 3 |
+| `streaming_preload` | 3 |
+
+切片方式：
+
+- 透過 `flatc` 與 `third_party/tflite/schema.fbs` 做 JSON round-trip。
+- 只保留 selected operator range 用到的 tensors / buffers。
+- 重寫 subgraph inputs / outputs 成 operator range boundary。
+- 保留原 `operator_codes`，避免 opcode remap 風險。
+
 ## 下一步
 
-1. 依 `pattern` 挑小而代表性的候選。
-2. 補 FlatBuffer subgraph slicer，產出實際 `model/MB_Path_Slice/*.tflite`。
-3. 對每個 slice 跑 `compile_model.py + mdla7_model_runner`。
+1. 對每個 slice 跑 `compile_model.py + mdla7_model_runner`。
+2. 補 slice regression runner，依 pattern 分組跑 fast/profile。
+3. 依實際 compile/sim 結果調整 candidate ranking，挑更小更準的代表。
 4. 用 slice 驗證通用 pattern，而不是每遇到一個模型就新增 special-case path。

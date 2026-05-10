@@ -70,16 +70,18 @@ def load_our_ms(stem: str, csv_ms: str = "") -> float | None:
             return float(csv_ms)
         except ValueError:
             pass
-    prof = OUT_DIR / f"{stem}.profile.json"
-    if prof.exists():
+    for prof in _candidate_output_paths(stem, ".profile.json"):
+        if not prof.exists():
+            continue
         try:
             data = json.loads(prof.read_text())
             v = ((data.get("summary") or {}).get("total_cycles"))
             return int(v) / 1.9e6 if v is not None else None
         except Exception:
             pass
-    html = OUT_DIR / f"{stem}.html"
-    if html.exists():
+    for html in _candidate_output_paths(stem, ".html"):
+        if not html.exists():
+            continue
         text = html.read_text(errors="ignore")
         m = re.search(r"Sim time:</b>\s*([\d.]+)\s*ms", text)
         if m:
@@ -90,13 +92,106 @@ def load_our_ms(stem: str, csv_ms: str = "") -> float | None:
     return None
 
 
+def _candidate_output_paths(stem: str, suffix: str) -> list[Path]:
+    paths = [OUT_DIR / f"{stem}{suffix}"]
+    base = Path(stem).name
+    if base != stem:
+        paths.append(OUT_DIR / f"{base}{suffix}")
+    return paths
+
+
+def _first_existing_output_path(stem: str, suffix: str) -> Path | None:
+    for path in _candidate_output_paths(stem, suffix):
+        if path.exists():
+            return path
+    return None
+
+
+def _link_for_output(path: Path | None, stem: str) -> str:
+    if path is None:
+        base = Path(stem).name
+        return f"output/{base}.html"
+    try:
+        return f"output/{path.relative_to(OUT_DIR).as_posix()}"
+    except ValueError:
+        return path.as_posix()
+
+
+def _link_label(stem: str) -> str:
+    base = Path(stem).name
+    for prefix in ("deeplab_v3_plus_float_", "gpt2_quant_"):
+        if base.startswith(prefix):
+            return base[len(prefix):]
+    return base
+
+
+def _row_from_metric(stem: str,
+                     metric: tuple[str, str, str, str, str]) -> dict[str, object] | None:
+    pat, cx, csv_ms, csv_conflict_ms, csv_mesh_ms = metric
+    html = _first_existing_output_path(stem, ".html")
+    if html is None and not csv_ms:
+        return None
+    our_ms = load_our_ms(stem, csv_ms)
+    conflict_ms = None
+    if csv_conflict_ms:
+        try:
+            conflict_ms = float(csv_conflict_ms)
+        except ValueError:
+            pass
+    mesh_ms = None
+    if csv_mesh_ms:
+        try:
+            mesh_ms = float(csv_mesh_ms)
+        except ValueError:
+            pass
+    ratio = None
+    conflict_ratio = None
+    mesh_ratio = None
+    mesh_conflict_ratio = None
+    try:
+        cx_f = float(cx)
+        if cx_f > 0 and our_ms is not None:
+            ratio = our_ms / cx_f
+    except ValueError:
+        pass
+    if our_ms and our_ms > 0 and conflict_ms is not None:
+        conflict_ratio = conflict_ms / our_ms
+    if our_ms and our_ms > 0 and mesh_ms is not None:
+        mesh_ratio = mesh_ms / our_ms
+    if conflict_ms and conflict_ms > 0 and mesh_ms is not None:
+        mesh_conflict_ratio = mesh_ms / conflict_ms
+    return {
+        "pattern": pat,
+        "stem": stem,
+        "label": _link_label(stem),
+        "type": "MB Path" if "/" in stem else ("Hotspot" if "_L" in stem else (
+            "Transformer" if stem in TRANSFORMER_PATTERNS else "")),
+        "link": _link_for_output(html, stem),
+        "cx": cx,
+        "our_ms": our_ms,
+        "conflict_ms": conflict_ms,
+        "mesh_ms": mesh_ms,
+        "ratio": ratio,
+        "conflict_ratio": conflict_ratio,
+        "mesh_ratio": mesh_ratio,
+        "mesh_conflict_ratio": mesh_conflict_ratio,
+    }
+
+
 def collect_rows(metrics_csvs: list[Path],
                  only_metric_rows: bool = False) -> list[dict[str, object]]:
     metrics = load_metrics(metrics_csvs)
-    allowed = set(metrics) if only_metric_rows else None
     rows: list[dict[str, object]] = []
     if not OUT_DIR.exists():
         return rows
+    if only_metric_rows:
+        for stem, metric in metrics.items():
+            row = _row_from_metric(stem, metric)
+            if row is not None:
+                rows.append(row)
+        rows.sort(key=lambda row: str(row.get("pattern") or ""))
+        return rows
+    allowed = None
     for html in sorted(OUT_DIR.glob("*.html")):
         stem = html.stem
         if stem.startswith(("model_profile", "profile_")) or stem.startswith("._"):
@@ -139,6 +234,7 @@ def collect_rows(metrics_csvs: list[Path],
         rows.append({
             "pattern": pat,
             "stem": stem,
+            "label": _link_label(stem),
             "type": "Hotspot" if "_L" in stem else (
                 "Transformer" if stem in TRANSFORMER_PATTERNS else ""),
             "link": f"output/{html.name}",
@@ -251,7 +347,6 @@ tr:hover td {{ background:#f4f7fb; }}
     <tr>
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
-      <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
 {cx_headers}
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
@@ -371,7 +466,6 @@ function sortValue(r, key) {{
   if (key === "mesh_ms") return r.mesh_ms;
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
-  if (key === "type") return r.type || "";
   return r.pattern;
 }}
 function numOrNull(v) {{
@@ -396,7 +490,7 @@ function render() {{
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {{
-    const parts = [r.pattern, r.stem || "", r.type || "",
+    const parts = [r.pattern, r.stem || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
                    fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
     if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
@@ -404,8 +498,7 @@ function render() {{
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${{esc(r.pattern)}}</td>` +
-      `<td><a href="${{escAttr(r.link)}}">${{esc(r.stem || r.pattern)}}</a></td>` +
-      `<td>${{esc(r.type || "")}}</td>` +
+      `<td><a href="${{escAttr(r.link)}}">${{esc(r.label || r.stem || r.pattern)}}</a></td>` +
       (SHOW_CX ? `<td class="num">${{esc(r.cx || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
@@ -478,7 +571,7 @@ async function refreshFromOutput() {{
       }} catch (_) {{}}
       next.push({{
         pattern: (cx[stem] && cx[stem].pattern) || stem,
-        stem, link: `output/${{name}}`,
+        stem, label: shortLinkLabel(stem), link: `output/${{name}}`,
         type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
@@ -505,6 +598,13 @@ function transformerType(stem) {{
     "sam_float", "sam_quant"
   ]);
   return transformer.has(stem) ? "Transformer" : "";
+}}
+function shortLinkLabel(stem) {{
+  const base = String(stem || "").split("/").pop();
+  for (const prefix of ["deeplab_v3_plus_float_", "gpt2_quant_"]) {{
+    if (base.startsWith(prefix)) return base.slice(prefix.length);
+  }}
+  return base;
 }}
 document.getElementById("refresh").addEventListener("click", refreshFromOutput);
 document.getElementById("filter").addEventListener("input", render);

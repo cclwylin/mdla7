@@ -47,17 +47,19 @@ def _load_prior_results(csv_path: Path, fast_only: bool = False) -> dict[str, di
             r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")}
 
 
-def _discover_models(model_dir: Path, name_filter: str) -> list[str]:
+def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False) -> list[str]:
     if not model_dir.exists():
         raise SystemExit(f"model dir not found: {model_dir}")
     needle = name_filter.lower()
     patterns = []
-    for path in sorted(model_dir.glob("*.tflite")):
+    globber = model_dir.rglob if recursive else model_dir.glob
+    for path in sorted(globber("*.tflite")):
         if path.name.startswith("._"):
             continue
-        if needle and needle not in path.stem.lower():
+        pattern = path.relative_to(model_dir).with_suffix("").as_posix()
+        if needle and needle not in pattern.lower():
             continue
-        patterns.append(path.stem)
+        patterns.append(pattern)
     return patterns
 
 
@@ -80,6 +82,15 @@ def _ms_cell(value: str) -> str:
     return f"{float(value):>10.3f} ms" if value else f"{'—':>10s}    "
 
 
+def _fit_cell(value: str, width: int = 54) -> str:
+    if len(value) <= width:
+        return f"{value:<{width}s}"
+    keep = width - 1
+    left = keep // 2
+    right = keep - left
+    return f"{value[:left]}…{value[-right:]}"
+
+
 def _row_print(s: str) -> None:
     sys.stdout.write("\r\033[2K" + s + "\n")
     sys.stdout.flush()
@@ -95,7 +106,8 @@ def run_corpus(*,
                default_model_dir: Path,
                default_csv_out: Path,
                profile_html: str,
-               profile_title: str) -> None:
+               profile_title: str,
+               recursive: bool = False) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=str(default_model_dir),
                     help=f"directory containing {corpus_name} .tflite models")
@@ -120,7 +132,7 @@ def run_corpus(*,
 
     OUT_DIR.mkdir(exist_ok=True)
     model_dir = Path(args.model_dir)
-    patterns = _discover_models(model_dir, args.filter)
+    patterns = _discover_models(model_dir, args.filter, recursive=recursive)
     if args.offset:
         patterns = patterns[args.offset:]
     if args.limit:
@@ -129,7 +141,7 @@ def run_corpus(*,
     if args.list:
         for pat in patterns:
             path = model_dir / f"{pat}.tflite"
-            print(f"{pat:<42s} {path.stat().st_size / (1024 * 1024):6.1f} MB")
+            print(f"{_fit_cell(pat)} {path.stat().st_size / (1024 * 1024):6.1f} MB")
         return
 
     if not patterns:
@@ -187,7 +199,8 @@ def run_corpus(*,
             cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
             suffix = (cached.get("status", "ok") if args.fast_only
                       else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}")
-            _row_print(f"[{i:>2}/{len(patterns)}] {pat:<42s} "
+            display_pat = _fit_cell(pat)
+            _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                        f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
                        f"conflict={_ms_cell(cached_conflict_ms)} "
                        f"mesh={_ms_cell(cached_mesh_ms)} cached  "
@@ -208,7 +221,8 @@ def run_corpus(*,
 
         def _progress(stage: str) -> None:
             elapsed = time.time() - t0
-            _row_update(f"[{i:>2}/{len(patterns)}] {pat:<42s} "
+            display_pat = _fit_cell(pat)
+            _row_update(f"[{i:>2}/{len(patterns)}] {display_pat} "
                         f"{'—':>10s}      ({elapsed:5.1f}s)  "
                         f"running {stage}...")
 
@@ -221,7 +235,8 @@ def run_corpus(*,
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
         suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
-        _row_print(f"[{i:>2}/{len(patterns)}] {pat:<42s} "
+        display_pat = _fit_cell(pat)
+        _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                    f"fast={ms_str} conflict={conflict_str} mesh={mesh_str}  "
                    f"({elapsed:5.1f}s)  "
                    f"{suffix}")
