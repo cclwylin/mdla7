@@ -384,6 +384,8 @@ SC_MODULE(EweEngine) {
                 std::cout << "[EWE] softmax " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
                 if (elems > 0) {
+                    const uint64_t softmax_rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+                    const uint64_t softmax_vec = e.c;
                     if (fp) {
                         // v8.28: FP softmax. Numerically-stable 3-pass form:
                         // (1) max-reduce, (2) exp(x - max) → running FP32 sum,
@@ -392,26 +394,33 @@ SC_MODULE(EweEngine) {
                         // compile_model.py byte for byte.
                         std::vector<uint16_t> in16(elems), out16(elems);
                         l1mgr.read(e.in_a_addr, in16.data(), elems * sizeof(uint16_t));
-                        float max_v = -3.4e38f;
-                        for (uint64_t k = 0; k < elems; ++k) {
-                            const float v = fp16_to_fp32(in16[k]);
-                            if (v > max_v) max_v = v;
+                        std::vector<float> exp_v(softmax_vec);
+                        for (uint64_t r = 0; r < softmax_rows; ++r) {
+                            const uint64_t base = r * softmax_vec;
+                            float max_v = -3.4e38f;
+                            for (uint64_t k = 0; k < softmax_vec; ++k) {
+                                const float v = fp16_to_fp32(in16[base + k]);
+                                if (v > max_v) max_v = v;
+                            }
+                            for (uint64_t k = 0; k < softmax_vec; ++k)
+                                exp_v[k] = std::exp(fp16_to_fp32(in16[base + k]) - max_v);
+                            float s = 0.0f;
+                            for (uint64_t k = 0; k < softmax_vec; ++k) s += exp_v[k];
+                            if (s == 0.0f) s = 1.0f;
+                            for (uint64_t k = 0; k < softmax_vec; ++k)
+                                out16[base + k] = fp32_to_fp16(exp_v[k] / s);
                         }
-                        std::vector<float> exp_v(elems);
-                        for (uint64_t k = 0; k < elems; ++k)
-                            exp_v[k] = std::exp(fp16_to_fp32(in16[k]) - max_v);
-                        float s = 0.0f;
-                        for (uint64_t k = 0; k < elems; ++k) s += exp_v[k];
-                        if (s == 0.0f) s = 1.0f;
-                        for (uint64_t k = 0; k < elems; ++k)
-                            out16[k] = fp32_to_fp16(exp_v[k] / s);
                         l1mgr.write(e.out_addr, out16.data(), elems * sizeof(uint16_t));
                     } else {
                         // v1: real LUT-based INT8 softmax (matches
                         // softmax_int8_ref in compile_model.py byte for byte).
                         std::vector<int8_t> in_buf(elems), out_buf(elems);
                         l1mgr.read(e.in_a_addr, in_buf.data(), elems);
-                        softmax_int8(in_buf.data(), out_buf.data(), elems);
+                        for (uint64_t r = 0; r < softmax_rows; ++r) {
+                            const uint64_t base = r * softmax_vec;
+                            softmax_int8(in_buf.data() + base, out_buf.data() + base,
+                                         softmax_vec);
+                        }
                         l1mgr.write(e.out_addr, out_buf.data(), elems);
                     }
                 }
@@ -421,8 +430,10 @@ SC_MODULE(EweEngine) {
                 // v9.2: transformer tuning doubles the dedicated softmax lanes
                 // while keeping binary EWE lane count unchanged.
                 const uint64_t softmax_lanes = lanes * 2;
-                const uint64_t per_pass = (elems + softmax_lanes - 1) / softmax_lanes;
-                wait(3 * per_pass, sc_core::SC_NS);
+                const uint64_t softmax_rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+                const uint64_t softmax_vec = e.c;
+                const uint64_t per_pass = (softmax_vec + softmax_lanes - 1) / softmax_lanes;
+                wait(softmax_rows * 3 * per_pass, sc_core::SC_NS);
             }
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             busy_time += t_end - t_begin;

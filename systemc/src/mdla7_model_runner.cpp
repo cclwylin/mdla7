@@ -7066,49 +7066,107 @@ int sc_main(int argc, char* argv[]) {
                 }
             } else {
                 uint8_t prev_st_tag = 0;
-                for (uint64_t row = 0; row < rows; ++row) {
+                const uint64_t softmax_l1_safety = 64ull * 1024ull;
+                const uint64_t softmax_l1_usable =
+                    (L1_BUDGET > softmax_l1_safety)
+                        ? (L1_BUDGET - softmax_l1_safety) : L1_BUDGET;
+                uint32_t softmax_slots = 1;
+                uint64_t row_tile = 1;
+                if (!fuse_eligible && early_split_idx >= N && vec_bytes != 0) {
+                    const uint64_t pp_rows = softmax_l1_usable / (4 * vec_bytes);
+                    if (pp_rows >= 2) {
+                        softmax_slots = 2;
+                        row_tile = pp_rows;
+                    } else {
+                        const uint64_t single_rows = softmax_l1_usable / (2 * vec_bytes);
+                        if (single_rows >= 2)
+                            row_tile = single_rows;
+                    }
+                    row_tile = std::min<uint64_t>(rows, row_tile);
+                    row_tile = std::min<uint64_t>(row_tile, 65535);
+                }
+                const uint64_t tile_count = (rows + row_tile - 1) / row_tile;
+                const uint32_t softmax_seg =
+                    align64(uint32_t(row_tile * vec_bytes));
+                if (softmax_slots == 2 && uint64_t(softmax_seg) * 4 > L1_BUDGET)
+                    softmax_slots = 1;
+                uint8_t softmax_slot_free[2] = {0, 0};
+                tiles_h_per_layer[i] = uint16_t(std::min<uint64_t>(tile_count, 65535));
+                for (uint64_t row = 0, tile_id = 0; row < rows; row += row_tile, ++tile_id) {
+                    const uint64_t this_rows = std::min<uint64_t>(row_tile, rows - row);
                     const uint64_t off = row * vec_bytes;
+                    const uint64_t tile_bytes_u64 = this_rows * vec_bytes;
+                    const uint32_t tile_bytes = uint32_t(tile_bytes_u64);
+                    const bool final_mb = (row + this_rows == rows);
+                    const uint32_t slot = (softmax_slots == 2) ? uint32_t(tile_id & 1) : 0;
+                    const uint32_t tile_l1_in = fuse_eligible ? uint32_t(L1_IN + off)
+                                               : (softmax_slots == 2)
+                                                   ? uint32_t(slot * 2 * softmax_seg)
+                                                   : L1_IN;
+                    const uint32_t tile_l1_out = (softmax_slots == 2)
+                                               ? uint32_t(tile_l1_in + softmax_seg)
+                                               : (row_tile == 1) ? L1_OUT
+                                               : align64(tile_bytes);
+                    if (uint64_t(tile_l1_out) + tile_bytes > L1_BUDGET) {
+                        std::cerr << "layer " << i << ": softmax tile "
+                                  << tile_bytes << " B exceeds L1\n";
+                        return 4;
+                    }
+
+                    Microblock mb{};
+                    mb.id = uint16_t(std::min<uint64_t>(tile_id, 65535));
+                    mb.slot = uint16_t(slot);
+                    mb.elem_off = row * vec_elems;
+                    mb.rows = uint32_t(this_rows);
+                    mb.elems = uint32_t(this_rows * vec_elems);
+                    mb.bytes = tile_bytes;
+
                     const uint8_t in_tag  = alloc_tag();
                     const uint8_t req_tag = alloc_tag();
                     const uint8_t st_tag  = alloc_tag();
                     uint64_t charged = 0;
                     uint8_t softmax_in_tag = in_tag;
-                    const uint32_t row_in_l1 = fuse_eligible ? uint32_t(L1_IN + off) : L1_IN;
                     if (fuse_eligible) {
                         softmax_in_tag = fuse_prev_done_tag;
                     } else {
+                        const uint8_t slot_wait =
+                            (softmax_slots == 2) ? softmax_slot_free[slot] : prev_st_tag;
                         auto [id, load_charged] = make_act_load(L, uint32_t(L.dram_in + off),
-                                                                L1_IN, uint32_t(vec_bytes),
-                                                                in_tag, prev_st_tag);
+                                                                tile_l1_in, tile_bytes,
+                                                                in_tag, slot_wait);
                         charged = load_charged;
+                        mark_stream(id, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(id);
-                        acc[i].sram_w += vec_bytes;
+                        acc[i].sram_w += tile_bytes;
                     }
                     LayerMeta row_L = L;
-                    row_L.in_h = 1;
+                    row_L.in_h = uint16_t(this_rows);
                     row_L.in_w = 1;
-                    row_L.out_h = 1;
+                    row_L.out_h = uint16_t(this_rows);
                     row_L.out_w = 1;
-                    Descriptor sd = make_softmax(row_L, row_in_l1, L1_OUT,
+                    Descriptor sd = make_softmax(row_L, tile_l1_in, tile_l1_out,
                                                  softmax_in_tag, req_tag);
+                    mark_stream(sd, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(sd);
                     if (!suppress_producer_store) {
-                        Descriptor wd = make_udma(L1_OUT, uint32_t(L.dram_out + off),
-                                                  uint32_t(vec_bytes),
-                                                  /*dir*/ 1, st_tag, req_tag);
+                        Descriptor wd = make_udma(tile_l1_out, uint32_t(L.dram_out + off),
+                                                  tile_bytes, /*dir*/ 1, st_tag, req_tag);
+                        mark_stream(wd, i, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(wd);
                     }
                     acc[i].dram_r += charged;
-                    acc[i].sram_r += vec_bytes;
-                    acc[i].sram_w += vec_bytes;
-                    acc[i].sram_r += vec_bytes;
+                    acc[i].sram_r += tile_bytes;
+                    acc[i].sram_w += tile_bytes;
+                    acc[i].sram_r += tile_bytes;
                     if (suppress_producer_store) {
                         prev_st_tag = req_tag;
+                        softmax_slot_free[slot] = req_tag;
                     } else {
-                        acc[i].dram_w += vec_bytes;
+                        acc[i].dram_w += tile_bytes;
                         prev_st_tag = st_tag;
+                        softmax_slot_free[slot] = st_tag;
                     }
-                    if (early_split_idx < N && row + 1 == early_split_rows) {
+                    if (early_split_idx < N && row + this_rows == early_split_rows) {
                         const auto& S = metas[early_split_idx];
                         const uint8_t split_tag = alloc_tag();
                         Descriptor td = make_tnps(S.dram_in, S.dram_out, S.ref_size,
