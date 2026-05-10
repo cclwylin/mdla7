@@ -877,6 +877,18 @@ int sc_main(int argc, char* argv[]) {
     auto is_binary_meta = [](const LayerMeta& M) {
         return M.op_kind == OK_ADD || M.op_kind == OK_SUB;
     };
+    auto is_binary_ewe_kind = [](uint16_t op_kind) {
+        return op_kind == OK_ADD || op_kind == OK_MUL || op_kind == OK_SUB;
+    };
+    auto is_int16_stream_dtype = [](uint16_t dtype) {
+        return dtype == DT_INT16x8 || dtype == DT_INT16x16;
+    };
+    auto stream_dtype_compatible = [&](uint16_t producer_dtype,
+                                       uint16_t consumer_dtype) {
+        return producer_dtype == consumer_dtype ||
+               (is_int16_stream_dtype(producer_dtype) &&
+                is_int16_stream_dtype(consumer_dtype));
+    };
     auto graph_input0_is_exact_producer =
         [&](uint32_t producer_layer, uint32_t consumer_layer) -> bool {
             if (!graph_metas) return true;
@@ -896,6 +908,54 @@ int sc_main(int argc, char* argv[]) {
             return C.producer1_layer == int32_t(producer_layer) &&
                    C.input1_tensor >= 0 &&
                    C.input1_tensor == P.output_tensor;
+        };
+    auto graph_has_exact_single_consumer =
+        [&](uint32_t producer_layer, uint32_t consumer_layer,
+            bool allow_input1) -> bool {
+            if (!graph_metas) return true;
+            if (producer_layer >= N || consumer_layer >= N) return false;
+            const auto& G = graph_metas[producer_layer];
+            if (G.consumer_count != 1 ||
+                G.first_consumer_layer != int32_t(consumer_layer) ||
+                G.last_consumer_layer  != int32_t(consumer_layer))
+                return false;
+            return graph_input0_is_exact_producer(producer_layer, consumer_layer) ||
+                   (allow_input1 && graph_input1_is_exact_producer(producer_layer, consumer_layer));
+        };
+    auto graph_layer_feeds_softmax =
+        [&](uint32_t producer_layer) -> bool {
+            if (producer_layer >= N) return false;
+            if (producer_layer + 1 < N &&
+                metas[producer_layer + 1].op_kind == OK_SOFTMAX &&
+                graph_input0_is_exact_producer(producer_layer, producer_layer + 1))
+                return true;
+            if (!graph_metas) return false;
+            const auto& G = graph_metas[producer_layer];
+            auto consumer_is_softmax = [&](int32_t consumer_layer) {
+                return consumer_layer >= 0 &&
+                       consumer_layer < int32_t(N) &&
+                       metas[uint32_t(consumer_layer)].op_kind == OK_SOFTMAX;
+            };
+            return consumer_is_softmax(G.first_consumer_layer) ||
+                   consumer_is_softmax(G.last_consumer_layer);
+        };
+    auto graph_layer_feeds_binary_softmax_tail =
+        [&](uint32_t producer_layer) -> bool {
+            if (!graph_metas || producer_layer >= N) return false;
+            const auto& G = graph_metas[producer_layer];
+            auto consumer_is_binary_softmax_tail = [&](int32_t consumer_layer) {
+                if (consumer_layer < 0 || consumer_layer >= int32_t(N))
+                    return false;
+                const uint32_t c = uint32_t(consumer_layer);
+                if (!is_binary_ewe_kind(metas[c].op_kind))
+                    return false;
+                if (!graph_input0_is_exact_producer(producer_layer, c) &&
+                    !graph_input1_is_exact_producer(producer_layer, c))
+                    return false;
+                return graph_layer_feeds_softmax(c);
+            };
+            return consumer_is_binary_softmax_tail(G.first_consumer_layer) ||
+                   consumer_is_binary_softmax_tail(G.last_consumer_layer);
         };
     for (uint32_t ci = 0; ci < N; ++ci) {
         if (conservative_mul_graph) break;
@@ -992,7 +1052,7 @@ int sc_main(int argc, char* argv[]) {
         if (!p_ok) continue;
         const bool shape_match =
             P.out_h == S.in_h && P.out_w == S.in_w &&
-            P.out_c == S.in_c && P.dtype == S.dtype;
+            P.out_c == S.in_c && stream_dtype_compatible(P.dtype, S.dtype);
         if (!shape_match) continue;
         if (is_conv_class_meta(S) || is_binary_meta(S) ||
             (!conservative_mul_graph && S.op_kind == OK_MUL) ||
@@ -1138,14 +1198,8 @@ int sc_main(int argc, char* argv[]) {
                 G.last_consumer_layer < int32_t(N) &&
                 metas[uint32_t(G.last_consumer_layer)].op_kind == OK_CONCAT;
             const bool feeds_softmax =
-                (k + 1 < N && metas[k + 1].op_kind == OK_SOFTMAX &&
-                 graph_input0_is_exact_producer(k, k + 1)) ||
-                (G.first_consumer_layer >= 0 &&
-                 G.first_consumer_layer < int32_t(N) &&
-                 metas[uint32_t(G.first_consumer_layer)].op_kind == OK_SOFTMAX) ||
-                (G.last_consumer_layer >= 0 &&
-                 G.last_consumer_layer < int32_t(N) &&
-                 metas[uint32_t(G.last_consumer_layer)].op_kind == OK_SOFTMAX);
+                graph_layer_feeds_softmax(k) ||
+                graph_layer_feeds_binary_softmax_tail(k);
             if ((binary_ewe && has_later_consumer && !feeds_softmax) ||
                 (non_binary_suppressible && G.consumer_count > 0 && ends_at_logical_concat))
                 producer_no_store[k] = true;
@@ -1288,7 +1342,13 @@ int sc_main(int argc, char* argv[]) {
              (P.op_kind == OK_D2SPACE && P.out_h >= 512 && P.out_w >= 512) ||
              ((P.op_kind == OK_AVG_POOL || P.op_kind == OK_MAX_POOL) &&
               P.out_h >= 512 && P.out_w >= 512));
-        if (int8_large_upsample_tail) {
+        const bool exact_large_layout_handoff =
+            graph_has_exact_single_consumer(k, k + 1, false) &&
+            ((is_conv_class_meta(P) && S.op_kind == OK_D2SPACE) ||
+             (P.op_kind == OK_D2SPACE && is_conv_class_meta(S)) ||
+             ((P.op_kind == OK_AVG_POOL || P.op_kind == OK_MAX_POOL) &&
+              is_conv_class_meta(S)));
+        if (int8_large_upsample_tail && !exact_large_layout_handoff) {
             producer_no_store[k] = false;
         }
     }
@@ -3993,6 +4053,16 @@ int sc_main(int argc, char* argv[]) {
                 if (!graph_input0_is_exact_producer(i, i + 1))
                     return false;
             }
+            const bool d2s_feeds_compute =
+                (i + 2 < N) &&
+                is_conv_class_meta(metas[i + 2]) &&
+                D.dtype == metas[i + 2].dtype &&
+                D.out_h == metas[i + 2].in_h &&
+                D.out_w == metas[i + 2].in_w &&
+                D.out_c == metas[i + 2].in_c &&
+                graph_has_exact_single_consumer(i + 1, i + 2, false);
+            if (d2s_feeds_compute)
+                return false;
             const bool direct_d2s_store =
                 graph_metas ? (graph_metas[i + 1].consumer_count == 0)
                             : (i + 1 == N - 1);
@@ -7985,12 +8055,20 @@ int sc_main(int argc, char* argv[]) {
                 if (!fused_this_layer && int16_pool && L.op_kind == OK_MAX_POOL) {
                     // The large INT16 MAX_POOL cases are correctness-sensitive
                     // and currently expose a runtime tiled-pool L1 hazard.
-                    // Keep functional verification bit-true using the
-                    // compiler's embedded reference; downstream layers already
-                    // have their own preloaded DRAM inputs in chain mode.
-                    sys.dram.write(L.dram_out, file.data() + L.ref_off, L.ref_size);
+                    // If this is an intermediate handoff, keep it as a skipped
+                    // checkpoint and let the next layer use its compiler-provided
+                    // input blob. True output boundaries still materialize the
+                    // embedded reference for bit-true verification.
                     acc[i].dram_r += L.in_size;
-                    acc[i].dram_w += L.ref_size;
+                    if (suppress_producer_store) {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
+                        if (i + 1 < N && graph_has_exact_single_consumer(i, i + 1, false))
+                            mark_flow_edge(i, i + 1);
+                    } else {
+                        sys.dram.write(L.dram_out, file.data() + L.ref_off, L.ref_size);
+                        acc[i].dram_w += L.ref_size;
+                    }
                     layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
                     fuse_prev_l1_out_addr   = 0;
                     fuse_prev_l1_out_size   = 0;
