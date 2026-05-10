@@ -1806,56 +1806,62 @@ int sc_main(int argc, char* argv[]) {
                 ++end;
             }
             if (end <= i) return false;
-            bool has_near_concat = false;
-            if (end + 1 < N && metas[end + 1].op_kind == OK_CONCAT)
-                has_near_concat = true;
-            if (!has_near_concat) return false;
-
             const auto& first = metas[i];
+            if (end + 1 >= N || metas[end + 1].op_kind != OK_CONCAT)
+                return false;
+            const uint32_t concat_idx = end + 1;
+            const auto& C = metas[concat_idx];
+            if (C.out_h != first.out_h || C.out_w != first.out_w)
+                return false;
+
             const unsigned elem =
                 (first.dtype == DT_INT16x16 || first.dtype == DT_INT16x8) ? 2u : 1u;
             const uint64_t safety = 65536;
             uint64_t fixed_bytes = 0;
-            uint64_t max_out_bytes = 0;
             struct BranchBlob {
                 uint64_t pure_wgt = 0;
                 uint64_t scale_lut = 0;
                 uint64_t corr = 0;
+                uint32_t c_offset = 0;
+                uint32_t out_l1 = 0;
                 uint32_t params_l1 = 0;
                 uint32_t wgt_l1 = 0;
                 uint8_t params_tag = 0;
                 uint8_t wgt_tag = 0;
             };
             std::vector<BranchBlob> blobs(end - i + 1);
+            uint32_t concat_c = 0;
             for (uint32_t k = i; k <= end; ++k) {
                 const auto& A = metas[k];
                 auto& bb = blobs[k - i];
+                bb.c_offset = concat_c;
+                concat_c += A.out_c;
                 bb.pure_wgt = conv_pure_weight_bytes(A);
                 bb.scale_lut = 12 + 9 * uint64_t(A.out_c);
                 bb.corr = (uint64_t(A.wgt_size) > bb.pure_wgt + bb.scale_lut)
                         ? (uint64_t(A.wgt_size) - bb.pure_wgt - bb.scale_lut) : 0;
                 fixed_bytes += align64(uint32_t(bb.pure_wgt));
                 fixed_bytes += align64(uint32_t(bb.scale_lut + bb.corr));
-                max_out_bytes = std::max<uint64_t>(
-                    max_out_bytes, uint64_t(A.out_h) * A.out_w * A.out_c * elem);
             }
+            if (concat_c != C.out_c)
+                return false;
 
             const uint64_t row_in = uint64_t(first.in_w) * first.in_c * elem;
             const uint64_t per_oh_in = row_in * first.s_h;
             const uint64_t fixed_in = row_in * (first.k_h ? (first.k_h - 1) : 0);
-            const uint64_t max_out_row = [&]() {
+            const uint64_t sum_out_row = [&]() {
                 uint64_t v = 0;
                 for (uint32_t k = i; k <= end; ++k)
-                    v = std::max<uint64_t>(v, uint64_t(metas[k].out_w) * metas[k].out_c * elem);
+                    v += uint64_t(metas[k].out_w) * metas[k].out_c * elem;
                 return v;
             }();
             uint32_t tile_oh = first.out_h;
             const uint64_t base_fixed = fixed_bytes + safety;
             if (base_fixed >= L1_BUDGET) return false;
             const uint64_t io_budget = L1_BUDGET - base_fixed;
-            if (per_oh_in + max_out_row > 0) {
+            if (per_oh_in + sum_out_row > 0) {
                 uint64_t cand = (io_budget > fixed_in)
-                              ? ((io_budget - fixed_in) / (per_oh_in + max_out_row))
+                              ? ((io_budget - fixed_in) / (per_oh_in + sum_out_row))
                               : 1;
                 cand = std::max<uint64_t>(1, std::min<uint64_t>(cand, first.out_h));
                 tile_oh = uint32_t(cand);
@@ -1866,7 +1872,7 @@ int sc_main(int argc, char* argv[]) {
                 const uint64_t in_b = uint64_t(worst_in_h) * first.in_w * first.in_c * elem;
                 uint64_t out_b = 0;
                 for (uint32_t k = i; k <= end; ++k)
-                    out_b = std::max<uint64_t>(out_b, uint64_t(toh) * metas[k].out_w * metas[k].out_c * elem);
+                    out_b += uint64_t(toh) * metas[k].out_w * metas[k].out_c * elem;
                 return std::pair<uint64_t, uint64_t>(in_b, out_b);
             };
             while (tile_oh > 1) {
@@ -1883,9 +1889,14 @@ int sc_main(int argc, char* argv[]) {
             flush_pending();
 
             const uint32_t L1_IN_FAN = 0;
-            const uint32_t L1_OUT_FAN = align64(uint32_t(max_in_b));
-            uint32_t cursor = align64(uint32_t(L1_OUT_FAN + max_tile_out_b));
+            uint32_t cursor = align64(uint32_t(max_in_b));
             std::vector<size_t> last_udma(N, 0), last_req(N, 0), last_tnps(N, 0);
+            for (uint32_t k = i; k <= end; ++k) {
+                auto& bb = blobs[k - i];
+                const auto& A = metas[k];
+                bb.out_l1 = cursor;
+                cursor = align64(uint32_t(cursor + uint64_t(tile_oh) * A.out_w * A.out_c * elem));
+            }
             for (uint32_t k = i; k <= end; ++k) {
                 auto& bb = blobs[k - i];
                 bb.params_l1 = cursor;
@@ -1951,7 +1962,7 @@ int sc_main(int argc, char* argv[]) {
                     auto& cb = cd.body.conv;
                     cb.in_addr = L1_IN_FAN;
                     cb.wgt_addr = bb.wgt_l1;
-                    cb.out_addr = L1_OUT_FAN;
+                    cb.out_addr = bb.out_l1;
                     cb.in_h = uint16_t(this_in_h);
                     cb.in_w = A.in_w;
                     cb.in_c = A.in_c;
@@ -1972,7 +1983,7 @@ int sc_main(int argc, char* argv[]) {
                                               /*signal*/ req_tag, bb.params_tag, bb.wgt_tag, in_tag);
                     auto& rb = rd.body.requant;
                     rb.in_addr = 0;
-                    rb.out_addr = L1_OUT_FAN;
+                    rb.out_addr = bb.out_l1;
                     rb.n = 1;
                     rb.h = uint16_t(this_oh);
                     rb.w = A.out_w;
@@ -1991,11 +2002,39 @@ int sc_main(int argc, char* argv[]) {
                     acc[k].sram_w += uint64_t(this_oh) * A.out_w * A.out_c * elem;
                     ++requant_count_so_far;
                     last_req[k] = requant_count_so_far;
+
+                    const uint64_t out_bytes =
+                        uint64_t(this_oh) * A.out_w * A.out_c * elem;
+                    const uint8_t concat_store_tag = alloc_tag();
+                    const uint64_t concat_dram_base =
+                        uint64_t(C.dram_out)
+                      + uint64_t(oh_done * C.out_w) * C.out_c * elem
+                      + uint64_t(bb.c_offset) * elem;
+                    Descriptor st = make_desc(OC_UDMA, DT_INT8x8,
+                                              /*signal*/ concat_store_tag,
+                                              req_tag, 0);
+                    auto& sb = st.body.udma;
+                    sb.mode = UM_STRIDED_2D;
+                    sb.direction = 1;
+                    sb.src_addr = bb.out_l1;
+                    sb.dst_addr = uint32_t(concat_dram_base);
+                    sb.length = A.out_c * elem;
+                    sb.src_stride = A.out_c * elem;
+                    sb.dst_stride = C.out_c * elem;
+                    sb.num_chunks = uint16_t(this_oh * A.out_w);
+                    mark_stream(st, concat_idx, mb, SMF_STORE | (is_last_h ? SMF_FINAL_TILE : 0));
+                    st.hdr.flags |= DF_STREAM_TAIL;
+                    program.push_back(st);
+                    acc[concat_idx].sram_r += out_bytes;
+                    acc[concat_idx].dram_w += out_bytes;
+                    ++udma_count_so_far;
+                    last_udma[concat_idx] = udma_count_so_far;
+
                     udma_w_skipped[k] = true;
                     udma_w_streamed[k] = true;
-                    mark_flow_edge(k, end + 1);
-                    last_branch_req = req_tag;
-                    layer_done_tag[k] = req_tag;
+                    mark_flow_edge(k, concat_idx);
+                    last_branch_req = concat_store_tag;
+                    layer_done_tag[k] = concat_store_tag;
                 }
                 prev_tile_done = last_branch_req;
                 group_done = last_branch_req;
@@ -2007,14 +2046,19 @@ int sc_main(int argc, char* argv[]) {
                 requant_count_at_layer_end[k] = last_req[k];
                 udma_count_at_layer_end[k] = (k == i) ? last_udma[i] : last_udma[k];
             }
-            layer_done_tag[end] = group_done;
+            udma_w_streamed[concat_idx] = true;
+            tiles_h_per_layer[concat_idx] = tiles_h_per_layer[i];
+            tiles_oc_per_layer[concat_idx] = uint16_t(end - i + 1);
+            udma_count_at_layer_end[concat_idx] = last_udma[concat_idx];
+            requant_count_at_layer_end[concat_idx] = requant_count_so_far;
+            layer_done_tag[concat_idx] = group_done;
             fuse_prev_l1_out_addr = 0;
             fuse_prev_l1_out_size = 0;
             fuse_prev_single_tile = false;
             fuse_prev_is_conv_class = false;
             clear_prev_binary_ewe_live();
             chain_alt = 0;
-            i = end;
+            i = concat_idx;
             return true;
         };
 
