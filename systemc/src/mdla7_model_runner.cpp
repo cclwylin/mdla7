@@ -1256,19 +1256,6 @@ int sc_main(int argc, char* argv[]) {
         }
     }
 
-    for (uint32_t k = 0; k + 1 < N; ++k) {
-        const auto& P = metas[k];
-        const auto& S = metas[k + 1];
-        const bool large_conv_to_layout_slice =
-            is_conv_class_meta(P) &&
-            (S.op_kind == OK_SLICE || S.op_kind == OK_STRIDED_SLICE || S.op_kind == OK_SPLIT) &&
-            P.dtype == S.dtype &&
-            P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
-            uint64_t(P.ref_size) + 4096 > L1_BUDGET;
-        if (large_conv_to_layout_slice)
-            producer_no_store[k] = false;
-    }
-
     for (uint32_t i = 0; i < N; ++i) {
         if (i > 0 && is_conv_class_meta(metas[i]) &&
             metas[i - 1].op_kind == OK_PAD && udma_w_skipped[i - 1] &&
@@ -5905,6 +5892,14 @@ int sc_main(int argc, char* argv[]) {
                     uint8_t layout_tail_tag = 0;
                     if (tiled_layout_tail.valid && this_oc == L.out_c) {
                         const auto& T = metas[tiled_layout_tail.layer_idx];
+                        const bool tail_has_later_consumer =
+                            graph_metas &&
+                            graph_metas[tiled_layout_tail.layer_idx].consumer_count > 0 &&
+                            graph_metas[tiled_layout_tail.layer_idx].last_consumer_layer >
+                                int32_t(tiled_layout_tail.layer_idx);
+                        const bool stream_layout_tail =
+                            producer_no_store[tiled_layout_tail.layer_idx] ||
+                            tail_has_later_consumer;
                         const uint32_t rows = this_oh * L.out_w;
                         const uint32_t row_bytes = tiled_layout_tail.c * tiled_layout_tail.elem;
                         const uint32_t src_stride = L.out_c * tiled_layout_tail.elem;
@@ -5912,9 +5907,11 @@ int sc_main(int argc, char* argv[]) {
                         const uint32_t dst_off =
                             uint32_t(uint64_t(oh_done) * L.out_w *
                                      tiled_layout_tail.c * tiled_layout_tail.elem);
+                        const uint32_t tail_dst =
+                            stream_layout_tail ? tile_l1_out : uint32_t(T.dram_out + dst_off);
                         layout_tail_tag = alloc_tag();
                         Descriptor td = make_tnps_slice_2d(
-                            tile_l1_out, uint32_t(T.dram_out + dst_off),
+                            tile_l1_out, tail_dst,
                             uint16_t(rows),
                             uint16_t(tiled_layout_tail.c0 * tiled_layout_tail.elem),
                             row_bytes, src_stride, dst_stride,
@@ -5930,13 +5927,18 @@ int sc_main(int argc, char* argv[]) {
                         program.push_back(td);
                         acc[tiled_layout_tail.layer_idx].sram_r += rows * src_stride;
                         acc[tiled_layout_tail.layer_idx].sram_w += rows * row_bytes;
-                        acc[tiled_layout_tail.layer_idx].dram_w += rows * row_bytes;
+                        if (!stream_layout_tail)
+                            acc[tiled_layout_tail.layer_idx].dram_w += rows * row_bytes;
                         if (oh_done == 0)
                             acc[tiled_layout_tail.layer_idx].dram_r += T.wgt_size;
                         ++tnps_count_so_far;
                         tnps_count_at_layer_end[tiled_layout_tail.layer_idx] = tnps_count_so_far;
                         layer_done_tag[tiled_layout_tail.layer_idx] = layout_tail_tag;
                         preemitted_layout_layer[tiled_layout_tail.layer_idx] = true;
+                        if (stream_layout_tail) {
+                            udma_w_skipped[tiled_layout_tail.layer_idx] = true;
+                            udma_w_streamed[tiled_layout_tail.layer_idx] = true;
+                        }
                         mark_flow_edge(i, tiled_layout_tail.layer_idx);
                     }
 
