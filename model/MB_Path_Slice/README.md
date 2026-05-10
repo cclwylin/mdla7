@@ -85,19 +85,22 @@ model/MB_Path_Slice/<pattern>/*.tflite
 model/MB_Path_Slice/microblock_pattern_slices.csv
 ```
 
-目前已切出 23 個代表 slice：
+目前已切出 50 個代表 slice：
 
 | Pattern | Slice count |
 |---|---:|
 | `consumer_tail` | 8 |
-| `fanout_live_range` | 3 |
-| `layout_bridge` | 3 |
+| `fanout_live_range` | 16 |
+| `layout_bridge` | 17 |
 | `producer_compute` | 3 |
 | `streaming_preload` | 3 |
 | `udma_as_engine` | 3 |
 
 `consumer_tail` 額外保留多個自然模型代表，用來覆蓋 EWE / POOL / TNPS
 tail 變形。
+`layout_bridge` 與 `fanout_live_range` 已從
+`microblock_pattern_candidates.csv` 補切 Path9 / Path10 代表，用來推動
+layout producer -> compute consumer，以及 producer multi-consumer live-range。
 
 切片方式：
 
@@ -111,10 +114,10 @@ tail 變形。
 最近一次 fast-only 全跑：
 
 ```bash
-python3 batch/run_mb_path.py --fast-only --rerun-all
+./batch/run_mb_path.py --fast-only --rerun-all --keep-bin
 ```
 
-結果：`23/23 ok`。
+結果：`50/50 ok`。
 
 代表改善：
 
@@ -122,16 +125,22 @@ python3 batch/run_mb_path.py --fast-only --rerun-all
 |---|---:|---:|
 | `layout_bridge/deeplab_v3_plus_float_L68_L69` | `0.093 ms / mb=0` | `0.070 ms / mb=5` |
 | `layout_bridge/deeplab_v3_plus_float_L73_L74` | `1.412 ms / mb=0` | `0.902 ms / mb=64` |
+| `layout_bridge/gpt2_quant_L14_L15` | `0.026 ms / mb=0` | `0.020 ms / mb=9` |
+| `layout_bridge/llama2_quant_L19_L20` | `mb=0` | `mb=2` |
+| `layout_bridge/mobilebert_quant_L7_L8` | `mb=0` | `mb=2` |
 | `producer_compute/deeplab_v3_plus_float_L2_L2` | `0.377 ms / mb=0` | `0.285 ms / mb=16` |
 | `streaming_preload/deeplab_v3_plus_float_L16_L16` | `0.197 ms / mb=0` | `0.131 ms / mb=10` |
 
 這批改善來自 FP H-tiled `CONV/DWCONV` ping-pong microblock streaming：
 FP tile 使用和 INT8 相同的 L1 slot hazard tags，因此可進 `DF_STREAM`
 Command Engine lookahead；INT16 仍保守關閉。
+本輪 Path9 另外補上 `RESHAPE/TRANSPOSE/CONCAT -> FC` final-store safe
+subset：batched FC 以 row tile x OC slice 產生 microblock，OC slice 的
+Requant 先 strided 寫回完整 L1 row tile，再由 UDMA_W 一次 linear store。
 
 ## 下一步
 
-1. 補 `sslice/layout -> CONV` true L1 slice-feed，避免 materialized input 從 DRAM reload。
+1. 補更完整的 `DEPTH_TO_SPACE/PAD/TRANSPOSE -> CONV` true L1 layout-feed。
 2. 補更通用的 multi-source concat / live-range ownership model。
 3. 依 regression 結果調整 candidate ranking，挑更小更準的代表。
 4. 用 slice 驗證通用 pattern，而不是每遇到一個模型就新增 special-case path。
