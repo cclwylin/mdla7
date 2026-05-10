@@ -149,6 +149,37 @@ SC_MODULE(TnpsEngine) {
                   << "  rows=[" << r0 << "," << r1 << ")"
                   << "  col_off=" << col_off
                   << "  row_len=" << t.length << "\n";
+        const uint32_t rows = (r1 > r0) ? uint32_t(r1 - r0) : 0u;
+        if (!rows || !t.length) return;
+        if (t.src_stride && col_off + t.length <= t.src_stride) {
+            const uint64_t span64 = uint64_t(rows - 1) * t.src_stride + col_off + t.length;
+            const uint64_t dst64 = uint64_t(rows) * t.dst_stride;
+            if (span64 <= (128ull << 20) && dst64 <= (128ull << 20)) {
+                std::vector<uint8_t> src(span64);
+                l1mgr.read(t.src_addr + uint32_t(r0) * t.src_stride, src.data(),
+                           uint32_t(span64));
+                if (t.dst_stride == t.length) {
+                    std::vector<uint8_t> dst(uint64_t(rows) * t.length);
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        std::memcpy(dst.data() + uint64_t(r) * t.length,
+                                    src.data() + uint64_t(r) * t.src_stride + col_off,
+                                    t.length);
+                    }
+                    l1mgr.write(t.dst_addr, dst.data(), uint32_t(dst.size()));
+                } else {
+                    std::vector<uint8_t> row(t.length);
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        std::memcpy(row.data(),
+                                    src.data() + uint64_t(r) * t.src_stride + col_off,
+                                    t.length);
+                        l1mgr.write(t.dst_addr + uint64_t(r) * t.dst_stride,
+                                    row.data(), t.length);
+                    }
+                }
+                wait_bytes(uint64_t(t.length) * rows);
+                return;
+            }
+        }
         std::vector<uint8_t> buf(t.length);
         for (uint16_t r = r0; r < r1; ++r) {
             const uint32_t s = t.src_addr + r * t.src_stride + col_off;

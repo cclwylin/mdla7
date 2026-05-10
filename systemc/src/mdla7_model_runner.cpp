@@ -5908,7 +5908,7 @@ int sc_main(int argc, char* argv[]) {
                         mark_stream(td, tiled_layout_tail.layer_idx, mb,
                                     SMF_COMPUTE | (is_last_h ? SMF_FINAL_TILE : 0));
                         program.push_back(td);
-                        acc[tiled_layout_tail.layer_idx].sram_r += rows * row_bytes;
+                        acc[tiled_layout_tail.layer_idx].sram_r += rows * src_stride;
                         acc[tiled_layout_tail.layer_idx].sram_w += rows * row_bytes;
                         acc[tiled_layout_tail.layer_idx].dram_w += rows * row_bytes;
                         if (oh_done == 0)
