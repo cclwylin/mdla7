@@ -5561,9 +5561,10 @@ int sc_main(int argc, char* argv[]) {
                 pointwise_ws_candidate && pingpong_persistent_wgt;
             const bool large_int8_upsample_conv =
                 (L.dtype == DT_INT8x8) && (L.out_h >= 512) && (L.out_w >= 512);
+            // FP tiles use the same ping-pong L1 slot hazards as INT8; keep
+            // INT16 paths conservative until their producer/consumer ABI is wider.
             const bool stream_pingpong_tiles =
                 !(L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8) &&
-                !is_fp &&
                 !large_int8_upsample_conv;
             uint8_t prev_store = layer_entry_wait;
             uint8_t slot_free_tag[2] = {layer_entry_wait, layer_entry_wait};

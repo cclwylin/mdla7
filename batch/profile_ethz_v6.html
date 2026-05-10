@@ -47,11 +47,11 @@ tr:hover td { background:#f4f7fb; }
     <tr>
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
-      <th><button class="sort-btn" data-sort-key="type">type <span class="sort-mark"></span></button></th>
 
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
+
 
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
@@ -62,10 +62,11 @@ tr:hover td { background:#f4f7fb; }
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","type":"","link":"output/deeplab_v3_plus_quant.html","cx":"","our_ms":2.866,"conflict_ms":3.104,"mesh_ms":3.684,"ratio":null,"conflict_ratio":1.083042568039079,"mesh_ratio":1.2854152128401954,"mesh_conflict_ratio":1.1868556701030928},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"","our_ms":0.529,"conflict_ms":0.533,"mesh_ms":0.636,"ratio":null,"conflict_ratio":1.007561436672968,"mesh_ratio":1.2022684310018903,"mesh_conflict_ratio":1.1932457786116322},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"","our_ms":0.604,"conflict_ms":0.699,"mesh_ms":0.712,"ratio":null,"conflict_ratio":1.1572847682119205,"mesh_ratio":1.1788079470198676,"mesh_conflict_ratio":1.0185979971387698},{"pattern":"xlsr_quant","stem":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"","our_ms":0.774,"conflict_ms":0.903,"mesh_ms":0.903,"ratio":null,"conflict_ratio":1.1666666666666667,"mesh_ratio":1.1666666666666667,"mesh_conflict_ratio":1.0}];
+const EMBEDDED_ROWS = [{"pattern":"deeplab_v3_plus_float","stem":"deeplab_v3_plus_float","label":"deeplab_v3_plus_float","type":"","link":"output/deeplab_v3_plus_float.html","cx":"","our_ms":5.632,"conflict_ms":null,"mesh_ms":null,"ratio":null,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"deeplab_v3_plus_quant","stem":"deeplab_v3_plus_quant","label":"deeplab_v3_plus_quant","type":"","link":"output/deeplab_v3_plus_quant.html","cx":"","our_ms":2.866,"conflict_ms":3.104,"mesh_ms":3.684,"ratio":null,"conflict_ratio":1.083042568039079,"mesh_ratio":1.2854152128401954,"mesh_conflict_ratio":1.1868556701030928,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","label":"mobilenet_v3_quant","type":"","link":"output/mobilenet_v3_quant.html","cx":"","our_ms":0.529,"conflict_ms":0.533,"mesh_ms":0.636,"ratio":null,"conflict_ratio":1.007561436672968,"mesh_ratio":1.2022684310018903,"mesh_conflict_ratio":1.1932457786116322,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","label":"mv3_depth_quant","type":"","link":"output/mv3_depth_quant.html","cx":"","our_ms":0.604,"conflict_ms":0.699,"mesh_ms":0.712,"ratio":null,"conflict_ratio":1.1572847682119205,"mesh_ratio":1.1788079470198676,"mesh_conflict_ratio":1.0185979971387698,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"xlsr_quant","stem":"xlsr_quant","label":"xlsr_quant","type":"","link":"output/xlsr_quant.html","cx":"","our_ms":0.774,"conflict_ms":0.903,"mesh_ms":0.903,"ratio":null,"conflict_ratio":1.1666666666666667,"mesh_ratio":1.1666666666666667,"mesh_conflict_ratio":1.0,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""}];
 const LIVE_CSV = "output/ethz_v6_regression.csv";
 const ONLY_METRIC_ROWS = true;
 const SHOW_CX = false;
+const SHOW_MB = false;
 const DEFAULT_SORT_KEY = "mesh_ratio";
 let rows = EMBEDDED_ROWS.slice();
 let sortState = { key: DEFAULT_SORT_KEY, dir: "desc", default: true };
@@ -132,7 +133,8 @@ function sortRows(xs) {
       let cmp = 0;
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
-          key === "mesh_ratio" || key === "mesh_conflict_ratio") {
+          key === "mesh_ratio" || key === "mesh_conflict_ratio" ||
+          key === "mb_count") {
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
         else if (an !== null && bn === null) cmp = -1;
@@ -165,9 +167,11 @@ function sortValue(r, key) {
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
   if (key === "mesh_ms") return r.mesh_ms;
+  if (key === "fuse_hit") return r.fuse_hit || "";
+  if (key === "mb_count") return r.mb_count;
+  if (key === "mb_stages") return r.mb_stages || "";
   if (key === "cx") return r.cx;
   if (key === "stem") return r.stem || r.pattern;
-  if (key === "type") return r.type || "";
   return r.pattern;
 }
 function numOrNull(v) {
@@ -192,21 +196,23 @@ function render() {
   const body = document.getElementById("rows");
   body.innerHTML = "";
   for (const r of sortRows(rows.slice())) {
-    const parts = [r.pattern, r.stem || "", r.type || "",
+    const parts = [r.pattern, r.stem || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   r.fuse_hit || "", r.fuse_flows || "", r.streamed_layers || "",
+                   r.mb_count || "", r.mb_stages || "",
                    fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
     if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
     const allText = parts.join(" ").toLowerCase();
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(r.pattern)}</td>` +
-      `<td><a href="${escAttr(r.link)}">${esc(r.stem || r.pattern)}</a></td>` +
-      `<td>${esc(r.type || "")}</td>` +
+      `<td><a href="${escAttr(r.link)}">${esc(r.label || r.stem || r.pattern)}</a></td>` +
       (SHOW_CX ? `<td class="num">${esc(r.cx || "")}</td>` : "") +
       `<td class="num">${esc(fmtMs(r.our_ms))}</td>` +
       `<td class="num">${esc(fmtMs(r.conflict_ms))}</td>` +
       `<td class="num">${esc(fmtMs(r.mesh_ms))}</td>` +
       (SHOW_CX ? `<td class="num">${esc(fmtRatio(r))}</td>` : "") +
+      (SHOW_MB ? `<td>${esc(r.fuse_hit || "")}</td><td class="num">${esc(r.mb_count || "")}</td><td>${esc(r.mb_stages || "")}</td>` : "") +
       `<td class="num">${esc(fmtConflictRatio(r))}</td>` +
       `<td class="num">${esc(fmtMeshRatio(r))}</td>` +
       `<td class="num">${esc(fmtMeshConflictRatio(r))}</td>`;
@@ -235,7 +241,14 @@ function csvParse(text) {
       cx: row.mdla6_cx || row.CX || "",
       ms: row.mdla7_ms || "",
       conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
-      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || ""
+      mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || "",
+      fuse_hit: row.fuse_hit || "",
+      fuse_flows: row.fuse_flows || "",
+      streamed_layers: row.streamed_layers || "",
+      mb_hit: row.mb_hit || "",
+      mb_count: row.mb_count || "",
+      mb_layers: row.mb_layers || "",
+      mb_stages: row.mb_stages || ""
     };
   }
   return out;
@@ -274,7 +287,7 @@ async function refreshFromOutput() {
       } catch (_) {}
       next.push({
         pattern: (cx[stem] && cx[stem].pattern) || stem,
-        stem, link: `output/${name}`,
+        stem, label: shortLinkLabel(stem), link: `output/${name}`,
         type: transformerType(stem),
         cx: (cx[stem] && cx[stem].cx) || "",
         our_ms: ms,
@@ -283,7 +296,14 @@ async function refreshFromOutput() {
         ratio: null,
         conflict_ratio: null,
         mesh_ratio: null,
-        mesh_conflict_ratio: null
+        mesh_conflict_ratio: null,
+        fuse_hit: (cx[stem] && cx[stem].fuse_hit) || "",
+        fuse_flows: (cx[stem] && cx[stem].fuse_flows) || "",
+        streamed_layers: (cx[stem] && cx[stem].streamed_layers) || "",
+        mb_hit: (cx[stem] && cx[stem].mb_hit) || "",
+        mb_count: (cx[stem] && cx[stem].mb_count) || "",
+        mb_layers: (cx[stem] && cx[stem].mb_layers) || "",
+        mb_stages: (cx[stem] && cx[stem].mb_stages) || ""
       });
     }
     if (next.length) rows = next;
@@ -301,6 +321,13 @@ function transformerType(stem) {
     "sam_float", "sam_quant"
   ]);
   return transformer.has(stem) ? "Transformer" : "";
+}
+function shortLinkLabel(stem) {
+  const base = String(stem || "").split("/").pop();
+  for (const prefix of ["deeplab_v3_plus_float_", "gpt2_quant_"]) {
+    if (base.startsWith(prefix)) return base.slice(prefix.length);
+  }
+  return base;
 }
 document.getElementById("refresh").addEventListener("click", refreshFromOutput);
 document.getElementById("filter").addEventListener("input", render);
