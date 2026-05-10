@@ -109,7 +109,7 @@ Host
 | L1Manager / L1Mesh | on-chip SRAM 與 arbitration / bank timing | [`memory.h`](../systemc/include/mdla7/memory.h) |
 | DRAM | LPDDR5X-style off-chip memory timing model | [`memory.h`](../systemc/include/mdla7/memory.h) |
 
-這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 16 條 chain，Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。若後面是 final `DEPTH_TO_SPACE`，Requant 也可以直接做 final-store address swizzle。這會在第 11 章詳細走讀。
+這裡有一個很重要的設計：CONV 不直接把最終 output tensor 寫回 L1。CONV 把 partial sums 推到 128 條 chain（4096 bit/cyc），Requant Engine 再 drain chain、做 fixed-point requantization、寫出 output。若後面是 final `DEPTH_TO_SPACE`，Requant 也可以直接做 final-store address swizzle。這會在第 11 章詳細走讀。
 
 ---
 

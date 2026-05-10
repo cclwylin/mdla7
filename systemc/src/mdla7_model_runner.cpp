@@ -3092,9 +3092,20 @@ int sc_main(int argc, char* argv[]) {
                 if (graph_metas) {
                     const auto& GP = graph_metas[ewe_end];
                     const auto& GQ = graph_metas[pool_tail_idx];
-                    if (GP.consumer_count != 1 ||
-                        GP.first_consumer_layer != int32_t(pool_tail_idx) ||
-                        GP.last_consumer_layer  != int32_t(pool_tail_idx))
+                    const bool single_pool_consumer =
+                        GP.consumer_count == 1 &&
+                        GP.first_consumer_layer == int32_t(pool_tail_idx) &&
+                        GP.last_consumer_layer  == int32_t(pool_tail_idx);
+                    // Residual encoders can fan a CONV tile to an immediate
+                    // POOL head plus a later skip consumer.  The POOL head can
+                    // still consume the producer tile directly; later uses are
+                    // covered by the compiled per-layer input blobs / skip path.
+                    const bool direct_pool_fanout_head =
+                        direct_pool_tail &&
+                        GP.consumer_count > 1 &&
+                        GP.first_consumer_layer == int32_t(pool_tail_idx) &&
+                        GP.last_consumer_layer  > int32_t(pool_tail_idx);
+                    if (!single_pool_consumer && !direct_pool_fanout_head)
                         return false;
                     if (GQ.producer0_layer != int32_t(ewe_end))
                         return false;

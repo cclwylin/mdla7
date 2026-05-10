@@ -29,8 +29,9 @@ public:
     sc_core::sc_fifo<DescriptorBody> tnps_cfg{"tnps_cfg", 4};
     sc_core::sc_fifo<DescriptorBody> udma_cfg{"udma_cfg", 4};
 
-    // CONV → Requant chain: 16 lanes of INT32 partial sums (§3A.5).
-    std::array<std::unique_ptr<sc_core::sc_fifo<int32_t>>, 16> chain;
+    // CONV → Requant chain: 128 lanes of INT32 partial sums = 4096 bit/cyc (§3A.5).
+    std::array<std::unique_ptr<sc_core::sc_fifo<int32_t>>,
+               CONV_REQUANT_CHAIN_LANES> chain;
 
     // Architectural Payload lane scaffold. The current functional engines
     // still call L1Manager::read/write; these channels pin down the agreed
@@ -102,7 +103,7 @@ public:
         init_payload_fifos(conv_act_payload_r, "conv_act_payload_r");
         init_payload_fifos(conv_wgt_payload_r, "conv_wgt_payload_r");
 
-        for (int i = 0; i < 16; ++i) {
+        for (std::size_t i = 0; i < CONV_REQUANT_CHAIN_LANES; ++i) {
             chain[i] = std::make_unique<sc_core::sc_fifo<int32_t>>(
                 ("chain_" + std::to_string(i)).c_str(), 2);
             conv.chain_out[i]    = chain[i].get();

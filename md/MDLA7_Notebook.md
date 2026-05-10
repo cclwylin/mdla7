@@ -76,7 +76,7 @@ eq/
   roofline_eq.tex
 
 pdf/
-  SystemC_textbook.pdf
+  mdla7_textbook.pdf
 ```
 
 `scripts/build_pdf.sh` 會合併 `md/[0-9][0-9]_*.md`，所以本 plan 檔 `MDLA7_Notebook.md` 不會自動放入正式 PDF。等正式章節開始寫，再依照 `00_*.md` 命名。
@@ -438,7 +438,7 @@ make -s
 - SystemC module instance
 - FIFO channels
 - dtype latch side-channel
-- CONV -> REQUANT 16-lane chain
+- CONV -> REQUANT 128-lane chain (4096 bit/cyc)
 - sc_start cap 與 simulation finish
 
 本章圖：
@@ -823,7 +823,7 @@ Junior 不要從最大檔案直接硬啃。建議順序：
 | `program_bin_layout.drawio` | 8 | binary layout |
 | `systemc_top_wiring.drawio` | 9 | modules and FIFOs |
 | `command_engine_dispatch.drawio` | 10 | pending queue |
-| `conv_requant_chain.drawio` | 11 | 16-lane chain |
+| `conv_requant_chain.drawio` | 11 | 128-lane chain |
 | `udma_modes.drawio` | 12 | linear / strided / d2space |
 | `ewe_pool_ops.drawio` | 13 | op family |
 | `fusion_pending_store.drawio` | 14 | pending store state machine |

@@ -123,6 +123,7 @@ conv_util_pct, dram_r, dram_w, sram_r, sram_w
 
 - summary chips
 - interactive Gantt
+- microblock stage Gantt
 - layer table, including flow id and CONV MAC util
 - engine utilization
 - compile log
@@ -132,6 +133,21 @@ conv_util_pct, dram_r, dram_w, sram_r, sram_w
 HTML 對 debug overlap 和 labeling 很有用。CONV MAC util 是用 ideal
 CONV cycle / 實際 CONV task duration，不用 layer wall window，避免 fused
 或 overlapped layer window 被壓短時出現大於 100% 的假象。
+
+第二張 microblock stage Gantt 會把 task meta 依 stage 重分：
+
+```text
+load | conv | requant | ewe/pool/tnps | store
+```
+
+判定條件是 descriptor 同時有 `DF_STREAM` 與非零 `stream_meta_flags`。因此
+第二張圖空白只代表沒有真 stream descriptor，不必然代表 layer fuse 沒發生。
+例如單 tile L1 handoff 可能只在 layer flow 上看得到；materialized layout input
+也可能已 fuse graph boundary，但 compute consumer 仍要從 DRAM reload。
+
+近期 FP H-tiled `CONV/DWCONV` 已打開 ping-pong microblock streaming，所以像
+`deeplab_v3_plus_float_L73_L74_layout_bridge` 會從 `mb=0` 變成
+`mb=64:load+conv+requant+store`。
 
 ---
 

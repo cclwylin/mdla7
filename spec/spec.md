@@ -288,7 +288,7 @@ spots matter more than simulation wall time.
 | Accumulator 寬度 | **INT48**（INT16×16 累加可承受 ~2^16 次乘加；INT8×8 上限遠大於任何 conv layer 需求） |
 | MAC array 總算力 | **~1.05 M bit-mult / cycle**（bit-level 守恆，見 §3A.2） |
 | 支援精度 | **Hybrid INT** + **Hybrid FP**（見 §3A.2 表） |
-| Requant 路徑 | **16 條 per-cluster Requant lane**，CONV 直接 chain 到 Requant（不經 L1_Manager） |
+| Requant 路徑 | **128 條 INT32 chain lane**（4096 bit/cyc），CONV 直接 chain 到 Requant（不經 L1_Manager） |
 
 ### 3A.2 Hybrid-precision MAC 表（per cycle, @ 1.9 GHz）
 
@@ -419,15 +419,13 @@ L3 array        : 16 cluster
 
 ## 3A.5 CONV → Requant Chain（推薦組合，已決定）
 
-CONV 沒有 Payload W，partial sum 不寫回 L1Mesh。改走 **per-cluster Requant lane chain**：
+CONV 沒有 Payload W，partial sum 不寫回 L1Mesh。改走 **128-lane Requant chain**：
 
 ```
-                        per-cluster INT32 chain
-CONV cluster 0  ──INT32──▶ Requant lane 0  ──┐
-CONV cluster 1  ──INT32──▶ Requant lane 1  ──┤
-...                                          ├── merge
-CONV cluster 15 ──INT32──▶ Requant lane 15 ──┘
-                                              ▼
+                        128 × INT32 chain = 4096 bit/cyc
+CONV clusters / reduce ─────────────────────▶ Requant chain lanes ──┐
+                                                                    ├── MBQM / clamp / pack
+                                                                    ▼
                                         8 條 Payload W ──▶ L1_Manager ──▶ L1Mesh
 ```
 
@@ -435,15 +433,16 @@ CONV cluster 15 ──INT32──▶ Requant lane 15 ──┘
 
 | 屬性 | 值 |
 |---|---|
-| 條數 | **16 條 INT32 lane**（一對一對應 CONV cluster ↔ Requant lane） |
+| 條數 | **128 條 INT32 lane** |
 | 寬度 | 每 lane 32 bit（INT32 partial sum） |
-| 拍數 | 1T per psum（cluster 完成一次 reduction 即推一筆 psum 上 chain） |
-| 同步 | cluster 完成 reduction → 自動 push to chain；Requant lane 隨後同 cycle latch |
+| 總寬度 | **4096 bit/cyc = 128 psum/cyc** |
+| 拍數 | 1T per psum（array 完成 reduction 後依 NHWC / output-channel order 推上 chain） |
+| 同步 | reduction 完成 → 自動 push to chain；Requant chain lane 隨後 latch |
 | Reverse path | 無；Requant 不回 CONV |
 
 ### Requant lane 內部
 
-每條 lane 處理 1 個 cluster 的輸出，邏輯：
+每條 chain lane 處理一筆 INT32 psum，邏輯：
 
 ```
 psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate to INT8 ─▶ FIFO out
@@ -454,14 +453,14 @@ psum (INT32) ─▶ × scale ─▶ >> shift ─▶ + zero_point ─▶ saturate
 
 ### Merge → Payload W
 
-16 條 INT8 輸出在 Requant Engine 末端 merge，走 **8 條 Payload W**（Requant ↔ L1_Manager）寫回 L1Mesh：
+Requant Engine 末端 merge / pack 後，走 **8 條 Payload W**（Requant ↔ L1_Manager）寫回 L1Mesh：
 
-- 16 lane × 1 byte/cycle = **16 byte/cycle 穩態** = 1 Payload lane 即可
+- 128 psum/cyc input chain 先進 MBQM / clamp / pack；最終 L1 write 仍由 Payload W / L1 bandwidth 決定。
 - 8 條 Payload W 是 v1 frozen interface，用於 cover fused / tiled store burst 與 final-store swizzle，不再視為可調參數。
 
 ### SystemC 介面
 
-- **CONV cluster ↔ Requant lane**：`sc_fifo<int32_t> chain[16]`，depth=2（cycle latch + 1 cushion）
+- **CONV ↔ Requant lane**：`sc_fifo<int32_t> chain[128]`，depth=2（cycle latch + 1 cushion），`lane = oc % 128`
 - **Requant lane 內 LUT**：`sc_signal<requant_param_t>`，由 CommandEngine 在 layer 啟動時 set
 - **merge → Payload W**：Requant Engine 內部 collector → L1_Manager Payload ingress
 - **Accumulator**：`sc_signal<sc_int<48>>` 或 `int64_t` 簡化版（v0 用 int64 即可，v1 改成嚴格 sc_int<48> 模 saturation）
@@ -1096,7 +1095,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - **Command Engine → Engine config（白線, 1T payload）**：用 `sc_signal<descriptor_t>` 或自定 `sc_fifo<>`(depth=1)，1 cycle latch 即可，**不需要 TLM socket**。
 - **CONV ↔ L1Mesh direct（藍線, Payload 16B × N）**：ACT_R / WGT_R 各自是 CONV 專用線，不經 L1_Manager，兩者也不是同一組 shared R port。
 - **Non-CONV Engine ↔ L1_Manager（藍線, Payload 16B × N）**：內部 `Payload {engineid, tid, opcode, addr, data[16B], last}`；N 條並列在 v0 可先合併成「N×16B / cycle」單條模型，等 contention 模型上線再展開。
-- **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 16> chain;` 連 CONV partial sums，每 lane depth=2；timing 上 Requant 是 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
+- **CONV/EWE → Requant/pack resource**：functional SystemC 保留 `std::array<sc_fifo<int32_t>, 128> chain;` 連 CONV partial sums，每 lane depth=2，總寬度 4096 bit/cyc；timing 上 Requant 另有 CONV / EWE 共用 512-lane quantize-pack / clamp resource，**繞過 L1_Manager** 取得 CONV psum，再寫 final tensor。
 - **L1_Manager 內部 arbiter**：Non-CONV Engine / UDMA → L1_Manager 入口 arbitration；CONV ACT_R / WGT_R 是兩組 dedicated direct L1Mesh path，不進此 arbiter。其他 engine / UDMA 依固定 priority 或 aging policy 排程 `[TBD]`。
 - **DRAM latency**：用 `wait()` 模 fixed latency，第一版不模 DDR controller。
 
@@ -1133,7 +1132,7 @@ sc_fifo<DescriptorBody> conv_cfg, requant_cfg,  // depth=4
 - [x] ~~PE array 形狀~~ → **65,536 base 4×4 cell，組成 16 cluster**（見 §3A.4）
 - [x] ~~CONV ↔ L1_Manager 介面~~ → **CONV ACT/WGT Payload R 直接接 L1Mesh，不經 L1_Manager；32 Payload R (ACT) + 32 Payload R (WGT)，無 Payload W**
 - [x] ~~支援的 datatype~~ → **Hybrid INT + Hybrid FP**（見 §3A.2）
-- [x] ~~CONV → Requant 的 chain 路徑~~ → **16 條 INT32 per-cluster lane，1T 同步**（見 §3A.5）
+- [x] ~~CONV → Requant 的 chain 路徑~~ → **128 條 INT32 lane，4096 bit/cyc，1T 同步**（見 §3A.5）
 - [x] ~~"ring" 拓樸 / 4 ring 工作切分軸~~ → **改成 16 cluster + reduce tree，無 ring**；output channel 切分跨 cluster（每 cluster 對應 16 個 output channel group）
 - [x] ~~Bit-decomposable MAC cell 的微結構~~ → **BitFusion-style 4×4 base cell，可融合**
 - [x] ~~FP 子集 4096 MAC 的位置~~ → **dedicated FP slice：cluster 12–15 共 4 個，每 cluster 1024 FP MAC**

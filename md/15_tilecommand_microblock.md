@@ -332,6 +332,23 @@ Layout op 現在分兩層看：
 consumer materialize synthetic input bytes；functional correctness 由後續 layer
 verify 錨定。真正的任意 permute tile kernel 仍是後續工作。
 
+Standalone `CONCAT -> CONV/DWCONV` slice 目前常見另一種情況：`CONCAT`
+在 compiler 端已 materialize 成 consumer input blob，不再保留多個真 source
+branch descriptor。這種 case 不應假裝成 true concat L1 pack；現在做法是讓後續
+FP H-tiled `CONV/DWCONV` consumer 走一般 ping-pong microblock streaming，
+用真 `DF_STREAM` descriptor overlap：
+
+```text
+mb0: UDMA_R activation tile -> CONV/DWCONV -> Requant -> UDMA_W store
+mb1: UDMA_R activation tile -> CONV/DWCONV -> Requant -> UDMA_W store
+...
+```
+
+這讓 layout bridge slice 在 Gantt 第二張圖能看到 `load / conv / requant / store`
+lane，也會讓 Command Engine 真的做 lookahead overlap。它改善的是 consumer
+compute side 的 tile pipeline；任意 multi-source concat 的 on-chip pack /
+scatter live-range model 仍屬於 layout bridge 後續工作。
+
 ## 15.8.7 Path 10：producer fanout
 
 `try_stream_conv_fanout()` 從原本的 `CONV` special-case 放寬到 safe
@@ -358,7 +375,7 @@ logical CONCAT / fanout boundary
 
 | Path | Pipeline | 狀態 |
 |---|---|---|
-| 1 | `CONV/DW/FC -> Requant -> store/forward` | 可用 |
+| 1 | `CONV/DW/FC -> Requant -> store/forward` | 可用；INT8/FP H-tiled ping-pong stream 已開，INT16 仍保守 |
 | 2 | `CONV -> Requant -> EWE ADD/MUL/SUB -> store/forward` | 可用 |
 | 3 | `CONV -> Requant -> D2SPACE` | 可用 |
 | 4 | `ADD/MUL/SUB -> ADD/MUL/SUB -> store/forward` | 可用 |
@@ -366,12 +383,45 @@ logical CONCAT / fanout boundary
 | 6 | `CONV/Requant -> EWE -> unary EWE` | 可用 |
 | 7 | `CONV/Requant -> EWE -> POOL/TNPS consumer` | 可用，real-window POOL row microblock |
 | 8 | `POOL -> unary/binary EWE/TNPS consumer` | 可用，INT8 safe subset |
-| 9 | `TNPS/layout -> compute consumer` | 可用於 GraphMeta handoff no-store；true arbitrary layout tile kernel 待補 |
+| 9 | `TNPS/layout -> compute consumer` | `CONCAT -> FP CONV/DWCONV` consumer 可走 MB；GraphMeta handoff no-store 可用；true arbitrary layout tile kernel 待補 |
 | 10 | `producer tile -> multiple consumers / concat fanout` | 可用於 safe CONV/DW/FC fanout subset |
 
 ---
 
-## 15.8.9 FC OC-slice microblock
+## 15.8.9 FP H-tiled CONV/DWCONV streaming
+
+一般 H-tiled CONV path 原本只讓非 FP / 非 INT16 的 tile 進
+`DF_STREAM` ping-pong scheduling。現在 FP storage path 也打開，原因是 FP
+activation tile 在 L1 裡仍是固定 byte stream，hazard model 和 INT8 一樣靠
+兩個 slot 的 `slot_free_tag` 保護：
+
+```text
+slot0: UDMA_R input/weight -> CONV/DWCONV -> Requant -> store/tail
+slot1: UDMA_R input/weight -> CONV/DWCONV -> Requant -> store/tail
+```
+
+`stream_slot`、`microblock_id`、`SMF_LOAD_A`、`SMF_LOAD_B`、`SMF_COMPUTE`
+和 `SMF_STORE` 都會被寫進 descriptor header，所以這不是 metadata-only
+profile；Command Engine 會依 stream priority 發射 ready descriptors。
+
+目前仍保守擋住：
+
+- `DT_INT16x8` / `DT_INT16x16`：producer/consumer ABI 較寬，暫不放進這條
+  ping-pong stream。
+- large INT8 upsample conv：先避免過度 aggressive 的 activation streaming。
+
+代表驗證：
+
+| Slice | Before | After |
+|---|---:|---:|
+| `layout_bridge/deeplab_v3_plus_float_L68_L69` | `0.093 ms / mb=0` | `0.070 ms / mb=5` |
+| `layout_bridge/deeplab_v3_plus_float_L73_L74` | `1.412 ms / mb=0` | `0.902 ms / mb=64` |
+| `producer_compute/deeplab_v3_plus_float_L2_L2` | `0.377 ms / mb=0` | `0.285 ms / mb=16` |
+| `streaming_preload/deeplab_v3_plus_float_L16_L16` | `0.197 ms / mb=0` | `0.131 ms / mb=10` |
+
+---
+
+## 15.8.10 FC OC-slice microblock
 
 `1x1xK -> 1x1xOC` 的 safe FC subset 現在可以用 output-channel slicing
 產生 microblock。這條 path 不是 pseudo metadata；它真的把 weight matrix

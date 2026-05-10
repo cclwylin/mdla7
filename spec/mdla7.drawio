@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram name="MDLA7" id="mdla7-v1">
-        <mxGraphModel dx="1401" dy="959" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2339" pageHeight="1654" math="0" shadow="0">
+        <mxGraphModel dx="1054" dy="1022" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2339" pageHeight="1654" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -25,8 +25,14 @@
                 <mxCell id="conv" value="CONV Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;65,536 base 4×4 cells&lt;br/&gt;16 cluster (4 with FP)&lt;br/&gt;Bit-decomposable INT+FP&lt;br/&gt;&lt;i&gt;see page 2 for internals&lt;/i&gt;&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="378" y="480" width="280" height="160" as="geometry"/>
                 </mxCell>
-                <mxCell id="requant" value="Requant Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;16 lanes (per-cluster)&lt;br/&gt;INT32 → INT8&lt;br/&gt;scale + shift + zp&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
+                <mxCell id="requant" value="Requant Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;128 INT32 chain lanes&lt;br/&gt;INT32 → INT8&lt;br/&gt;scale + shift + zp&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="774" y="480" width="280" height="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_conv_requant_chain" style="endArrow=classic;html=1;rounded=0;strokeColor=#666666;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="conv" target="requant" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="lbl_conv_requant_chain" value="4096 bit/cyc" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontStyle=1;fillColor=#ffffff;strokeColor=none;fontColor=#444444;" parent="1" vertex="1">
+                    <mxGeometry x="664" y="520" width="110" height="32" as="geometry"/>
                 </mxCell>
                 <mxCell id="ewe" value="EWE Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;Element-Wise / Activation&lt;br/&gt;arith / cmp / bit / LUT&lt;br/&gt;sigmoid / tanh / GELU…&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="1170" y="480" width="280" height="160" as="geometry"/>
@@ -213,10 +219,10 @@
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
-                <mxCell id="title2" value="CONV Engine Internal — 16 cluster + per-cluster Requant chain" style="text;html=1;fontSize=22;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
+                <mxCell id="title2" value="CONV Engine Internal — 16 cluster + 4096 bit/cyc Requant chain" style="text;html=1;fontSize=22;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;" parent="1" vertex="1">
                     <mxGeometry x="40" y="20" width="1000" height="40" as="geometry"/>
                 </mxCell>
-                <mxCell id="subtitle2" value="65,536 base 4×4 cells → 16 clusters → 16 Requant lanes → merge → 8 Payload W" style="text;html=1;fontSize=12;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#666666;" parent="1" vertex="1">
+                <mxCell id="subtitle2" value="65,536 base 4×4 cells → 16 clusters → 128 INT32 chain lanes → merge → 8 Payload W" style="text;html=1;fontSize=12;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontColor=#666666;" parent="1" vertex="1">
                     <mxGeometry x="40" y="68" width="1000" height="24" as="geometry"/>
                 </mxCell>
                 <mxCell id="spec_box" value="&lt;b&gt;Per-cluster spec&lt;/b&gt;&lt;br/&gt;&lt;br/&gt;Base cells: 4,096 (= 64×64 of 4-bit)&lt;br/&gt;INT8×8 MAC: 1,024&lt;br/&gt;INT8×4 MAC: 2,048&lt;br/&gt;INT16×16 MAC: 256&lt;br/&gt;FP MAC (FP-cluster only): 256&lt;br/&gt;&lt;br/&gt;&lt;b&gt;Internal view&lt;/b&gt;&lt;br/&gt;64×64 (4-bit) = 32×32 (8-bit) = 16×16 (16-bit) systolic&lt;br/&gt;Output-stationary&lt;br/&gt;Tile fill ≈ 64 cycle [TBD]" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;align=left;verticalAlign=top;fontSize=11;spacingLeft=12;spacingTop=10;" parent="1" vertex="1">
@@ -279,7 +285,7 @@
                 <mxCell id="e_operand_to_array" style="endArrow=classic;html=1;rounded=0;strokeColor=#0050ef;fillColor=#0050ef;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.1;entryY=1;entryDx=0;entryDy=0;dashed=1;" parent="1" source="operand_in" target="conv_outer" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
-                <mxCell id="requant_outer" value="Requant Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;16 lanes (per-cluster) → merge → 8 Payload W&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=8;" parent="1" vertex="1">
+                <mxCell id="requant_outer" value="Requant Engine&lt;br/&gt;&lt;span style=&quot;font-size:11px;font-weight:normal&quot;&gt;128 INT32 chain lanes → MBQM/pack → 8 Payload W&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=8;" parent="1" vertex="1">
                     <mxGeometry x="40" y="780" width="1240" height="160" as="geometry"/>
                 </mxCell>
                 <mxCell id="rl0" value="Lane 0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff8d6;strokeColor=#d6b656;fontSize=9;fontStyle=1;" parent="1" vertex="1">
@@ -384,7 +390,7 @@
                 <mxCell id="ch15" value="" style="endArrow=classic;html=1;rounded=0;strokeColor=#888888;strokeWidth=1;dashed=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cl15" target="rl15" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
-                <mxCell id="chain_label" value="16 × INT32 chain (1T per psum, no Payload lane)" style="text;html=1;fontSize=10;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=#ffffff;fontColor=#444444;" parent="1" vertex="1">
+                <mxCell id="chain_label" value="128 × INT32 chain = 4096 bit/cyc (no Payload lane)" style="text;html=1;fontSize=10;fontStyle=1;align=left;verticalAlign=middle;strokeColor=none;fillColor=#ffffff;fontColor=#444444;" parent="1" vertex="1">
                     <mxGeometry x="940" y="700" width="340" height="20" as="geometry"/>
                 </mxCell>
                 <mxCell id="merge_out" value="merge → 8 Payload W&lt;br/&gt;&lt;span style=&quot;font-size:9px;font-weight:normal&quot;&gt;to L1_Manager / L1Mesh&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#0050ef;fontSize=10;fontStyle=1;" parent="1" vertex="1">

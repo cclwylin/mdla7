@@ -184,7 +184,7 @@ conv.chain_out[i]    = chain[i].get();
 requant.chain_in[i]  = chain[i].get();
 ```
 
-這表示 CONV Engine 和 Requant Engine 中間有 16 條 int32 FIFO。這不是一般 descriptor config FIFO，而是 data path。
+這表示 CONV Engine 和 Requant Engine 中間有 128 條 int32 FIFO，也就是 4096 bit/cyc。這不是一般 descriptor config FIFO，而是 data path。
 
 為什麼要這樣設計？
 
@@ -418,7 +418,7 @@ MAC_count * lhs_bits * rhs_bits = constant bit-mult per cycle
 |---|---|
 | Descriptor 64 bytes | implemented |
 | Command Engine wait / signal tag | implemented |
-| CONV -> Requant 16-lane chain | implemented conceptually |
+| CONV -> Requant 128-lane chain (4096 bit/cyc) | implemented conceptually |
 | L1 2 MB budget | implemented |
 | DRAM dynamic sizing | implemented in simulator，spec 上仍是 4 GB |
 | TNPS Engine | spec has block，simulator 重點仍不在完整 TNPS |

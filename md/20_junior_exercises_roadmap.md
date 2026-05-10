@@ -87,7 +87,7 @@
 
 - CONV 為什麼不直接寫 final output？
 - Requant total elements 怎麼算？
-- chain lane `oc & 0xF` 如何 drain？
+- chain lane `oc % 128` 如何 drain？
 - done tag 如何回到 Command Engine？
 
 ---

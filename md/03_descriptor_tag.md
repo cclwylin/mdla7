@@ -603,7 +603,7 @@ out_w = (in_w + pad_l + pad_r - k_w) / stride_w + 1
 
 ## 3.17 RequantBody 導讀
 
-Requant 是 CONV 後面很重要的 sink，也是 CONV / EWE 共用的 quantize-pack / clamp resource。CONV 把 int32 / FP32 partial sum 推進 16-lane functional chain，Requant timing model 以 512 elem/cycle 估算，把它轉成 output tensor。
+Requant 是 CONV 後面很重要的 sink，也是 CONV / EWE 共用的 quantize-pack / clamp resource。CONV 把 int32 / FP32 partial sum 推進 128-lane functional chain（4096 bit/cyc），Requant timing model 以 512 elem/cycle 估算後段 MBQM / clamp / pack，把它轉成 output tensor。
 
 `RequantBody` 重點欄位：
 

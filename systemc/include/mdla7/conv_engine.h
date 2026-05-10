@@ -1,11 +1,12 @@
 #pragma once
 
 // CONV Engine — see spec §3A.4 / §3A.5
-// 16 cluster, hybrid INT+FP, INT48 acc, output via 16 INT32 chain to Requant.
+// 16 cluster, hybrid INT+FP, INT48 acc, output via a 4096 bit/cyc INT32 chain
+// to Requant.
 //
 // v1.3: real chain dataflow.
 //   - INT8 path computes int32 partial sums per (oh, ow, oc) and pushes them
-//     to chain[oc % 16] in NHWC scan order.
+//     to chain[oc % CONV_REQUANT_CHAIN_LANES] in NHWC scan order.
 //   - The RequantEngine drains the chains, applies per-channel requant, and
 //     writes INT8 results to L1Mesh.
 //   - ConvEngine no longer writes anything to L1Mesh directly.
@@ -59,7 +60,8 @@ inline uint64_t conv_cycles(const ConvBody& c, DType dtype, uint64_t out_count) 
 
 SC_MODULE(ConvEngine) {
     sc_core::sc_fifo_in<DescriptorBody>            cfg_in;
-    std::array<sc_core::sc_fifo<int32_t>*, 16>     chain_out;
+    std::array<sc_core::sc_fifo<int32_t>*,
+               CONV_REQUANT_CHAIN_LANES>          chain_out;
     sc_core::sc_fifo_out<uint8_t>                  done_tag_out;
 
     L1Manager& l1mgr;
@@ -136,7 +138,7 @@ SC_MODULE(ConvEngine) {
         }
     }
 
-    // v1.3 + v4.1: stream int32 partial sums into chain[oc % 16] in NHWC order.
+    // v1.3 + v4.1: stream int32 partial sums into the CONV->Requant chain in NHWC order.
     // v8.27: split activation and weight types so INT16x8 hybrid (int16 act,
     // int8 wgt) works alongside the existing INT8×8 / INT16×16 paths.
     template <typename T_a, typename T_w>
@@ -181,7 +183,7 @@ SC_MODULE(ConvEngine) {
             const int32_t psum =
                 (sum >  INT32_MAX) ? INT32_MAX :
                 (sum <  INT32_MIN) ? INT32_MIN : int32_t(sum);
-            const int lane = oc & 0xF;
+            const std::size_t lane = oc % CONV_REQUANT_CHAIN_LANES;
             if (chain_out[lane]) chain_out[lane]->write(psum);
         }
 
@@ -194,7 +196,7 @@ SC_MODULE(ConvEngine) {
 
     // v8 / v8.10: FP path. Storage is FP16 (2 byte/elem); compute runs in FP32
     // (matches spec §3A.2: FP cluster has FP32 accumulator).  Result is
-    // bit-cast to int32 and shipped through the 16-lane chain to RequantEngine.
+    // bit-cast to int32 and shipped through the 4096 bit/cyc chain to RequantEngine.
     void compute_fp(const ConvBody& c,
                     uint32_t s_h, uint32_t s_w,
                     uint32_t pad_t, uint32_t pad_l,
@@ -237,7 +239,7 @@ SC_MODULE(ConvEngine) {
             }
             int32_t bits;
             std::memcpy(&bits, &sum, 4);                // bit-cast FP32 → int32 chain payload
-            const int lane = oc & 0xF;
+            const std::size_t lane = oc % CONV_REQUANT_CHAIN_LANES;
             if (chain_out[lane]) chain_out[lane]->write(bits);
         }
         std::cout << "[CONV] pushed " << uint64_t(out_h) * out_w * c.out_c

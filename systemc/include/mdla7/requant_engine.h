@@ -3,7 +3,8 @@
 // Requant Engine — shared CONV/EWE quantize-pack resource (spec §3A.5).
 //
 // v1.2 / v1.3 + v3.5 fused activation + v6 bias/zp_in folding:
-//   - Drains chain[oc % 16] in NHWC scan order (matching CONV's push order).
+//   - Drains chain[oc % CONV_REQUANT_CHAIN_LANES] in NHWC scan order
+//     (matching CONV's push order).
 //   - Params table layout at scale_lut_addr (v6):
 //        [ int32 zp_out | int32 act_min | int32 act_max
 //        | int32 mult[OC] | int8 shift[OC] | int32 bias_eff[OC] ]
@@ -30,7 +31,8 @@ namespace mdla7 {
 
 SC_MODULE(RequantEngine) {
     sc_core::sc_fifo_in<DescriptorBody>           cfg_in;
-    std::array<sc_core::sc_fifo<int32_t>*, 16>    chain_in;     // from CONV clusters
+    std::array<sc_core::sc_fifo<int32_t>*,
+               CONV_REQUANT_CHAIN_LANES>         chain_in;     // from CONV clusters
     sc_core::sc_fifo_out<uint8_t>                 done_tag_out;
 
     L1Manager& l1mgr;
@@ -39,10 +41,10 @@ SC_MODULE(RequantEngine) {
     uint8_t last_dtype = DT_INT8x8;     // v4.1: latched by CmdEng each layer
 
     // v8.38: Requant is modeled as the shared CONV/EWE quantize-pack resource.
-    // Spec resource is 512 elem/cyc: enough to keep large image workloads from
-    // stalling behind MBQM/clamp/writeback. Functional simulation still drains
-    // the 16 CONV chain FIFOs; timing lumps the wider shared HW behind it.
-    static constexpr uint64_t LANES = 512;
+    // The CONV->Requant input chain is 128 INT32/cyc = 4096 bit/cyc, while the
+    // downstream MBQM/clamp/pack resource remains 512 elem/cyc.
+    static constexpr uint64_t CHAIN_LANES = CONV_REQUANT_CHAIN_LANES;
+    static constexpr uint64_t PACK_LANES = 512;
 
     SC_HAS_PROCESS(RequantEngine);
     RequantEngine(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -97,23 +99,23 @@ SC_MODULE(RequantEngine) {
                 for (uint32_t oh = 0; oh < OH; ++oh)
                 for (uint32_t ow = 0; ow < OW; ++ow)
                 for (uint32_t oc = 0; oc < OC; ++oc) {
-                    const int lane = oc & 0xF;
+                    const std::size_t lane = oc % CONV_REQUANT_CHAIN_LANES;
                     int32_t bits = chain_in[lane] ? chain_in[lane]->read() : 0;
                     float psum; std::memcpy(&psum, &bits, 4);
                     float v = psum + bias[oc];
                     if (v < act_min) v = act_min;
                     if (v > act_max) v = act_max;
                     out_h16[(oh * OW + ow) * OC + oc] = fp32_to_fp16(v);
-                    if (++reads % LANES == 0) wait(1, sc_core::SC_NS);
+                    if (++reads % CHAIN_LANES == 0) wait(1, sc_core::SC_NS);
                 }
                 l1mgr.write(r.out_addr, out_h16.data(), out_h16.size() * sizeof(uint16_t));
                 // v8.6: pipeline overlap — see ConvEngine. The L1 write happens
-                // concurrently with the LANES MBQM pipeline in real HW, so
+                // concurrently with the PACK_LANES MBQM pipeline in real HW, so
                 // total time = max(write_cyc, pipeline_cyc), not sum.
                 {
                     const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - t_begin;
                     const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
-                    const uint64_t pipe = (total + LANES - 1) / LANES;
+                    const uint64_t pipe = (total + PACK_LANES - 1) / PACK_LANES;
                     if (pipe > elapsed_cyc) wait(pipe - elapsed_cyc, sc_core::SC_NS);
                 }
                 const sc_core::sc_time t_end = sc_core::sc_time_stamp();
@@ -178,12 +180,12 @@ SC_MODULE(RequantEngine) {
                 : total;
             std::vector<int16_t> out16((!skip_l1_write && int16_out) ? dst_total : 0);
             std::vector<int8_t>  out8 ((!skip_l1_write && !int16_out) ? dst_total : 0);
-            // v8.7 + v8.8: chain backpressure at LANES throughput.
+            // v8.7 + v8.8: chain backpressure at CONV_REQUANT_CHAIN_LANES throughput.
             uint64_t reads = 0;
             for (uint32_t oh = 0; oh < OH; ++oh)
             for (uint32_t ow = 0; ow < OW; ++ow)
             for (uint32_t oc = 0; oc < OC; ++oc) {
-                const int lane = oc & 0xF;
+                const std::size_t lane = oc % CONV_REQUANT_CHAIN_LANES;
                 int32_t psum   = chain_in[lane] ? chain_in[lane]->read() : 0;
                 // v6: fold bias + zp_in subtraction into psum (precomputed by compile_model).
                 int64_t with_bias = int64_t(psum) + int64_t(bias_eff[oc]);
@@ -219,7 +221,7 @@ SC_MODULE(RequantEngine) {
                     if (int16_out) out16[idx] = int16_t(v);
                     else           out8 [idx] = int8_t (v);
                 }
-                if (++reads % LANES == 0) wait(1, sc_core::SC_NS);
+                if (++reads % CHAIN_LANES == 0) wait(1, sc_core::SC_NS);
             }
             if (!skip_l1_write) {
                 if (strided_store_req && !d2s_store) {
@@ -246,10 +248,10 @@ SC_MODULE(RequantEngine) {
                 }
             }
 
-            // v8.6 + v8.8: pipeline overlaps with L1 write at LANES throughput.
+            // v8.6 + v8.8: pipeline overlaps with L1 write at PACK_LANES throughput.
             const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - t_begin;
             const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
-            const uint64_t pipe = (total + LANES - 1) / LANES;
+            const uint64_t pipe = (total + PACK_LANES - 1) / PACK_LANES;
             if (pipe > elapsed_cyc) wait(pipe - elapsed_cyc, sc_core::SC_NS);
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             busy_time += t_end - t_begin;

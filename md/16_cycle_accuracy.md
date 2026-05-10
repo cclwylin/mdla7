@@ -120,19 +120,26 @@ cycle tuning 就是在這兩者之間找平衡。
 
 ## 16.5 Requant cycle model
 
-Requant lanes：
+Requant 有兩個吞吐數字：
 
 ```cpp
-LANES = 512
+CONV_REQUANT_CHAIN_LANES = 128   // 4096 bit/cyc
+PACK_LANES = 512                 // MBQM / clamp / pack
 ```
 
-cycle：
+chain drain cycle：
+
+```text
+ceil(output_elements / 128)
+```
+
+pack cycle：
 
 ```text
 ceil(output_elements / 512)
 ```
 
-它代表 CONV / EWE 共用的 quantize-pack / clamp resource。Functional path 仍用 chain FIFO，但 timing 上假設硬體有 512 elem/cycle 吞吐。
+`CONV_REQUANT_CHAIN_LANES` 代表 CONV → Requant 的 INT32 psum chain 寬度；`PACK_LANES` 代表 CONV / EWE 共用的 quantize-pack / clamp resource。
 
 ---
 

@@ -200,6 +200,7 @@ ADD / MUL / SUB
 也常見在 fused consumer tail：
 
 ```text
+CONV/DWCONV -> Requant -> store/forward
 CONV/Requant -> EWE -> POOL
 POOL -> EWE / TNPS
 layout/TNPS -> compute consumer
@@ -222,6 +223,15 @@ store tile 0
 ```text
 UDMA_R(tile+1) overlaps EWE(tile) overlaps UDMA_W(tile-1)
 ```
+
+對 H-tiled `CONV/DWCONV`，同樣可以是：
+
+```text
+UDMA_R(tile+1) overlaps CONV/Requant(tile) overlaps UDMA_W(tile-1)
+```
+
+目前 INT8 與 FP storage path 都可以走 ping-pong `DF_STREAM` descriptor；
+INT16 路徑因 producer/consumer ABI 較寬，仍先保守不打開。
 
 在 profile 裡要看：
 

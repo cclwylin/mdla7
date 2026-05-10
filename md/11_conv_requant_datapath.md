@@ -24,7 +24,7 @@ UDMA load input / weight / params
 CONV Engine
   read input + weight from L1
   accumulate raw psum
-  push psum into chain[oc % 16]
+  push psum into chain[oc % 128]
         |
         v
 Requant Engine
@@ -159,7 +159,7 @@ for oh
         for kw
           for icr
             sum += input * weight
-      chain[oc & 0xF].write(saturate_i32(sum))
+      chain[oc % 128].write(saturate_i32(sum))
 ```
 
 這裡 accumulator 是 int64，最後 saturate 到 int32 chain payload。
@@ -200,7 +200,7 @@ padding mismatch 是 conv debug 的第一個高收益檢查點。
 CONV push：
 
 ```cpp
-lane = oc & 0xF
+lane = oc % 128
 chain_out[lane]->write(psum)
 ```
 
@@ -384,7 +384,7 @@ CONV/Requant data path 要一起讀：
 
 ```text
 CONV raw accumulation
-  -> chain[oc % 16]
+  -> chain[oc % 128]
   -> Requant params / correction
   -> final tensor
 ```

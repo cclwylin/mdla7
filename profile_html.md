@@ -40,8 +40,9 @@ The page is currently ordered as:
 1. Header summary
 2. Per-engine busy table
 3. Interactive Gantt timeline
-4. Per-layer profile table
-5. Compile log table
+4. Microblock stage timeline
+5. Per-layer profile table
+6. Compile log table
 
 ### Header Summary
 
@@ -131,6 +132,37 @@ Important convention:
   same visual band.
 - UDMA read labels may include categories such as `params`, `input/tile`,
   `weight/tile`, or `read`.
+
+### Microblock Stage Timeline
+
+Per-model HTML also contains a second Gantt that re-buckets engine tasks by
+microblock stage:
+
+```text
+load | conv | requant | ewe/pool/tnps | store
+```
+
+This view is driven by descriptor task metadata. A task is considered a real
+microblock task only when the descriptor has both:
+
+```text
+DF_STREAM flag
+non-zero stream_meta_flags
+```
+
+So an empty second Gantt means there was no `DF_STREAM` microblock descriptor
+for that layer/window. It does not necessarily mean graph-level layer fuse
+failed; some fuse cases are single-tile L1 handoff, metadata-only flow, or
+materialized layout inputs.
+
+Recent FP H-tiled `CONV/DWCONV` paths now show true microblock lanes:
+
+```text
+UDMA_R tile -> CONV/DWCONV -> Requant -> UDMA_W store
+```
+
+For example, `layout_bridge/deeplab_v3_plus_float_L73_L74` changed from
+`mb=0` to `mb=64` and shows `load+conv+requant+store`.
 
 Current interactions:
 

@@ -26,7 +26,7 @@ Command Engine
     +--> CONV Engine
     |       |
     |       v
-    |   16-lane chain
+    |   128-lane chain
     |       |
     |       v
     +--> Requant Engine
@@ -49,7 +49,7 @@ UDMA load input / weight
 CONV reads L1 input / weight
         |
         v
-CONV pushes int32 or FP32 psum to chain[oc % 16]
+CONV pushes int32 or FP32 psum to chain[oc % 128]
         |
         v
 Requant drains chain, applies bias / scale / clamp
@@ -176,7 +176,7 @@ CONV Engine 做：
 - 根據 shape / stride / pad / group 做 convolution。
 - INT path 產生 int32 partial sum。
 - FP path 產生 FP32 partial sum。
-- 把 partial sum 寫入 `chain_out[oc & 0xF]`。
+- 把 partial sum 寫入 `chain_out[oc % 128]`。
 - 根據 bit-mult formula 估算 cycles。
 
 CONV Engine 不做：
@@ -269,7 +269,7 @@ for oh
         for kw
           for icr
             sum += activation * weight
-      chain[oc % 16].write(sum)
+      chain[oc % 128].write(sum)
 ```
 
 chain order 是 NHWC scan order：
@@ -448,7 +448,7 @@ return (bit_mult + 1048575) / 1048576 + 64;
 
 Requant Engine 做：
 
-- 從 16-lane chain 讀 CONV partial sum。
+- 從 128-lane chain 讀 CONV partial sum。
 - INT path 加 bias / correction。
 - INT path 做 fixed-point requant。
 - INT path 加 output zero-point。
@@ -480,7 +480,7 @@ Requant 讀 chain：
 for oh
   for ow
     for oc
-      lane = oc & 0xF
+      lane = oc % 128
       psum = chain_in[lane]->read()
 ```
 
@@ -489,7 +489,7 @@ for oh
 chain lane 選擇：
 
 ```text
-lane = oc % 16
+lane = oc % 128
 ```
 
 如果 output channel count 不是 16 的倍數，也沒有問題，因為每個 `oc` 都固定對應 lane。
@@ -1247,7 +1247,7 @@ Requant log：
 |---|---|
 | psum count | `OH * OW * OC` |
 | Requant total | `r.h * r.w * r.c` |
-| chain lanes | `oc & 0xF` |
+| chain lanes | `oc % 128` |
 | output bytes | `total * 1` for int8，`total * 2` for int16/fp16 |
 
 如果 CONV pushed count 和 Requant total 不同，通常就是 descriptor generation bug。

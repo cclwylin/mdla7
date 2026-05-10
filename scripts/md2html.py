@@ -240,8 +240,7 @@ img[src*="model_scale"], img[src*="model_scale_zoom"] {{
 </head>
 <body>
 <div class="cover">
-  <h1>SystemC 原理與實作走讀</h1>
-  <div class="sub">Kernel · Channel · TLM · AMS · Bus · Memory · Pipeline · NoC · Cache</div>
+  <h1>MDLA7 用 SystemC 實作走讀</h1>
 </div>
 {overview_html}
 <div class="toc"><h1 style="page-break-before: avoid;">完整目錄</h1>{toc}</div>

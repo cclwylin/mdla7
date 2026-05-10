@@ -82,6 +82,9 @@ enum PayloadOpcode : uint8_t {
 };
 
 constexpr unsigned PAYLOAD_BYTES = 16;
+constexpr unsigned CONV_REQUANT_CHAIN_LANES = 128;
+constexpr unsigned CONV_REQUANT_CHAIN_BITS_PER_CYCLE =
+    CONV_REQUANT_CHAIN_LANES * 32;
 
 struct Payload {
     uint8_t engineid;

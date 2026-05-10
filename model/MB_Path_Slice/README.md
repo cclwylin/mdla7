@@ -85,16 +85,19 @@ model/MB_Path_Slice/<pattern>/*.tflite
 model/MB_Path_Slice/microblock_pattern_slices.csv
 ```
 
-目前已切出 18 個代表 slice，每個 reusable pattern 3 個：
+目前已切出 23 個代表 slice：
 
 | Pattern | Slice count |
 |---|---:|
-| `producer_compute` | 3 |
-| `consumer_tail` | 3 |
-| `layout_bridge` | 3 |
+| `consumer_tail` | 8 |
 | `fanout_live_range` | 3 |
-| `udma_as_engine` | 3 |
+| `layout_bridge` | 3 |
+| `producer_compute` | 3 |
 | `streaming_preload` | 3 |
+| `udma_as_engine` | 3 |
+
+`consumer_tail` 額外保留多個自然模型代表，用來覆蓋 EWE / POOL / TNPS
+tail 變形。
 
 切片方式：
 
@@ -103,9 +106,32 @@ model/MB_Path_Slice/microblock_pattern_slices.csv
 - 重寫 subgraph inputs / outputs 成 operator range boundary。
 - 保留原 `operator_codes`，避免 opcode remap 風險。
 
+## 目前 regression 狀態
+
+最近一次 fast-only 全跑：
+
+```bash
+python3 batch/run_mb_path.py --fast-only --rerun-all
+```
+
+結果：`23/23 ok`。
+
+代表改善：
+
+| Pattern / slice | Before | After |
+|---|---:|---:|
+| `layout_bridge/deeplab_v3_plus_float_L68_L69` | `0.093 ms / mb=0` | `0.070 ms / mb=5` |
+| `layout_bridge/deeplab_v3_plus_float_L73_L74` | `1.412 ms / mb=0` | `0.902 ms / mb=64` |
+| `producer_compute/deeplab_v3_plus_float_L2_L2` | `0.377 ms / mb=0` | `0.285 ms / mb=16` |
+| `streaming_preload/deeplab_v3_plus_float_L16_L16` | `0.197 ms / mb=0` | `0.131 ms / mb=10` |
+
+這批改善來自 FP H-tiled `CONV/DWCONV` ping-pong microblock streaming：
+FP tile 使用和 INT8 相同的 L1 slot hazard tags，因此可進 `DF_STREAM`
+Command Engine lookahead；INT16 仍保守關閉。
+
 ## 下一步
 
-1. 對每個 slice 跑 `compile_model.py + mdla7_model_runner`。
-2. 補 slice regression runner，依 pattern 分組跑 fast/profile。
-3. 依實際 compile/sim 結果調整 candidate ranking，挑更小更準的代表。
+1. 補 `sslice/layout -> CONV` true L1 slice-feed，避免 materialized input 從 DRAM reload。
+2. 補更通用的 multi-source concat / live-range ownership model。
+3. 依 regression 結果調整 candidate ranking，挑更小更準的代表。
 4. 用 slice 驗證通用 pattern，而不是每遇到一個模型就新增 special-case path。
