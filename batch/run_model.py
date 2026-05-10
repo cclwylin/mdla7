@@ -3,7 +3,7 @@
 
 Default flow (= what running just `run_model.py <model>` does):
 
-  .tflite ─▶ compile_model.py ─▶ program.bin ─▶ test_model
+  .tflite ─▶ compile_model.py ─▶ program.bin ─▶ mdla7_model_runner
                                                    │
                   Mdla7System: Host → CmdEng → CONV / UDMA / ...
                                                    │
@@ -42,11 +42,11 @@ COMPILE_PY  = SYSTEMC_DIR / "scripts" / "compile_model.py"  # full-model compile
 PLOT_PY     = SYSTEMC_DIR / "scripts" / "plot_profile.py"   # gantt renderer
 MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
 TEST_BIN    = BUILD_DIR / "test_tflite_conv"            # legacy single-layer
-MODEL_BIN   = BUILD_DIR / "test_model"                  # full-model runner
+MODEL_BIN   = BUILD_DIR / "mdla7_model_runner"          # full-model runner
 BLOB_PATH   = BUILD_DIR / "conv_layer.bin"
 
 def _artefact_paths(model: Path) -> dict[str, Path]:
-    """Per-model output paths under output/<stem>.* — test_model derives
+    """Per-model output paths under output/<stem>.* — mdla7_model_runner derives
     .profile.json / .profile.csv from the program.bin stem so we just need
     to pass it a stable per-model name.
 
@@ -367,10 +367,10 @@ def compile_and_run(model: Path, l1_timing: str = "fast") -> bool:
     )
     elapsed = time.time() - t0
     out = r.stdout or ""
-    # test_model uses the same canonical "  layer NN  in=...  PASS/FAIL" line,
+    # mdla7_model_runner uses the same canonical "  layer NN  in=...  PASS/FAIL" line,
     # so relaying verbatim makes it diffable against the compile lines above.
     for ln in out.splitlines():
-        if (ln.startswith(("test_model:", "  layer", "  summary",
+        if (ln.startswith(("mdla7_model_runner:", "test_model:", "  layer", "  summary",
                            "  sim time", "  DRAM ", "  SRAM ", "  L1Mesh ",
                            "  per-engine", "  utilization", "    ",
                            "  profile", "  csv"))):
@@ -398,7 +398,7 @@ def compile_and_run(model: Path, l1_timing: str = "fast") -> bool:
             emit(f"  (html report failed: {e})")
 
     # v8.1: clean up regression intermediates. .bin is only consumed by
-    # test_model; .profile.json is only consumed by the Gantt plotter and the
+    # mdla7_model_runner; .profile.json is only consumed by the Gantt plotter and the
     # HTML writer (both already done above). The user-facing artefacts that
     # survive are .profile.csv (tabular data) + .profile.png + .html. Pass
     # --keep-intermediate to keep .bin / .profile.json around for debugging.
@@ -508,7 +508,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         _, _, oc = (L.get("out") or [0, 0, 0])
         dtype = str((compile_row or {}).get("dtype", "") or "")
         d = dtype.upper()
-        # Mirrors test_model.cpp's normal params blob. INT correlation blobs are
+        # Mirrors mdla7_model_runner.cpp's normal params blob. INT correlation blobs are
         # model-specific and not present in compile-log rows, so leave those in
         # the generic DRAM-r total instead of inventing precision we do not have.
         if "FP" in d or "BF" in d:
@@ -2141,6 +2141,8 @@ def main():
         build()
         if not TEST_BIN.exists():
             sys.exit(f"binary missing after build: {TEST_BIN}")
+        if not MODEL_BIN.exists():
+            sys.exit(f"binary missing after build: {MODEL_BIN}")
 
     if args.all:
         models = sorted(m for m in (MODEL_ROOT / "INT8").glob("*.tflite")

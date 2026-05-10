@@ -73,7 +73,7 @@ def _pack_tnps_meta(rank, elem_size, in_shape, out_shape, a_vals, b_vals=None):
     words += pad_i(b_vals)
     return struct.pack("<26I", *words)
 
-# op_kind enum — must mirror C++ in test_model.cpp
+# op_kind enum — must mirror C++ in mdla7/program_image.h
 OP_CONV       = 0
 OP_DWCONV     = 1
 OP_AVG_POOL   = 2
@@ -567,7 +567,7 @@ SOFTMAX_LUT = np.array([
 def softmax_int8_ref(logits_i8):
     """Deterministic INT8 softmax over the last axis.
 
-    Must match test_model.cpp's row-wise EWE dispatch: each H×W position is
+    Must match mdla7_model_runner.cpp's row-wise EWE dispatch: each H×W position is
     sent to softmax_int8() as one contiguous C-vector.
     """
     x = logits_i8.astype(np.int32)
@@ -842,7 +842,7 @@ def main():
     # v8.12: chain mode — when layer N+1's expected input shape & dtype match
     # layer N's reference output, reuse N's output as N+1's input (instead of a
     # fresh rng draw).  This makes the per-layer rng-synth align with what the
-    # actual model would feed forward, AND lets test_model.cpp detect fusable
+    # actual model would feed forward, AND lets mdla7_model_runner.cpp detect fusable
     # adjacent pairs and skip layer N+1's udma_r (the input is already in L1
     # at layer N's L1_OUT slot).  Models where the chain breaks (skipped FP
     # ADD / HARD_SWISH / etc.) just get a fresh rng draw at the break.
@@ -991,7 +991,7 @@ def main():
 
         # v8.12: prefer the previous layer's reference output when its shape +
         # dtype match the current layer's expected input — enables L1-resident
-        # fusion in test_model.cpp.  Falls back to fresh rng on first layer or
+        # fusion in mdla7_model_runner.cpp.  Falls back to fresh rng on first layer or
         # whenever the chain breaks (skipped op, shape mismatch).
         expected_dtype = np_in_dt   # FP conv/FC paths may override this later
         if (last_output_arr is not None
@@ -1585,7 +1585,7 @@ def main():
             # the simulator's L1 holds bit-identical values when fusion runs);
             # input-B is freshly synthesized — sim and ref both see the same
             # rng tensor at this layer's dram_in slot.
-            # v8.31: test_model.cpp can tile binary EWE ops over flat
+            # v8.31: mdla7_model_runner.cpp can tile binary EWE ops over flat
             # contiguous chunks when a single row is wider than the H-tiler's
             # L1 budget, so large transformer-style FP ADDs no longer need a
             # compiler-side skip.
@@ -1622,7 +1622,7 @@ def main():
 
             # Wgt payload = input-B FP16 || 48 bytes (first 8 = act_min/max
             # sentinels, remaining 40 padded zeros to keep the same layout
-            # test_model.cpp uses for INT ADD — `params_l1 = wgt_size - 48`).
+            # mdla7_model_runner.cpp uses for INT ADD — `params_l1 = wgt_size - 48`).
             add_params_b = (struct.pack("<ff", float(amin_sent), float(amax_sent))
                             + b"\x00" * 40)
             add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
@@ -2249,7 +2249,7 @@ def main():
                 op_kind = OP_RESHAPE
                 # RESHAPE is byte-preserving, not int8-only. Keep FP16/INT16
                 # storage width intact so L.ref_size matches the UDMA passthrough
-                # length that test_model emits from L.in_size.
+                # length that mdla7_model_runner emits from L.in_size.
                 ref = in_arr.reshape(OH * OW * OC).astype(in_arr.dtype, copy=False)
                 ref_b = ref.tobytes(order="C")
         elif opname in ("SPACE_TO_DEPTH", "TRANSPOSE",
@@ -2322,6 +2322,12 @@ def main():
                                         if stride_a is not None else [1] * len(begin_v))
                         else:
                             stride_v = [1] * len(begin_v)
+                        while len(begin_v) > src.ndim:
+                            begin_v = begin_v[1:]
+                            second_v = second_v[1:]
+                            stride_v = stride_v[1:]
+                            begin_mask >>= 1
+                            end_mask >>= 1
                         slices_np = []
                         meta_begin = []
                         meta_stride = []
@@ -2519,7 +2525,7 @@ def main():
             group = 1
         # LayerMeta stores k_h/k_w as uint8_t. For global spatial reductions
         # (MEAN routed as AVG_POOL, and TFLite global-ish pools), use 255 as a
-        # pool-only sentinel meaning "full input dimension"; test_model.cpp
+        # pool-only sentinel meaning "full input dimension"; mdla7_model_runner.cpp
         # expands it before planning tiles and PoolEngine expands it at run time.
         k_h_meta, k_w_meta = Kh, Kw
         if op_kind in (OP_AVG_POOL, OP_MAX_POOL):
@@ -2583,7 +2589,7 @@ def main():
         except Exception:
             last_output_arr = None
 
-        # Canonical line — byte-identical with test_model.cpp.
+        # Canonical line — byte-identical with mdla7_model_runner.cpp.
         nelem = OH * OW * OC
         if layer_dtype in (DT_FP16, DT_BFP16, DT_FP8):
             unit = "FP16"

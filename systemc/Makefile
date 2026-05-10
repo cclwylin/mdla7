@@ -68,11 +68,15 @@ HOST_STAMP := $(BUILD)/.host-$(UNAME_S)-$(UNAME_M)
 # Each .cpp under src/ becomes its own binary.
 BINS := $(patsubst src/%.cpp,$(BUILD)/%,$(wildcard src/*.cpp))
 
-all: $(BINS)
+all: $(BINS) $(BUILD)/test_model
 
 $(BUILD)/%: src/%.cpp $(HEADERS) $(HOST_STAMP) | $(BUILD)
 	@echo "[build] $@   ($(UNAME_S)/$(UNAME_M))"
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
+# Backward-compatible alias for scripts/docs that still invoke test_model.
+$(BUILD)/test_model: $(BUILD)/mdla7_model_runner | $(BUILD)
+	@ln -sf mdla7_model_runner $@
 
 $(BUILD):
 	mkdir -p $@

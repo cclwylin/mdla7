@@ -13,7 +13,7 @@ from pathlib import Path
 from run_mdla6_pattern import (  # noqa: E402
     OUT_DIR,
     REPO_ROOT,
-    TEST_BIN,
+    MODEL_RUNNER,
     _artefact_paths,
     _report_exists_for,
     run_one,
@@ -135,8 +135,8 @@ def run_corpus(*,
     if not patterns:
         raise SystemExit(f"no .tflite models found in {model_dir} "
                          f"(filter={args.filter!r})")
-    if not TEST_BIN.exists():
-        raise SystemExit(f"test_model not built: {TEST_BIN}\n"
+    if not MODEL_RUNNER.exists():
+        raise SystemExit(f"mdla7_model_runner not built: {MODEL_RUNNER}\n"
                          f"  run `make -C systemc -s` from repo root")
 
     csv_path = Path(args.csv_out)

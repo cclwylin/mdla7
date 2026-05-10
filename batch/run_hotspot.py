@@ -40,7 +40,7 @@ SYSTEMC_DIR = REPO_ROOT / "systemc"
 OUT_DIR = HERE / "output"
 DEFAULT_MODEL_DIR = REPO_ROOT / "model" / "Hotspot"
 DEFAULT_CSV_OUT = OUT_DIR / "hotspot_regression.csv"
-TEST_BIN = SYSTEMC_DIR / "build" / "test_model"
+MODEL_RUNNER = SYSTEMC_DIR / "build" / "mdla7_model_runner"
 MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
 
 # Re-exec into the same venv policy used by run_model.py / run_mdla6_pattern.py.
@@ -170,8 +170,8 @@ def main() -> None:
     if not patterns:
         raise SystemExit(f"no Hotspot slices found in {model_dir} "
                          f"(filter={args.filter!r})")
-    if not TEST_BIN.exists():
-        raise SystemExit(f"test_model not built: {TEST_BIN}\n"
+    if not MODEL_RUNNER.exists():
+        raise SystemExit(f"mdla7_model_runner not built: {MODEL_RUNNER}\n"
                          f"  run `make -C ../systemc -s` from {HERE}\n"
                          f"  or `make -C systemc -s` from {REPO_ROOT}")
 

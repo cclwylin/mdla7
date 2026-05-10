@@ -51,7 +51,7 @@ inline uint64_t conv_cycles(const ConvBody& c, DType dtype, uint64_t out_count) 
     // Per-CONV-dispatch fill latency. Each tile pays this cost (spec §3A.5
     // pipeline: weight broadcast + first-pixel cluster fill ≈ 64 cyc) so a
     // multi-tile layer naturally accumulates fills. With the 2 MB L1 in
-    // test_model.cpp emitting per-tile CONV descriptors, this is now the
+    // mdla7_model_runner.cpp emitting per-tile CONV descriptors, this is now the
     // dominant overhead for layers that don't fit single-shot.
     const uint64_t fill = (c._r0 == CONV_DF_WS) ? 48 : 64;
     return (bit_mult + 1048575) / 1048576 + fill;

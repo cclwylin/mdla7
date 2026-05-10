@@ -2,7 +2,7 @@
 """Regression sweep restricted to the patterns listed in `mdla6_ethz_v6_sorted.csv`.
 
 For each (pattern, mdla6_cx) row in the input CSV, locates the matching
-`.tflite` under `model/ETHZ_v6/`, runs compile_model.py + test_model, and
+`.tflite` under `model/ETHZ_v6/`, runs compile_model.py + mdla7_model_runner, and
 emits a CSV next to the regular ETHZ sweep that pairs the MDLA7 sim time
 with the MDLA6 baseline:
 
@@ -60,7 +60,7 @@ SYSTEMC_DIR = REPO_ROOT / "systemc"
 COMPILE_PY = SYSTEMC_DIR / "scripts" / "compile_model.py"
 PLOT_PY    = SYSTEMC_DIR / "scripts" / "plot_profile.py"
 MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
-TEST_BIN   = SYSTEMC_DIR / "build" / "test_model"
+MODEL_RUNNER = SYSTEMC_DIR / "build" / "mdla7_model_runner"
 OUT_DIR    = HERE / "output"
 
 DEFAULT_CSV_IN  = HERE / "mdla6_ethz_v6_sorted.csv"
@@ -84,7 +84,7 @@ _reexec_in_venv()
 
 from run_model import _artefact_paths, _write_html_report  # noqa: E402
 
-# v8.25: test_model.cpp prints "sim time: <cycles> cycles @ 1.9 GHz (= <ms> ms)"
+# v8.25: mdla7_model_runner.cpp prints "sim time: <cycles> cycles @ 1.9 GHz (= <ms> ms)"
 # (pre-v8.25 was "sim time: <ns> ns"). Match both for forward/back compat.
 SIM_TIME_RE = re.compile(r"sim time:\s*([\d,]+)\s*(?:cycles|ns)")
 
@@ -155,7 +155,7 @@ def _selected_log_lines(compile_stdout: str, sim_stdout: str) -> list[str]:
         if ln.startswith(("compile_model:", "  layer", "  →")):
             lines.append(ln)
     for ln in (sim_stdout or "").splitlines():
-        if ln.startswith(("test_model:", "  layer", "  summary",
+        if ln.startswith(("mdla7_model_runner:", "test_model:", "  layer", "  summary",
                           "  sim time", "  DRAM ", "  SRAM ", "  L1Mesh ",
                           "  per-engine", "  utilization", "    ",
                           "  profile", "  csv")):
@@ -263,10 +263,10 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
 
 
 def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, str]:
-    """Run test_model once. Returns (ms, status, stdout)."""
+    """Run mdla7_model_runner once. Returns (ms, status, stdout)."""
     try:
         sr = subprocess.run(
-            [str(TEST_BIN), str(bin_path), "--quiet", f"--l1-timing={l1_timing}"],
+            [str(MODEL_RUNNER), str(bin_path), "--quiet", f"--l1-timing={l1_timing}"],
             capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
@@ -448,8 +448,8 @@ def main():
     csv_in = Path(args.csv_in)
     if not csv_in.exists():
         sys.exit(f"input CSV not found: {csv_in}")
-    if not TEST_BIN.exists():
-        sys.exit(f"test_model not built: {TEST_BIN}\n"
+    if not MODEL_RUNNER.exists():
+        sys.exit(f"mdla7_model_runner not built: {MODEL_RUNNER}\n"
                  f"  run `make -C ../systemc -s` from {HERE}\n"
                  f"  or `make -C systemc -s` from {REPO_ROOT}")
 
@@ -493,7 +493,7 @@ def main():
     # leaked to the parent tty gets overwritten before our row text. Belt-
     # and-braces: subprocesses already use capture_output=True so this
     # shouldn't happen, but seen in the wild when a Ctrl-C'd prior run left
-    # a zombie test_model still streaming to the terminal.
+    # a zombie mdla7_model_runner still streaming to the terminal.
     def _row_print(s: str):
         sys.stdout.write("\r\033[2K" + s + "\n")
         sys.stdout.flush()

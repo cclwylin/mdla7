@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render a Gantt chart of an MDLA7 simulation profile.
 
-Reads <build>/<model>.profile.json (written by test_model) and draws:
+Reads <build>/<model>.profile.json (written by mdla7_model_runner) and draws:
   - one row per engine (UDMA R/W / CONV / Requant / EWE / POOL / TNPS)
   - one bar per task interval (start_ns, end_ns)
   - dashed vertical lines at each layer's `cycles_cum` boundary
