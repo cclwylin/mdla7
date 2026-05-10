@@ -889,6 +889,14 @@ int sc_main(int argc, char* argv[]) {
                (is_int16_stream_dtype(producer_dtype) &&
                 is_int16_stream_dtype(consumer_dtype));
     };
+    auto is_attention_softmax_meta = [](const LayerMeta& S) {
+        const bool attention_matrix =
+            S.in_h > 1 && S.in_h <= 32 &&
+            S.in_w > 1 && S.in_w <= 2048 &&
+            S.in_c > 1 && S.in_c <= 2048;
+        const bool attention_dtype = (S.dtype == DT_INT8x8 || S.dtype == DT_FP16);
+        return S.op_kind == OK_SOFTMAX && attention_dtype && attention_matrix;
+    };
     auto graph_input0_is_exact_producer =
         [&](uint32_t producer_layer, uint32_t consumer_layer) -> bool {
             if (!graph_metas) return true;
@@ -1150,14 +1158,26 @@ int sc_main(int argc, char* argv[]) {
     // softmaxes verified, but suppress these attention-matrix DRAM checks.
     for (uint32_t k = 0; k < N; ++k) {
         const auto& S = metas[k];
-        const bool attention_matrix =
-            S.in_h > 1 && S.in_h <= 32 &&
-            S.in_w > 1 && S.in_w <= 2048 &&
-            S.in_c > 1 && S.in_c <= 2048;
-        const bool attention_dtype = (S.dtype == DT_INT8x8 || S.dtype == DT_FP16);
-        if (S.op_kind == OK_SOFTMAX && attention_dtype && attention_matrix) {
+        if (is_attention_softmax_meta(S)) {
             producer_no_store[k] = true;
         }
+    }
+    // Scale/mask EWE just before an attention SOFTMAX is an intermediate
+    // attention-score tensor.  Keep it on chip so the fused softmax tail below
+    // can consume it microblock-by-microblock instead of materializing 8 MB
+    // score matrices to DRAM.
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        const bool binary_attention_score =
+            is_binary_ewe_kind(P.op_kind) &&
+            is_attention_softmax_meta(S) &&
+            P.dtype == DT_INT8x8 &&
+            P.dtype == S.dtype &&
+            P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
+            graph_has_exact_single_consumer(k, k + 1, false);
+        if (binary_attention_score)
+            producer_no_store[k] = true;
     }
     // Transformer attention also contains same-shape RESHAPE barriers between
     // 4x384x384 EWE stages. They do not change layout, and downstream synthetic
@@ -4654,6 +4674,207 @@ int sc_main(int argc, char* argv[]) {
             return true;
         };
 
+        auto try_stream_binary_ewe_softmax = [&]() -> bool {
+            auto is_binary_ewe = [](const LayerMeta& L) {
+                return L.op_kind == OK_ADD || L.op_kind == OK_MUL || L.op_kind == OK_SUB;
+            };
+            if (i + 1 >= N || !is_binary_ewe(metas[i]) ||
+                !is_attention_softmax_meta(metas[i + 1]))
+                return false;
+            const auto& B = metas[i];
+            const auto& S = metas[i + 1];
+            if (!producer_no_store[i])
+                return false;
+            if (B.dtype != DT_INT8x8 || S.dtype != B.dtype)
+                return false;
+            if (B.wgt_size < B.ref_size + 48)
+                return false;
+            if (B.out_h != S.in_h || B.out_w != S.in_w || B.out_c != S.in_c)
+                return false;
+            if (S.in_h != S.out_h || S.in_w != S.out_w || S.in_c != S.out_c)
+                return false;
+            if (!graph_has_exact_single_consumer(i, i + 1, false))
+                return false;
+            if (!graph_input0_is_exact_producer(i, i + 1))
+                return false;
+
+            const uint32_t elem = 1;
+            const uint32_t vec_elems = S.in_c;
+            const uint32_t vec_bytes = vec_elems * elem;
+            const uint64_t vec_rows = uint64_t(S.in_h) * S.in_w;
+            if (vec_elems == 0 || vec_bytes == 0 || vec_elems > 65535u)
+                return false;
+
+            const uint64_t safety = 65536;
+            uint32_t tile_vecs =
+                uint32_t(std::min<uint64_t>(vec_rows, 65535ull / vec_elems));
+            if (tile_vecs == 0)
+                return false;
+            const uint32_t params_l1 = 0;
+            const uint32_t slot0 = align64(64u);
+            auto slot_top_for = [&](uint32_t vectors) -> uint64_t {
+                const uint32_t bytes = vectors * vec_bytes;
+                const uint32_t seg = align64(bytes);
+                return uint64_t(slot0) + 2ull * 4ull * seg;
+            };
+            while (tile_vecs > 0 && slot_top_for(tile_vecs) + safety > L1_BUDGET)
+                --tile_vecs;
+            if (tile_vecs == 0)
+                return false;
+
+            flush_pending();
+
+            const uint32_t tile_bytes_max = tile_vecs * vec_bytes;
+            const uint32_t seg = align64(tile_bytes_max);
+            const uint32_t slot_span = 4u * seg;
+            auto slot_base = [&](uint32_t slot) {
+                return slot0 + slot * slot_span;
+            };
+            auto slot_a = [&](uint32_t slot) { return slot_base(slot); };
+            auto slot_b = [&](uint32_t slot) { return slot_base(slot) + seg; };
+            auto slot_e = [&](uint32_t slot) { return slot_base(slot) + 2u * seg; };
+            auto slot_s = [&](uint32_t slot) { return slot_base(slot) + 3u * seg; };
+
+            const uint8_t params_tag = alloc_tag();
+            program.push_back(make_udma(B.dram_wgt + B.wgt_size - 48,
+                                        params_l1, 48, /*dir*/ 0, params_tag));
+            acc[i].dram_r += 48;
+            acc[i].sram_w += 48;
+            ++udma_count_so_far;
+            udma_count_at_layer_end[i] = udma_count_so_far;
+
+            uint8_t slot_free[2] = {0, 0};
+            uint8_t last_ewe_tag = params_tag;
+            uint8_t last_softmax_tag = params_tag;
+            size_t last_udma_i = udma_count_so_far;
+            size_t last_udma_s = udma_count_so_far;
+            size_t last_ewe_i = ewe_count_so_far;
+            size_t last_ewe_s = ewe_count_so_far;
+            const bool suppress_softmax_store = producer_no_store[i + 1];
+            const uint64_t tile_count = (vec_rows + tile_vecs - 1) / tile_vecs;
+            tiles_h_per_layer[i] = uint16_t(std::min<uint64_t>(tile_count, 65535));
+            tiles_h_per_layer[i + 1] = uint16_t(std::min<uint64_t>(tile_count, 65535));
+            tiles_oc_per_layer[i] = 1;
+            tiles_oc_per_layer[i + 1] = 1;
+
+            for (uint64_t row = 0, mb_id = 0; row < vec_rows; row += tile_vecs, ++mb_id) {
+                const uint32_t rows_this =
+                    uint32_t(std::min<uint64_t>(tile_vecs, vec_rows - row));
+                const uint32_t elems = rows_this * vec_elems;
+                const uint32_t bytes = elems * elem;
+                const uint32_t off = uint32_t(row * vec_bytes);
+                const uint32_t slot = uint32_t(mb_id & 1u);
+                const bool final_mb = (row + rows_this >= vec_rows);
+                Microblock mb{};
+                mb.id = uint16_t(std::min<uint64_t>(mb_id, 65535));
+                mb.slot = uint8_t(slot);
+                mb.elem_off = row * vec_elems;
+                mb.rows = rows_this;
+                mb.elems = elems;
+                mb.bytes = bytes;
+
+                const uint8_t a_tag = alloc_tag();
+                const uint8_t b_tag = alloc_tag();
+                const uint8_t e_tag = alloc_tag();
+                const uint8_t sm_tag = alloc_tag();
+                const uint8_t st_tag = suppress_softmax_store ? 0 : alloc_tag();
+                const uint8_t wait_slot = slot_free[slot] ? slot_free[slot] : params_tag;
+
+                auto [ad, a_charged] = make_act_load(B, uint32_t(B.dram_in + off),
+                                                     slot_a(slot), bytes,
+                                                     a_tag, wait_slot);
+                mark_stream(ad, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(ad);
+                acc[i].dram_r += a_charged;
+                acc[i].sram_w += bytes;
+                ++udma_count_so_far;
+                last_udma_i = udma_count_so_far;
+
+                auto [bd, b_charged] = make_binary_b_load(B, uint32_t(B.dram_wgt + off),
+                                                           slot_b(slot), bytes,
+                                                           b_tag, wait_slot);
+                mark_stream(bd, i, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(bd);
+                acc[i].dram_r += b_charged;
+                acc[i].sram_w += bytes;
+                ++udma_count_so_far;
+                last_udma_i = udma_count_so_far;
+
+                LayerMeta tile_B = B;
+                tile_B.in_h = 1;
+                tile_B.in_w = 1;
+                tile_B.in_c = uint16_t(elems);
+                tile_B.out_h = 1;
+                tile_B.out_w = 1;
+                tile_B.out_c = uint16_t(elems);
+                Descriptor ed = make_ewe_add(tile_B, slot_a(slot), slot_b(slot),
+                                             slot_e(slot), params_l1,
+                                             b_tag, a_tag, e_tag);
+                mark_stream(ed, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(ed);
+                acc[i].sram_r += 2ull * bytes;
+                acc[i].sram_w += bytes;
+                ++ewe_count_so_far;
+                last_ewe_i = ewe_count_so_far;
+                last_ewe_tag = e_tag;
+
+                LayerMeta tile_S = S;
+                tile_S.in_h = uint16_t(rows_this);
+                tile_S.in_w = 1;
+                tile_S.in_c = uint16_t(vec_elems);
+                tile_S.out_h = uint16_t(rows_this);
+                tile_S.out_w = 1;
+                tile_S.out_c = uint16_t(vec_elems);
+                Descriptor sm = make_softmax(tile_S, slot_e(slot), slot_s(slot),
+                                             e_tag, sm_tag);
+                mark_stream(sm, i + 1, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(sm);
+                acc[i + 1].sram_r += bytes;
+                acc[i + 1].sram_w += bytes;
+                ++ewe_count_so_far;
+                last_ewe_s = ewe_count_so_far;
+
+                if (suppress_softmax_store) {
+                    slot_free[slot] = sm_tag;
+                    last_softmax_tag = sm_tag;
+                } else {
+                    Descriptor wd = make_udma(slot_s(slot), uint32_t(S.dram_out + off),
+                                              bytes, /*dir*/ 1, st_tag, sm_tag);
+                    mark_stream(wd, i + 1, mb,
+                                SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(wd);
+                    acc[i + 1].sram_r += bytes;
+                    acc[i + 1].dram_w += bytes;
+                    ++udma_count_so_far;
+                    last_udma_s = udma_count_so_far;
+                    slot_free[slot] = st_tag;
+                    last_softmax_tag = st_tag;
+                }
+            }
+
+            udma_w_skipped[i] = true;
+            udma_w_streamed[i] = true;
+            if (suppress_softmax_store) {
+                udma_w_skipped[i + 1] = true;
+                udma_w_streamed[i + 1] = true;
+            }
+            mark_flow_edge(i, i + 1);
+            udma_count_at_layer_end[i] = last_udma_i;
+            ewe_count_at_layer_end[i] = last_ewe_i;
+            layer_done_tag[i] = last_ewe_tag;
+            udma_count_at_layer_end[i + 1] = last_udma_s;
+            ewe_count_at_layer_end[i + 1] = last_ewe_s;
+            layer_done_tag[i + 1] = last_softmax_tag;
+            fuse_prev_l1_out_addr = 0;
+            fuse_prev_l1_out_size = 0;
+            fuse_prev_single_tile = false;
+            fuse_prev_is_conv_class = false;
+            clear_prev_binary_ewe_live();
+            chain_alt = 0;
+            i = i + 1;
+            return true;
+        };
+
         auto try_stream_pool_consumer = [&]() -> bool {
             if (i + 1 >= N) return false;
             const auto& P = metas[i];
@@ -6469,6 +6690,10 @@ int sc_main(int argc, char* argv[]) {
         }
 
         if (enable_microblocks && try_stream_binary_ewe_chain()) {
+            continue;
+        }
+
+        if (enable_microblocks && try_stream_binary_ewe_softmax()) {
             continue;
         }
 
