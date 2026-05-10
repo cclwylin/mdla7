@@ -26,6 +26,16 @@ LAYOUT_OPS = {
     "EXPAND_DIMS", "DEPTH_TO_SPACE", "SPACE_TO_DEPTH", "CONCATENATION",
 }
 
+PATTERN_PRIORITY = [
+    "consumer_tail",
+    "layout_bridge",
+    "fanout_live_range",
+    "streaming_preload",
+    "udma_as_engine",
+    "producer_compute",
+]
+PATTERN_RANK = {pattern: rank for rank, pattern in enumerate(PATTERN_PRIORITY)}
+
 BUILTIN_OPS = {
     0: "ADD",
     1: "AVERAGE_POOL_2D",
@@ -224,6 +234,45 @@ def add_row(rows: list[dict[str, str]], *, pattern: str, model: Path,
     })
 
 
+def row_op_count(row: dict[str, str]) -> int:
+    return int(row["end_op"]) - int(row["start_op"]) + 1
+
+
+def row_sort_key(row: dict[str, str]) -> tuple[int, str, str, int, str, str]:
+    return (
+        PATTERN_RANK.get(row["pattern"], len(PATTERN_RANK)),
+        row["model"],
+        row["op_sequence"],
+        row_op_count(row),
+        row["start_op"].zfill(8),
+        row["input_shape"],
+    )
+
+
+def dedupe_rows(rows: list[dict[str, str]], mode: str) -> list[dict[str, str]]:
+    if mode == "none":
+        return rows
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    ordered_rows = rows if mode == "pattern_op_sequence_input_shape" else sorted(rows, key=row_sort_key)
+    for row in ordered_rows:
+        if row["pattern"] == "scan_error":
+            deduped.append(row)
+            continue
+        if mode == "model_op_sequence":
+            key = (row["model"], row["op_sequence"])
+        elif mode == "pattern_op_sequence_input_shape":
+            key = (row["pattern"], row["op_sequence"], row["input_shape"])
+        else:
+            raise ValueError(f"unknown dedupe mode: {mode}")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
 def scan_model(model: Path) -> list[dict[str, str]]:
     ops = load_ops(model)
     consumers = build_consumers(ops)
@@ -317,6 +366,12 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--max-ops", type=int, default=32,
                     help="drop candidate ranges longer than this; 0 keeps all")
+    ap.add_argument("--dedupe-key",
+                    choices=["model_op_sequence", "pattern_op_sequence_input_shape", "none"],
+                    default="model_op_sequence",
+                    help="candidate representative key; default keeps one row per model/op_sequence")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="skip legacy pattern/op_sequence/input_shape normalization before representative dedupe")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -342,25 +397,17 @@ def main() -> int:
                 "source_path": str(model),
             })
 
-    deduped: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
-        if row["pattern"] == "scan_error":
-            deduped.append(row)
-            continue
-        key = (row["pattern"], row["op_sequence"], row["input_shape"])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    rows = deduped
+    if not args.no_normalize and args.dedupe_key != "pattern_op_sequence_input_shape":
+        rows = dedupe_rows(rows, "pattern_op_sequence_input_shape")
 
     if args.max_ops:
         rows = [
             row for row in rows
             if row["pattern"] == "scan_error"
-            or int(row["end_op"]) - int(row["start_op"]) + 1 <= args.max_ops
+            or row_op_count(row) <= args.max_ops
         ]
+
+    rows = dedupe_rows(rows, args.dedupe_key)
 
     out_csv = args.out_dir / "microblock_pattern_candidates.csv"
     fields = [

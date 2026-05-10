@@ -36,7 +36,7 @@ def svg_text(x: float, y: float, text: str, **attrs: str | int | float) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", type=Path, default=Path("batch/output/mdla6_pattern_regression.csv"))
-    ap.add_argument("--out", type=Path, default=Path("batch/mdla6_pattern_ratio_chart.svg"))
+    ap.add_argument("--out", type=Path, default=Path("batch/chart/mdla6_pattern_ratio_chart.svg"))
     ap.add_argument("--threshold", type=float, default=2.0)
     ap.add_argument("--sort", choices=["ratio", "input"], default="ratio")
     args = ap.parse_args()
@@ -58,21 +58,28 @@ def main() -> int:
             })
 
     if args.sort == "ratio":
-        rows.sort(key=lambda r: (float(r["ratio"]), str(r["pattern"])), reverse=True)
+        rows.sort(key=lambda r: (float(r["ratio"]), str(r["pattern"])))
 
-    left = 300
-    right = 118
+    left = 82
+    right = 74
     top = 74
-    row_h = 24
-    bottom = 58
-    width = 1280
-    height = top + bottom + row_h * len(rows)
+    bottom = 264
+    point_gap = 28
+    width = max(1280, left + right + point_gap * max(1, len(rows) - 1))
+    height = 760
     plot_w = width - left - right
+    plot_h = height - top - bottom
     max_ratio = max([float(r["ratio"]) for r in rows] + [args.threshold])
-    x_max = max(args.threshold * 1.08, max_ratio * 1.12, 2.2)
+    y_max = max(args.threshold * 1.08, max_ratio * 1.12, 2.2)
+    y_min = 0.0
 
-    def x_of(value: float) -> float:
-        return left + (value / x_max) * plot_w
+    def x_of(idx: int) -> float:
+        if len(rows) <= 1:
+            return left + plot_w / 2
+        return left + idx * (plot_w / (len(rows) - 1))
+
+    def y_of(value: float) -> float:
+        return top + ((y_max - value) / (y_max - y_min)) * plot_h
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
@@ -80,50 +87,74 @@ def main() -> int:
         "text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#1f2933}",
         ".small{font-size:12px;fill:#52606d}.axis{stroke:#9aa5b1;stroke-width:1}",
         ".grid{stroke:#d9e2ec;stroke-width:1}.threshold{stroke:#d64545;stroke-width:2;stroke-dasharray:7 6}",
-        ".label{font-size:12px}.title{font-size:22px;font-weight:700}.bar-ok{fill:#2f80ed}",
-        ".bar-fast{fill:#2f9e44}.bar-risk{fill:#d64545}.value{font-size:12px;font-variant-numeric:tabular-nums}",
+        ".label{font-size:12px}.title{font-size:22px;font-weight:700}.line{stroke:#2f80ed;stroke-width:2.4;fill:none;stroke-linejoin:round;stroke-linecap:round}",
+        ".dot{fill:#2f80ed}.dot-risk{fill:#d64545}.value{font-size:11px;font-variant-numeric:tabular-nums;fill:#334e68}",
         "</style>",
         '<rect width="100%" height="100%" fill="#ffffff"/>',
         svg_text(left, 30, "MDLA7 / MDLA6 Pattern Ratio", class_="title"),
-        svg_text(left, 52, "X = MDLA7 / MDLA6 CX （Cycle Ratio）; dashed line marks X = 2", class_="small"),
+        svg_text(left, 52, "X = Pattern sorted by MDLA7 / MDLA6 CX; Y = MDLA7 / MDLA6 CX （Cycle Ratio）; dashed line marks Y = 2", class_="small"),
     ]
 
-    for tick in [0, 0.5, 1, 1.5, 2, 2.5, 3]:
-        if tick > x_max:
+    ticks = [0, 0.5, 1, 1.5, 2, 2.5, 3]
+    if y_max > 3:
+        ticks.extend(range(4, int(y_max) + 1))
+    for tick in ticks:
+        tick = float(tick)
+        if tick < y_min or tick > y_max:
             continue
-        x = x_of(tick)
-        parts.append(f'<line x1="{x:.1f}" y1="{top - 10}" x2="{x:.1f}" y2="{height - bottom + 6}" class="grid"/>')
-        parts.append(svg_text(x, height - 28, f"{tick:g}", class_="small", text_anchor="middle"))
-    if x_max > 3:
-        for tick in range(4, int(x_max) + 1):
-            x = x_of(float(tick))
-            parts.append(f'<line x1="{x:.1f}" y1="{top - 10}" x2="{x:.1f}" y2="{height - bottom + 6}" class="grid"/>')
-            parts.append(svg_text(x, height - 28, str(tick), class_="small", text_anchor="middle"))
+        y = y_of(tick)
+        grid_class = "threshold" if abs(tick - args.threshold) < 1e-6 else "grid"
+        parts.append(f'<line x1="{left - 6}" y1="{y:.1f}" x2="{width - right + 8}" y2="{y:.1f}" class="{grid_class}"/>')
+        parts.append(svg_text(left - 12, y + 4, f"{tick:g}", class_="small", text_anchor="end"))
 
-    th_x = x_of(args.threshold)
-    parts.append(f'<line x1="{th_x:.1f}" y1="{top - 18}" x2="{th_x:.1f}" y2="{height - bottom + 6}" class="threshold"/>')
-    parts.append(svg_text(th_x + 6, top - 24, f"X={args.threshold:g}", class_="small", fill="#d64545"))
-    parts.append(f'<line x1="{left}" y1="{height - bottom + 6}" x2="{width - right}" y2="{height - bottom + 6}" class="axis"/>')
+    th_y = y_of(args.threshold)
+    parts.append(svg_text(left + 6, th_y - 8, f"Y={args.threshold:g}", class_="small", fill="#d64545"))
+    axis_y = height - bottom
+    parts.append(f'<line x1="{left}" y1="{axis_y}" x2="{width - right}" y2="{axis_y}" class="axis"/>')
+    parts.append(f'<line x1="{left}" y1="{top - 8}" x2="{left}" y2="{axis_y}" class="axis"/>')
+
+    points = " ".join(f"{x_of(idx):.1f},{y_of(float(row['ratio'])):.1f}" for idx, row in enumerate(rows))
+    if points:
+        parts.append(f'<polyline points="{points}" class="line"/>')
 
     for idx, row in enumerate(rows):
-        y = top + idx * row_h
+        x = x_of(idx)
         ratio = float(row["ratio"])
         ms = float(row["ms"])
         cx = float(row["cx"])
-        bar_class = "bar-risk" if ratio >= args.threshold else ("bar-fast" if ratio <= 1.0 else "bar-ok")
-        bar_x = left
-        bar_y = y + 4
-        bar_h = 15
-        bar_w = max(1.0, x_of(ratio) - left)
-        parts.append(svg_text(18, y + 16, nice_label(str(row["pattern"])), class_="label"))
-        parts.append(f'<rect x="{bar_x:.1f}" y="{bar_y:.1f}" width="{bar_w:.1f}" height="{bar_h}" rx="2" class="{bar_class}"/>')
-        value = f'{ratio:.2f}  ({ms:.3f}/{cx:g})'
-        tx = min(x_of(ratio) + 7, width - right + 8)
-        parts.append(svg_text(tx, y + 16, value, class_="value"))
+        y = y_of(ratio)
+        dot_class = "dot-risk" if ratio >= args.threshold else "dot"
+        label_y = axis_y + 20
+        label = nice_label(str(row["pattern"]), max_len=30)
+        parts.append(f'<line x1="{x:.1f}" y1="{axis_y}" x2="{x:.1f}" y2="{axis_y + 5}" class="axis"/>')
+        parts.append(
+            svg_text(
+                x + 2,
+                label_y,
+                label,
+                class_="label",
+                text_anchor="start",
+                transform=f"rotate(58 {x + 2:.1f} {label_y:.1f})",
+            )
+        )
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.3" class="{dot_class}"/>')
+        if ratio > args.threshold:
+            parts.append(svg_text(x + 7, y - 7, f"{ratio:.2f}", class_="value"))
 
-    parts.append(svg_text(left + plot_w / 2, height - 8, "MDLA7 / MDLA6 CX （Cycle Ratio）", class_="small", text_anchor="middle"))
+    parts.append(svg_text(left + plot_w / 2, height - 8, "Pattern", class_="small", text_anchor="middle"))
+    parts.append(
+        svg_text(
+            18,
+            top + plot_h / 2,
+            "MDLA7 / MDLA6 CX （Cycle Ratio）",
+            class_="small",
+            text_anchor="middle",
+            transform=f"rotate(-90 18 {top + plot_h / 2:.1f})",
+        )
+    )
     parts.append("</svg>\n")
 
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(parts), encoding="utf-8")
     print(f"wrote {args.out} ({len(rows)} rows)")
     return 0

@@ -1,0 +1,308 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1556" height="760" viewBox="0 0 1556 760">
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#1f2933}
+.title{font-size:22px;font-weight:700}.small{font-size:12px;fill:#52606d}
+.label{font-size:12px}.value{font-size:11px;font-variant-numeric:tabular-nums;fill:#334e68}
+.hotvalue{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;fill:#c2410c}
+.grid{stroke:#d9e2ec;stroke-width:1}.axis{stroke:#9aa5b1;stroke-width:1}
+.baseline{stroke:#d64545;stroke-width:2;stroke-dasharray:7 6}
+</style>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="82.0" y="30.0" class="title">MDLA7 L1 Mesh Evaluation (v0.1)</text>
+<text x="82.0" y="52.0" class="small">X = Pattern sorted by mesh/conflict; Y = ratio; dashed line marks Y = 1; red labels mark top 10</text>
+<circle cx="82.0" cy="73" r="4.5" fill="#2f80ed"/>
+<text x="92.0" y="77.0" class="small">conflict/fast</text>
+<circle cx="214.0" cy="73" r="4.5" fill="#2f9e44"/>
+<text x="224.0" y="77.0" class="small">mesh/fast</text>
+<circle cx="346.0" cy="73" r="4.5" fill="#c2410c"/>
+<text x="356.0" y="77.0" class="small">mesh/conflict</text>
+<line x1="76" y1="496.0" x2="1490" y2="496.0" class="grid"/>
+<text x="70.0" y="500.0" class="small" text-anchor="end">0.96</text>
+<line x1="76" y1="464.2" x2="1490" y2="464.2" class="baseline"/>
+<text x="70.0" y="468.2" class="small" text-anchor="end">1.00</text>
+<line x1="76" y1="424.6" x2="1490" y2="424.6" class="grid"/>
+<line x1="76" y1="384.9" x2="1490" y2="384.9" class="grid"/>
+<text x="70.0" y="388.9" class="small" text-anchor="end">1.10</text>
+<line x1="76" y1="345.2" x2="1490" y2="345.2" class="grid"/>
+<line x1="76" y1="305.5" x2="1490" y2="305.5" class="grid"/>
+<text x="70.0" y="309.5" class="small" text-anchor="end">1.20</text>
+<line x1="76" y1="265.8" x2="1490" y2="265.8" class="grid"/>
+<line x1="76" y1="226.1" x2="1490" y2="226.1" class="grid"/>
+<text x="70.0" y="230.1" class="small" text-anchor="end">1.30</text>
+<line x1="76" y1="186.4" x2="1490" y2="186.4" class="grid"/>
+<line x1="76" y1="146.7" x2="1490" y2="146.7" class="grid"/>
+<text x="70.0" y="150.7" class="small" text-anchor="end">1.40</text>
+<line x1="76" y1="107.0" x2="1490" y2="107.0" class="grid"/>
+<line x1="82" y1="496" x2="1482" y2="496" class="axis"/>
+<line x1="82" y1="84" x2="82" y2="496" class="axis"/>
+<polyline points="82.0,270.2 110.0,424.1 138.0,323.2 166.0,423.9 194.0,429.1 222.0,383.0 250.0,395.4 278.0,433.5 306.0,456.7 334.0,459.6 362.0,454.3 390.0,439.0 418.0,439.0 446.0,433.9 474.0,464.2 502.0,464.2 530.0,449.4 558.0,430.7 586.0,449.0 614.0,462.3 642.0,424.5 670.0,429.2 698.0,360.8 726.0,444.8 754.0,447.8 782.0,435.9 810.0,418.7 838.0,446.3 866.0,407.9 894.0,296.5 922.0,303.7 950.0,330.0 978.0,386.5 1006.0,386.5 1034.0,414.3 1062.0,394.8 1090.0,322.5 1118.0,355.4 1146.0,390.0 1174.0,365.2 1202.0,369.7 1230.0,292.1 1258.0,398.9 1286.0,362.7 1314.0,382.4 1342.0,297.7 1370.0,374.2 1398.0,249.6 1426.0,264.6 1454.0,251.8 1482.0,303.8" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" opacity="0.78"/>
+<polyline points="82.0,270.7 110.0,424.4 138.0,323.3 166.0,424.0 194.0,429.2 222.0,383.0 250.0,395.4 278.0,433.5 306.0,456.7 334.0,459.6 362.0,454.3 390.0,439.0 418.0,439.0 446.0,433.9 474.0,464.2 502.0,464.2 530.0,449.4 558.0,430.7 586.0,449.0 614.0,462.3 642.0,424.5 670.0,429.2 698.0,360.8 726.0,444.8 754.0,447.4 782.0,435.0 810.0,416.4 838.0,443.8 866.0,404.1 894.0,292.2 922.0,296.2 950.0,322.3 978.0,378.5 1006.0,378.5 1034.0,406.5 1062.0,386.7 1090.0,312.7 1118.0,345.2 1146.0,379.4 1174.0,345.5 1202.0,348.6 1230.0,268.5 1258.0,375.2 1286.0,331.7 1314.0,349.5 1342.0,255.0 1370.0,327.1 1398.0,179.6 1426.0,192.6 1454.0,178.4 1482.0,229.2" fill="none" stroke="#2f9e44" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" opacity="0.78"/>
+<polyline points="82.0,464.7 110.0,464.6 138.0,464.4 166.0,464.4 194.0,464.4 222.0,464.3 250.0,464.2 278.0,464.2 306.0,464.2 334.0,464.2 362.0,464.2 390.0,464.2 418.0,464.2 446.0,464.2 474.0,464.2 502.0,464.2 530.0,464.2 558.0,464.2 586.0,464.2 614.0,464.2 642.0,464.2 670.0,464.2 698.0,464.2 726.0,464.2 754.0,463.9 782.0,463.3 810.0,462.1 838.0,461.9 866.0,460.7 894.0,460.7 922.0,458.0 950.0,457.6 978.0,457.0 1006.0,457.0 1034.0,457.0 1062.0,456.8 1090.0,455.9 1118.0,455.3 1146.0,454.6 1174.0,446.7 1202.0,445.3 1230.0,444.9 1258.0,442.4 1286.0,436.8 1314.0,434.5 1342.0,428.9 1370.0,422.0 1398.0,409.1 1426.0,406.7 1454.0,406.3 1482.0,402.2" fill="none" stroke="#c2410c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" opacity="0.78"/>
+<line x1="82.0" y1="496" x2="82.0" y2="501" class="axis"/>
+<text x="84.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 84.0 516.0)">xlsr_float</text>
+<circle cx="82.0" cy="270.2" r="4.2" fill="#2f80ed"/>
+<circle cx="82.0" cy="270.7" r="4.2" fill="#2f9e44"/>
+<circle cx="82.0" cy="464.7" r="4.2" fill="#c2410c"/>
+<line x1="110.0" y1="496" x2="110.0" y2="501" class="axis"/>
+<text x="112.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 112.0 516.0)">unet_quant</text>
+<circle cx="110.0" cy="424.1" r="4.2" fill="#2f80ed"/>
+<circle cx="110.0" cy="424.4" r="4.2" fill="#2f9e44"/>
+<circle cx="110.0" cy="464.6" r="4.2" fill="#c2410c"/>
+<line x1="138.0" y1="496" x2="138.0" y2="501" class="axis"/>
+<text x="140.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 140.0 516.0)">microisp_float</text>
+<circle cx="138.0" cy="323.2" r="4.2" fill="#2f80ed"/>
+<circle cx="138.0" cy="323.3" r="4.2" fill="#2f9e44"/>
+<circle cx="138.0" cy="464.4" r="4.2" fill="#c2410c"/>
+<line x1="166.0" y1="496" x2="166.0" y2="501" class="axis"/>
+<text x="168.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 168.0 516.0)">mobilevit_v2_float</text>
+<circle cx="166.0" cy="423.9" r="4.2" fill="#2f80ed"/>
+<circle cx="166.0" cy="424.0" r="4.2" fill="#2f9e44"/>
+<circle cx="166.0" cy="464.4" r="4.2" fill="#c2410c"/>
+<line x1="194.0" y1="496" x2="194.0" y2="501" class="axis"/>
+<text x="196.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 196.0 516.0)">imdn_float</text>
+<circle cx="194.0" cy="429.1" r="4.2" fill="#2f80ed"/>
+<circle cx="194.0" cy="429.2" r="4.2" fill="#2f9e44"/>
+<circle cx="194.0" cy="464.4" r="4.2" fill="#c2410c"/>
+<line x1="222.0" y1="496" x2="222.0" y2="501" class="axis"/>
+<text x="224.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 224.0 516.0)">pynet_v2_float</text>
+<circle cx="222.0" cy="383.0" r="4.2" fill="#2f80ed"/>
+<circle cx="222.0" cy="383.0" r="4.2" fill="#2f9e44"/>
+<circle cx="222.0" cy="464.3" r="4.2" fill="#c2410c"/>
+<line x1="250.0" y1="496" x2="250.0" y2="501" class="axis"/>
+<text x="252.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 252.0 516.0)">deeplab_v3_plus_float</text>
+<circle cx="250.0" cy="395.4" r="4.2" fill="#2f80ed"/>
+<circle cx="250.0" cy="395.4" r="4.2" fill="#2f9e44"/>
+<circle cx="250.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="278.0" y1="496" x2="278.0" y2="501" class="axis"/>
+<text x="280.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 280.0 516.0)">efficientnet_b4_float</text>
+<circle cx="278.0" cy="433.5" r="4.2" fill="#2f80ed"/>
+<circle cx="278.0" cy="433.5" r="4.2" fill="#2f9e44"/>
+<circle cx="278.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="306.0" y1="496" x2="306.0" y2="501" class="axis"/>
+<text x="308.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 308.0 516.0)">esrgan_float</text>
+<circle cx="306.0" cy="456.7" r="4.2" fill="#2f80ed"/>
+<circle cx="306.0" cy="456.7" r="4.2" fill="#2f9e44"/>
+<circle cx="306.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="334.0" y1="496" x2="334.0" y2="501" class="axis"/>
+<text x="336.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 336.0 516.0)">inception_v3_float</text>
+<circle cx="334.0" cy="459.6" r="4.2" fill="#2f80ed"/>
+<circle cx="334.0" cy="459.6" r="4.2" fill="#2f9e44"/>
+<circle cx="334.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="362.0" y1="496" x2="362.0" y2="501" class="axis"/>
+<text x="364.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 364.0 516.0)">inception_v3_quant</text>
+<circle cx="362.0" cy="454.3" r="4.2" fill="#2f80ed"/>
+<circle cx="362.0" cy="454.3" r="4.2" fill="#2f9e44"/>
+<circle cx="362.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="390.0" y1="496" x2="390.0" y2="501" class="axis"/>
+<text x="392.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 392.0 516.0)">mobilenet_v3_b4_float</text>
+<circle cx="390.0" cy="439.0" r="4.2" fill="#2f80ed"/>
+<circle cx="390.0" cy="439.0" r="4.2" fill="#2f9e44"/>
+<circle cx="390.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="418.0" y1="496" x2="418.0" y2="501" class="axis"/>
+<text x="420.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 420.0 516.0)">mobilenet_v3_float</text>
+<circle cx="418.0" cy="439.0" r="4.2" fill="#2f80ed"/>
+<circle cx="418.0" cy="439.0" r="4.2" fill="#2f9e44"/>
+<circle cx="418.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="446.0" y1="496" x2="446.0" y2="501" class="axis"/>
+<text x="448.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 448.0 516.0)">mv3_depth_float</text>
+<circle cx="446.0" cy="433.9" r="4.2" fill="#2f80ed"/>
+<circle cx="446.0" cy="433.9" r="4.2" fill="#2f9e44"/>
+<circle cx="446.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="474.0" y1="496" x2="474.0" y2="501" class="axis"/>
+<text x="476.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 476.0 516.0)">resnet_float</text>
+<circle cx="474.0" cy="464.2" r="4.2" fill="#2f80ed"/>
+<circle cx="474.0" cy="464.2" r="4.2" fill="#2f9e44"/>
+<circle cx="474.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="502.0" y1="496" x2="502.0" y2="501" class="axis"/>
+<text x="504.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 504.0 516.0)">resnet_quant</text>
+<circle cx="502.0" cy="464.2" r="4.2" fill="#2f80ed"/>
+<circle cx="502.0" cy="464.2" r="4.2" fill="#2f9e44"/>
+<circle cx="502.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="530.0" y1="496" x2="530.0" y2="501" class="axis"/>
+<text x="532.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 532.0 516.0)">sam_float.cut</text>
+<circle cx="530.0" cy="449.4" r="4.2" fill="#2f80ed"/>
+<circle cx="530.0" cy="449.4" r="4.2" fill="#2f9e44"/>
+<circle cx="530.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="558.0" y1="496" x2="558.0" y2="501" class="axis"/>
+<text x="560.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 560.0 516.0)">srgan_float</text>
+<circle cx="558.0" cy="430.7" r="4.2" fill="#2f80ed"/>
+<circle cx="558.0" cy="430.7" r="4.2" fill="#2f9e44"/>
+<circle cx="558.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="586.0" y1="496" x2="586.0" y2="501" class="axis"/>
+<text x="588.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 588.0 516.0)">swin_float</text>
+<circle cx="586.0" cy="449.0" r="4.2" fill="#2f80ed"/>
+<circle cx="586.0" cy="449.0" r="4.2" fill="#2f9e44"/>
+<circle cx="586.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="614.0" y1="496" x2="614.0" y2="501" class="axis"/>
+<text x="616.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 616.0 516.0)">unet_float</text>
+<circle cx="614.0" cy="462.3" r="4.2" fill="#2f80ed"/>
+<circle cx="614.0" cy="462.3" r="4.2" fill="#2f9e44"/>
+<circle cx="614.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="642.0" y1="496" x2="642.0" y2="501" class="axis"/>
+<text x="644.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 644.0 516.0)">unet_int16</text>
+<circle cx="642.0" cy="424.5" r="4.2" fill="#2f80ed"/>
+<circle cx="642.0" cy="424.5" r="4.2" fill="#2f9e44"/>
+<circle cx="642.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="670.0" y1="496" x2="670.0" y2="501" class="axis"/>
+<text x="672.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 672.0 516.0)">vsr_float</text>
+<circle cx="670.0" cy="429.2" r="4.2" fill="#2f80ed"/>
+<circle cx="670.0" cy="429.2" r="4.2" fill="#2f9e44"/>
+<circle cx="670.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="698.0" y1="496" x2="698.0" y2="501" class="axis"/>
+<text x="700.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 700.0 516.0)">xlsr_quant</text>
+<circle cx="698.0" cy="360.8" r="4.2" fill="#2f80ed"/>
+<circle cx="698.0" cy="360.8" r="4.2" fill="#2f9e44"/>
+<circle cx="698.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="726.0" y1="496" x2="726.0" y2="501" class="axis"/>
+<text x="728.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 728.0 516.0)">yolo_v8_float</text>
+<circle cx="726.0" cy="444.8" r="4.2" fill="#2f80ed"/>
+<circle cx="726.0" cy="444.8" r="4.2" fill="#2f9e44"/>
+<circle cx="726.0" cy="464.2" r="4.2" fill="#c2410c"/>
+<line x1="754.0" y1="496" x2="754.0" y2="501" class="axis"/>
+<text x="756.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 756.0 516.0)">midas_v3_float</text>
+<circle cx="754.0" cy="447.8" r="4.2" fill="#2f80ed"/>
+<circle cx="754.0" cy="447.4" r="4.2" fill="#2f9e44"/>
+<circle cx="754.0" cy="463.9" r="4.2" fill="#c2410c"/>
+<line x1="782.0" y1="496" x2="782.0" y2="501" class="axis"/>
+<text x="784.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 784.0 516.0)">deeplab_v3_plus_quant</text>
+<circle cx="782.0" cy="435.9" r="4.2" fill="#2f80ed"/>
+<circle cx="782.0" cy="435.0" r="4.2" fill="#2f9e44"/>
+<circle cx="782.0" cy="463.3" r="4.2" fill="#c2410c"/>
+<line x1="810.0" y1="496" x2="810.0" y2="501" class="axis"/>
+<text x="812.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 812.0 516.0)">esrgan__int16</text>
+<circle cx="810.0" cy="418.7" r="4.2" fill="#2f80ed"/>
+<circle cx="810.0" cy="416.4" r="4.2" fill="#2f9e44"/>
+<circle cx="810.0" cy="462.1" r="4.2" fill="#c2410c"/>
+<line x1="838.0" y1="496" x2="838.0" y2="501" class="axis"/>
+<text x="840.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 840.0 516.0)">gpt2_quant.cut</text>
+<circle cx="838.0" cy="446.3" r="4.2" fill="#2f80ed"/>
+<circle cx="838.0" cy="443.8" r="4.2" fill="#2f9e44"/>
+<circle cx="838.0" cy="461.9" r="4.2" fill="#c2410c"/>
+<line x1="866.0" y1="496" x2="866.0" y2="501" class="axis"/>
+<text x="868.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 868.0 516.0)">esrgan_quant</text>
+<circle cx="866.0" cy="407.9" r="4.2" fill="#2f80ed"/>
+<circle cx="866.0" cy="404.1" r="4.2" fill="#2f9e44"/>
+<circle cx="866.0" cy="460.7" r="4.2" fill="#c2410c"/>
+<line x1="894.0" y1="496" x2="894.0" y2="501" class="axis"/>
+<text x="896.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 896.0 516.0)">dped_int16</text>
+<circle cx="894.0" cy="296.5" r="4.2" fill="#2f80ed"/>
+<circle cx="894.0" cy="292.2" r="4.2" fill="#2f9e44"/>
+<circle cx="894.0" cy="460.7" r="4.2" fill="#c2410c"/>
+<line x1="922.0" y1="496" x2="922.0" y2="501" class="axis"/>
+<text x="924.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 924.0 516.0)">microisp_quant</text>
+<circle cx="922.0" cy="303.7" r="4.2" fill="#2f80ed"/>
+<circle cx="922.0" cy="296.2" r="4.2" fill="#2f9e44"/>
+<circle cx="922.0" cy="458.0" r="4.2" fill="#c2410c"/>
+<line x1="950.0" y1="496" x2="950.0" y2="501" class="axis"/>
+<text x="952.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 952.0 516.0)">microisp_int16</text>
+<circle cx="950.0" cy="330.0" r="4.2" fill="#2f80ed"/>
+<circle cx="950.0" cy="322.3" r="4.2" fill="#2f9e44"/>
+<circle cx="950.0" cy="457.6" r="4.2" fill="#c2410c"/>
+<line x1="978.0" y1="496" x2="978.0" y2="501" class="axis"/>
+<text x="980.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 980.0 516.0)">mobilenet_v3_b4_quant</text>
+<circle cx="978.0" cy="386.5" r="4.2" fill="#2f80ed"/>
+<circle cx="978.0" cy="378.5" r="4.2" fill="#2f9e44"/>
+<circle cx="978.0" cy="457.0" r="4.2" fill="#c2410c"/>
+<line x1="1006.0" y1="496" x2="1006.0" y2="501" class="axis"/>
+<text x="1008.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1008.0 516.0)">mobilenet_v3_quant</text>
+<circle cx="1006.0" cy="386.5" r="4.2" fill="#2f80ed"/>
+<circle cx="1006.0" cy="378.5" r="4.2" fill="#2f9e44"/>
+<circle cx="1006.0" cy="457.0" r="4.2" fill="#c2410c"/>
+<line x1="1034.0" y1="496" x2="1034.0" y2="501" class="axis"/>
+<text x="1036.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1036.0 516.0)">llama2_quant.cut</text>
+<circle cx="1034.0" cy="414.3" r="4.2" fill="#2f80ed"/>
+<circle cx="1034.0" cy="406.5" r="4.2" fill="#2f9e44"/>
+<circle cx="1034.0" cy="457.0" r="4.2" fill="#c2410c"/>
+<line x1="1062.0" y1="496" x2="1062.0" y2="501" class="axis"/>
+<text x="1064.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1064.0 516.0)">swin_quant</text>
+<circle cx="1062.0" cy="394.8" r="4.2" fill="#2f80ed"/>
+<circle cx="1062.0" cy="386.7" r="4.2" fill="#2f9e44"/>
+<circle cx="1062.0" cy="456.8" r="4.2" fill="#c2410c"/>
+<line x1="1090.0" y1="496" x2="1090.0" y2="501" class="axis"/>
+<text x="1092.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1092.0 516.0)">midas_v3_quant</text>
+<circle cx="1090.0" cy="322.5" r="4.2" fill="#2f80ed"/>
+<circle cx="1090.0" cy="312.7" r="4.2" fill="#2f9e44"/>
+<circle cx="1090.0" cy="455.9" r="4.2" fill="#c2410c"/>
+<line x1="1118.0" y1="496" x2="1118.0" y2="501" class="axis"/>
+<text x="1120.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1120.0 516.0)">mv3_depth_quant</text>
+<circle cx="1118.0" cy="355.4" r="4.2" fill="#2f80ed"/>
+<circle cx="1118.0" cy="345.2" r="4.2" fill="#2f9e44"/>
+<circle cx="1118.0" cy="455.3" r="4.2" fill="#c2410c"/>
+<line x1="1146.0" y1="496" x2="1146.0" y2="501" class="axis"/>
+<text x="1148.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1148.0 516.0)">sam_quant.cut</text>
+<circle cx="1146.0" cy="390.0" r="4.2" fill="#2f80ed"/>
+<circle cx="1146.0" cy="379.4" r="4.2" fill="#2f9e44"/>
+<circle cx="1146.0" cy="454.6" r="4.2" fill="#c2410c"/>
+<line x1="1174.0" y1="496" x2="1174.0" y2="501" class="axis"/>
+<text x="1176.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1176.0 516.0)">yolo_v8_quant</text>
+<circle cx="1174.0" cy="365.2" r="4.2" fill="#2f80ed"/>
+<circle cx="1174.0" cy="345.5" r="4.2" fill="#2f9e44"/>
+<circle cx="1174.0" cy="446.7" r="4.2" fill="#c2410c"/>
+<line x1="1202.0" y1="496" x2="1202.0" y2="501" class="axis"/>
+<text x="1204.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1204.0 516.0)">imdn_quant</text>
+<circle cx="1202.0" cy="369.7" r="4.2" fill="#2f80ed"/>
+<circle cx="1202.0" cy="348.6" r="4.2" fill="#2f9e44"/>
+<circle cx="1202.0" cy="445.3" r="4.2" fill="#c2410c"/>
+<line x1="1230.0" y1="496" x2="1230.0" y2="501" class="axis"/>
+<text x="1232.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1232.0 516.0)">vsr_quant</text>
+<circle cx="1230.0" cy="292.1" r="4.2" fill="#2f80ed"/>
+<circle cx="1230.0" cy="268.5" r="4.2" fill="#2f9e44"/>
+<circle cx="1230.0" cy="444.9" r="4.2" fill="#c2410c"/>
+<text x="1237.0" y="436.9" class="hotvalue" text-anchor="start" transform="rotate(-42 1237.0 436.9)">1.024</text>
+<line x1="1258.0" y1="496" x2="1258.0" y2="501" class="axis"/>
+<text x="1260.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1260.0 516.0)">vit_b16_quant</text>
+<circle cx="1258.0" cy="398.9" r="4.2" fill="#2f80ed"/>
+<circle cx="1258.0" cy="375.2" r="4.2" fill="#2f9e44"/>
+<circle cx="1258.0" cy="442.4" r="4.2" fill="#c2410c"/>
+<text x="1265.0" y="434.4" class="hotvalue" text-anchor="start" transform="rotate(-42 1265.0 434.4)">1.028</text>
+<line x1="1286.0" y1="496" x2="1286.0" y2="501" class="axis"/>
+<text x="1288.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1288.0 516.0)">efficientnet_b4_quant</text>
+<circle cx="1286.0" cy="362.7" r="4.2" fill="#2f80ed"/>
+<circle cx="1286.0" cy="331.7" r="4.2" fill="#2f9e44"/>
+<circle cx="1286.0" cy="436.8" r="4.2" fill="#c2410c"/>
+<text x="1293.0" y="428.8" class="hotvalue" text-anchor="start" transform="rotate(-42 1293.0 428.8)">1.035</text>
+<line x1="1314.0" y1="496" x2="1314.0" y2="501" class="axis"/>
+<text x="1316.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1316.0 516.0)">srgan_quant</text>
+<circle cx="1314.0" cy="382.4" r="4.2" fill="#2f80ed"/>
+<circle cx="1314.0" cy="349.5" r="4.2" fill="#2f9e44"/>
+<circle cx="1314.0" cy="434.5" r="4.2" fill="#c2410c"/>
+<text x="1321.0" y="426.5" class="hotvalue" text-anchor="start" transform="rotate(-42 1321.0 426.5)">1.037</text>
+<line x1="1342.0" y1="496" x2="1342.0" y2="501" class="axis"/>
+<text x="1344.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1344.0 516.0)">mobilebert_quant.cut</text>
+<circle cx="1342.0" cy="297.7" r="4.2" fill="#2f80ed"/>
+<circle cx="1342.0" cy="255.0" r="4.2" fill="#2f9e44"/>
+<circle cx="1342.0" cy="428.9" r="4.2" fill="#c2410c"/>
+<text x="1349.0" y="420.9" class="hotvalue" text-anchor="start" transform="rotate(-42 1349.0 420.9)">1.044</text>
+<line x1="1370.0" y1="496" x2="1370.0" y2="501" class="axis"/>
+<text x="1372.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1372.0 516.0)">sd_diffusion_quant</text>
+<circle cx="1370.0" cy="374.2" r="4.2" fill="#2f80ed"/>
+<circle cx="1370.0" cy="327.1" r="4.2" fill="#2f9e44"/>
+<circle cx="1370.0" cy="422.0" r="4.2" fill="#c2410c"/>
+<text x="1377.0" y="414.0" class="hotvalue" text-anchor="start" transform="rotate(-42 1377.0 414.0)">1.053</text>
+<line x1="1398.0" y1="496" x2="1398.0" y2="501" class="axis"/>
+<text x="1400.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1400.0 516.0)">sd_encoder_quant</text>
+<circle cx="1398.0" cy="249.6" r="4.2" fill="#2f80ed"/>
+<circle cx="1398.0" cy="179.6" r="4.2" fill="#2f9e44"/>
+<circle cx="1398.0" cy="409.1" r="4.2" fill="#c2410c"/>
+<text x="1405.0" y="401.1" class="hotvalue" text-anchor="start" transform="rotate(-42 1405.0 401.1)">1.069</text>
+<line x1="1426.0" y1="496" x2="1426.0" y2="501" class="axis"/>
+<text x="1428.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1428.0 516.0)">sd_decoder_quant</text>
+<circle cx="1426.0" cy="264.6" r="4.2" fill="#2f80ed"/>
+<circle cx="1426.0" cy="192.6" r="4.2" fill="#2f9e44"/>
+<circle cx="1426.0" cy="406.7" r="4.2" fill="#c2410c"/>
+<text x="1433.0" y="398.7" class="hotvalue" text-anchor="start" transform="rotate(-42 1433.0 398.7)">1.072</text>
+<line x1="1454.0" y1="496" x2="1454.0" y2="501" class="axis"/>
+<text x="1456.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1456.0 516.0)">dped_quant</text>
+<circle cx="1454.0" cy="251.8" r="4.2" fill="#2f80ed"/>
+<circle cx="1454.0" cy="178.4" r="4.2" fill="#2f9e44"/>
+<circle cx="1454.0" cy="406.3" r="4.2" fill="#c2410c"/>
+<text x="1461.0" y="398.3" class="hotvalue" text-anchor="start" transform="rotate(-42 1461.0 398.3)">1.073</text>
+<line x1="1482.0" y1="496" x2="1482.0" y2="501" class="axis"/>
+<text x="1484.0" y="516.0" class="label" text-anchor="start" transform="rotate(58 1484.0 516.0)">pynet_v2_quant</text>
+<circle cx="1482.0" cy="303.8" r="4.2" fill="#2f80ed"/>
+<circle cx="1482.0" cy="229.2" r="4.2" fill="#2f9e44"/>
+<circle cx="1482.0" cy="402.2" r="4.2" fill="#c2410c"/>
+<text x="1489.0" y="394.2" class="hotvalue" text-anchor="start" transform="rotate(-42 1489.0 394.2)">1.078</text>
+<text x="782.0" y="752.0" class="small" text-anchor="middle">Pattern</text>
+<text x="18.0" y="294.0" class="small" text-anchor="middle" transform="rotate(-90 18 294.0)">Cycle ratio</text>
+</svg>
