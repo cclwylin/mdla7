@@ -94,7 +94,12 @@ SC_MODULE(RequantEngine) {
                 const float act_max = clip[1];
                 // v8.10: store FP16 (2 B/elem) — half the udma_w bandwidth of
                 // the v8 FP32 path.  Internal compute stays FP32.
-                std::vector<uint16_t> out_h16(total);
+                // v10: direct CONV->D2SPACE store uses the same output swizzle
+                // as the integer path, only with FP16 payloads.
+                const uint64_t dst_total = d2s_store
+                    ? uint64_t(OH) * d2s_block * OW * d2s_block * d2s_out_c
+                    : total;
+                std::vector<uint16_t> out_h16(dst_total);
                 uint64_t reads = 0;
                 for (uint32_t oh = 0; oh < OH; ++oh)
                 for (uint32_t ow = 0; ow < OW; ++ow)
@@ -105,7 +110,18 @@ SC_MODULE(RequantEngine) {
                     float v = psum + bias[oc];
                     if (v < act_min) v = act_min;
                     if (v > act_max) v = act_max;
-                    out_h16[(oh * OW + ow) * OC + oc] = fp32_to_fp16(v);
+                    size_t idx = (oh * OW + ow) * OC + oc;
+                    if (d2s_store) {
+                        const uint32_t q = d2s_out_c ? (oc / d2s_out_c) : 0;
+                        const uint32_t real_oc = d2s_out_c ? (oc % d2s_out_c) : oc;
+                        const uint32_t bh = d2s_block ? (q / d2s_block) : 0;
+                        const uint32_t bw = d2s_block ? (q % d2s_block) : 0;
+                        const uint32_t out_h = oh * d2s_block + bh;
+                        const uint32_t out_w = ow * d2s_block + bw;
+                        idx = (uint64_t(out_h) * (OW * d2s_block) + out_w) *
+                              d2s_out_c + real_oc;
+                    }
+                    out_h16[idx] = fp32_to_fp16(v);
                     if (++reads % CHAIN_LANES == 0) wait(1, sc_core::SC_NS);
                 }
                 l1mgr.write(r.out_addr, out_h16.data(), out_h16.size() * sizeof(uint16_t));

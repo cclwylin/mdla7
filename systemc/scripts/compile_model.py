@@ -101,6 +101,7 @@ OP_PACK       = 23
 OP_UNPACK     = 24
 OP_TILE       = 25
 OP_SPLIT      = 26
+OP_LOGISTIC   = 27       # v10: sigmoid unary EWE (EfficientNet swish gate)
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -135,7 +136,8 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_PACK:      "  pack",
            OP_UNPACK:    "unpack",
            OP_TILE:      "  tile",
-           OP_SPLIT:     " split"}
+           OP_SPLIT:     " split",
+           OP_LOGISTIC:  "logist"}
 
 
 def _load_interpreter(path: str):
@@ -207,6 +209,7 @@ SUPPORTED_OPS = ("CONV_2D", "DEPTHWISE_CONV_2D",
                  "ADD", "CONCATENATION", "GATHER",
                  # v8.30
                  "MUL", "SUB", "HARD_SWISH", "GELU", "MEAN",
+                 "LOGISTIC",
                  "DEPTH_TO_SPACE",
                  "SPACE_TO_DEPTH", "TRANSPOSE",
                  "SQUEEZE", "EXPAND_DIMS",
@@ -848,6 +851,7 @@ def main():
     # ADD / HARD_SWISH / etc.) just get a fresh rng draw at the break.
     rng = np.random.default_rng(0)
     last_output_arr = None
+    last_output_tensor = None
     tensor_values = {}
     tensor_input_cache = {}
     DTYPE_MAP = {
@@ -932,6 +936,19 @@ def main():
             tensor_input_cache[(int(tensor_idx), shape, dtype.str)] = arr
         return arr
 
+    def _last_output_matches(tensor_idx, shape, dtype):
+        if tensor_idx is None or tensor_idx < 0 or last_output_tensor != int(tensor_idx):
+            return False
+        if last_output_arr is None:
+            return False
+        return (last_output_arr.shape == tuple(int(x) for x in shape)
+                and last_output_arr.dtype == np.dtype(dtype))
+
+    def _input_or_last(tensor_idx, shape, dtype):
+        if _last_output_matches(tensor_idx, shape, dtype):
+            return last_output_arr
+        return _input_array_for_tensor(tensor_idx, shape, dtype)
+
     def _tensor_array(t):
         b = _tensor_buffer_bytes(model, t)
         if b is None:
@@ -944,8 +961,18 @@ def main():
         if sh: arr = arr.reshape(sh)
         return arr
 
+    def _qscale(q, default=1.0):
+        if not q or not q.ScaleLength():
+            return float(default)
+        v = float(q.Scale(0))
+        return v if np.isfinite(v) and v > 0.0 else float(default)
+
     for li, (orig_op_index, opname, op) in enumerate(ops):
-        in_t   = sg.Tensors(op.Inputs(0))
+        # TFLite SPLIT is encoded as SPLIT(axis, value); value is the data tensor.
+        # Keep compiler chaining and GraphMeta centered on the real data input,
+        # not the scalar axis input.
+        primary_input_slot = 1 if opname == "SPLIT" and op.InputsLength() > 1 else 0
+        in_t   = sg.Tensors(op.Inputs(primary_input_slot))
         out_t  = sg.Tensors(op.Outputs(0))
 
         # ---- shape extraction ----
@@ -1018,19 +1045,14 @@ def main():
         # fusion in mdla7_model_runner.cpp.  Falls back to fresh rng on first layer or
         # whenever the chain breaks (skipped op, shape mismatch).
         expected_dtype = np_in_dt   # FP conv/FC paths may override this later
+        input0_idx = int(op.Inputs(primary_input_slot)) if op.InputsLength() > primary_input_slot else -1
         if (opname in ("SPACE_TO_DEPTH", "TRANSPOSE",
                        "SQUEEZE", "EXPAND_DIMS",
                        "SLICE", "STRIDED_SLICE", "SPLIT", "SPLIT_V",
                        "PAD", "PADV2", "PACK", "UNPACK", "TILE")
-            and last_output_arr is not None
-            and last_output_arr.dtype == expected_dtype):
+            and _last_output_matches(input0_idx, (H, W, Cin), expected_dtype)):
             H, W, Cin = last_output_arr.shape
-        if (last_output_arr is not None
-            and last_output_arr.shape == (H, W, Cin)
-            and last_output_arr.dtype == expected_dtype):
-            in_arr = last_output_arr
-        else:
-            in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), expected_dtype)
+        in_arr = _input_or_last(input0_idx, (H, W, Cin), expected_dtype)
         in_i8 = in_arr        # legacy name kept for downstream readability
 
         opt_table = op.BuiltinOptions()  # may be None for some ops
@@ -1124,12 +1146,7 @@ def main():
             wgt_h16 = wgt.astype(np.float16)
             # v8.12: chain mode for FP — reuse previous layer's FP16 ref output
             # if shapes match.  Same fusion benefit as the int paths.
-            if (last_output_arr is not None
-                and last_output_arr.shape == (H, W, Cin)
-                and last_output_arr.dtype == np.float16):
-                in_arr = last_output_arr
-            else:
-                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
             in_i8 = in_arr
 
             # Bias stays FP32 in the params blob: it's tiny (4·OC bytes) and
@@ -1178,8 +1195,8 @@ def main():
             in_q = in_t.Quantization()
             wq   = wgt_t.Quantization()
             oq   = out_t.Quantization()
-            scale_in  = float(in_q.Scale(0))   if in_q and in_q.ScaleLength() else 1.0
-            scale_out = float(oq.Scale(0))     if oq and oq.ScaleLength()     else 1.0
+            scale_in  = _qscale(in_q)
+            scale_out = _qscale(oq)
             zp_out    = int  (oq.ZeroPoint(0)) if oq and oq.ZeroPointLength() else 0
             zp_in     = int  (in_q.ZeroPoint(0)) if in_q and in_q.ZeroPointLength() else 0
             # validate_tflite.py pre-shifts uint8 synth by +128 before feeding TFLite,
@@ -1188,9 +1205,12 @@ def main():
             zp_in_eff = zp_in if in_t.Type() == fb.TensorType.INT8 else 0
             # weight scales: per-channel array (TFLite v2) or single (v1).
             if wq and wq.ScaleLength() == OC:
-                scales_w = np.array([wq.Scale(i) for i in range(OC)], dtype=np.float64)
+                scales_w = np.array([
+                    (float(wq.Scale(i)) if np.isfinite(float(wq.Scale(i))) and float(wq.Scale(i)) > 0.0 else 1.0)
+                    for i in range(OC)
+                ], dtype=np.float64)
             elif wq and wq.ScaleLength() == 1:
-                scales_w = np.full(OC, float(wq.Scale(0)), dtype=np.float64)
+                scales_w = np.full(OC, _qscale(wq), dtype=np.float64)
             else:
                 scales_w = np.ones(OC, dtype=np.float64)
             # v7: weight zero-point. For uint8 we centered the bytes by -128 above,
@@ -1400,12 +1420,7 @@ def main():
                 wgt_h16 = wgt.astype(np.float16).reshape(OC, 1, 1, Cin)
                 # Chain mode: prefer the previous layer's FP16 ref output if
                 # its shape matches (H, W, Cin); otherwise synth a fresh draw.
-                if (last_output_arr is not None
-                    and last_output_arr.shape == (H, W, Cin)
-                    and last_output_arr.dtype == np.float16):
-                    in_arr = last_output_arr
-                else:
-                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+                in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 in_i8 = in_arr
                 op_kind = OP_FC
                 fc_label = True
@@ -1488,14 +1503,7 @@ def main():
                 # already shape (H,1,FC_in) for row-aware FC. Only fall back to
                 # rng if the chain isn't a match.
                 expected_dtype_fc = np.int16 if is_int16 else np.int8
-                if (last_output_arr is not None
-                    and last_output_arr.shape == (H, W, Cin)
-                    and last_output_arr.dtype == expected_dtype_fc):
-                    in_arr = last_output_arr
-                else:
-                    in_arr = (rng.integers(-128, 128, size=(H, W, Cin), dtype=np.int16)
-                              if is_int16
-                              else rng.integers(-8, 8, size=(H, W, Cin), dtype=np.int8))
+                in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), expected_dtype_fc)
                 in_i8 = in_arr
                 op_kind = OP_FC     # dispatched through CONV engine, labelled "fc"
                 fc_label = True
@@ -1507,15 +1515,18 @@ def main():
                 in_q = in_t.Quantization()
                 wq   = wgt_t.Quantization()
                 oq   = out_t.Quantization()
-                scale_in  = float(in_q.Scale(0))   if in_q and in_q.ScaleLength() else 1.0
-                scale_out = float(oq.Scale(0))     if oq and oq.ScaleLength()     else 1.0
+                scale_in  = _qscale(in_q)
+                scale_out = _qscale(oq)
                 zp_out    = int  (oq.ZeroPoint(0)) if oq and oq.ZeroPointLength() else 0
                 zp_in     = int  (in_q.ZeroPoint(0)) if in_q and in_q.ZeroPointLength() else 0
                 zp_in_eff = zp_in if in_t.Type() == fb.TensorType.INT8 else 0
                 if wq and wq.ScaleLength() == OC:
-                    scales_w = np.array([wq.Scale(i) for i in range(OC)], dtype=np.float64)
+                    scales_w = np.array([
+                        (float(wq.Scale(i)) if np.isfinite(float(wq.Scale(i))) and float(wq.Scale(i)) > 0.0 else 1.0)
+                        for i in range(OC)
+                    ], dtype=np.float64)
                 elif wq and wq.ScaleLength() == 1:
-                    scales_w = np.full(OC, float(wq.Scale(0)), dtype=np.float64)
+                    scales_w = np.full(OC, _qscale(wq), dtype=np.float64)
                 else:
                     scales_w = np.ones(OC, dtype=np.float64)
                 # v7: zp_w extraction (mirrors conv path).
@@ -1625,12 +1636,7 @@ def main():
             # contiguous chunks when a single row is wider than the H-tiler's
             # L1 budget, so large transformer-style FP ADDs no longer need a
             # compiler-side skip.
-            if (last_output_arr is not None
-                and last_output_arr.shape == (H, W, Cin)
-                and last_output_arr.dtype == np.float16):
-                in_arr = last_output_arr
-            else:
-                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
             in_b_arr = _input_array_for_tensor(int(op.Inputs(1)), (H, W, Cin), np.float16)
 
             try:
@@ -1678,9 +1684,9 @@ def main():
             in_a_t = in_t                                       # alias
             in_b_t = sg.Tensors(op.Inputs(1))
             qa = in_a_t.Quantization(); qb = in_b_t.Quantization(); qo = out_t.Quantization()
-            scale_a = float(qa.Scale(0))     if qa and qa.ScaleLength()     else 1.0
-            scale_b = float(qb.Scale(0))     if qb and qb.ScaleLength()     else 1.0
-            scale_o = float(qo.Scale(0))     if qo and qo.ScaleLength()     else 1.0
+            scale_a = _qscale(qa)
+            scale_b = _qscale(qb)
+            scale_o = _qscale(qo)
             zp_a    = int  (qa.ZeroPoint(0)) if qa and qa.ZeroPointLength() else 0
             zp_b    = int  (qb.ZeroPoint(0)) if qb and qb.ZeroPointLength() else 0
             zp_o    = int  (qo.ZeroPoint(0)) if qo and qo.ZeroPointLength() else 0
@@ -1758,12 +1764,7 @@ def main():
             # 2 for SUB) which reads two FP16 operands, computes a*b or a-b in
             # FP32, clamps with the ±sentinel pair, writes FP16 to L1.
             # v8.31: large rows are handled by the sim's flat binary-EWE tiler.
-            if (last_output_arr is not None
-                and last_output_arr.shape == (H, W, Cin)
-                and last_output_arr.dtype == np.float16):
-                in_arr = last_output_arr
-            else:
-                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
             in_b_arr = _input_array_for_tensor(int(op.Inputs(1)), (H, W, Cin), np.float16)
             try:
                 # Both MulOptions and SubOptions expose FusedActivationFunction.
@@ -1806,9 +1807,9 @@ def main():
             in_a_t = in_t
             in_b_t = sg.Tensors(op.Inputs(1))
             qa = in_a_t.Quantization(); qb = in_b_t.Quantization(); qo = out_t.Quantization()
-            scale_a = float(qa.Scale(0))     if qa and qa.ScaleLength()     else 1.0
-            scale_b = float(qb.Scale(0))     if qb and qb.ScaleLength()     else 1.0
-            scale_o = float(qo.Scale(0))     if qo and qo.ScaleLength()     else 1.0
+            scale_a = _qscale(qa)
+            scale_b = _qscale(qb)
+            scale_o = _qscale(qo)
             zp_a    = int  (qa.ZeroPoint(0)) if qa and qa.ZeroPointLength() else 0
             zp_b    = int  (qb.ZeroPoint(0)) if qb and qb.ZeroPointLength() else 0
             zp_o    = int  (qo.ZeroPoint(0)) if qo and qo.ZeroPointLength() else 0
@@ -1870,9 +1871,9 @@ def main():
             in_a_t = in_t
             in_b_t = sg.Tensors(op.Inputs(1))
             qa = in_a_t.Quantization(); qb = in_b_t.Quantization(); qo = out_t.Quantization()
-            scale_a = float(qa.Scale(0))     if qa and qa.ScaleLength()     else 1.0
-            scale_b = float(qb.Scale(0))     if qb and qb.ScaleLength()     else 1.0
-            scale_o = float(qo.Scale(0))     if qo and qo.ScaleLength()     else 1.0
+            scale_a = _qscale(qa)
+            scale_b = _qscale(qb)
+            scale_o = _qscale(qo)
             zp_a    = int  (qa.ZeroPoint(0)) if qa and qa.ZeroPointLength() else 0
             zp_b    = int  (qb.ZeroPoint(0)) if qb and qb.ZeroPointLength() else 0
             zp_o    = int  (qo.ZeroPoint(0)) if qo and qo.ZeroPointLength() else 0
@@ -1934,13 +1935,33 @@ def main():
                                         left_shift, act_min, act_max)
             add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
 
-        elif opname in ("HARD_SWISH", "GELU") and in_t.Type() not in FP_TFLITE_TYPES:
-            # INT GELU/HARD_SWISH LUT is not modeled in EWE yet. Keep the graph
-            # executable by materializing a deterministic reference tensor.
+        elif opname in ("HARD_SWISH", "GELU", "LOGISTIC") and in_t.Type() not in FP_TFLITE_TYPES:
+            # INT GELU/HARD_SWISH/LOGISTIC LUT is not modeled in EWE yet. Keep the graph
+            # executable by materializing a deterministic reference tensor. LOGISTIC
+            # is computed from quant params because EfficientNet swish fanout uses
+            # this value as the second MUL input.
             if opname == "HARD_SWISH":
                 x = in_arr.astype(np.float32)
                 y = x * np.minimum(np.maximum(x + 3.0, 0.0), 6.0) / np.float32(6.0)
                 ref = np.clip(np.rint(y), -128, 127).astype(np.int8)
+            elif opname == "LOGISTIC":
+                qi = in_arr.astype(np.int32)
+                qin = in_t.Quantization()
+                qout = out_t.Quantization()
+                scale_in = _qscale(qin)
+                zp_in = int(qin.ZeroPoint(0)) if qin and qin.ZeroPointLength() else 0
+                scale_out = _qscale(qout, 1.0 / 256.0)
+                zp_out = int(qout.ZeroPoint(0)) if qout and qout.ZeroPointLength() else 0
+                shift_in = 128 if in_t.Type() == fb.TensorType.UINT8 else 0
+                shift_out = 128 if out_t.Type() == fb.TensorType.UINT8 else 0
+                x = (qi - (zp_in - shift_in)).astype(np.float32) * np.float32(scale_in)
+                y = np.float32(1.0) / (np.float32(1.0) + np.exp(-x, dtype=np.float32))
+                q = np.floor(y / np.float32(scale_out) + np.float32(zp_out) + np.float32(0.5)).astype(np.int32)
+                if shift_out:
+                    q = np.clip(q, 0, 255) - 128
+                else:
+                    q = np.clip(q, -128, 127)
+                ref = q.astype(np.int8)
             else:
                 ref = in_arr.astype(np.int8, copy=True)
             H, W, Cin = OH, OW, OC
@@ -1950,18 +1971,14 @@ def main():
             op_kind = OP_MATERIALIZE
             wgt = np.zeros((0,), dtype=np.int8)
 
-        elif opname in ("HARD_SWISH", "GELU") and in_t.Type() in FP_TFLITE_TYPES:
+        elif opname in ("HARD_SWISH", "GELU", "LOGISTIC") and in_t.Type() in FP_TFLITE_TYPES:
             # ---- v8.30: FP unary activation ----
             # HARD_SWISH: x * relu6(x + 3) / 6
             # GELU: tanh-approximation, 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
-            # Sim runs run_unary_fp(subtype=ES_HARD_SWISH/ES_GELU) which mirrors
+            # LOGISTIC: sigmoid(x), used by EfficientNet swish gates.
+            # Sim runs run_unary_fp(subtype=ES_HARD_SWISH/ES_GELU/ES_LOGISTIC) which mirrors
             # the same FP32 expression order, so output is FP16 byte-identical.
-            if (last_output_arr is not None
-                and last_output_arr.shape == (H, W, Cin)
-                and last_output_arr.dtype == np.float16):
-                in_arr = last_output_arr
-            else:
-                in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+            in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
             x = in_arr.astype(np.float32)
             if opname == "GELU":
                 k = np.float32(0.7978845608028654)        # sqrt(2/pi)
@@ -1976,6 +1993,16 @@ def main():
                     tv = np.float32(tanhf(float(u))) if tanhf else np.float32(math.tanh(float(u)))
                     y_flat[j] = np.float32(np.float32(0.5) * xv * np.float32(np.float32(1.0) + tv))
                 op_kind = OP_GELU
+            elif opname == "LOGISTIC":
+                expf = _libm_expf()
+                y = np.empty_like(x, dtype=np.float32)
+                x_flat = x.reshape(-1)
+                y_flat = y.reshape(-1)
+                for j, xv in enumerate(x_flat):
+                    xv = np.float32(xv)
+                    ev = np.float32(expf(float(np.float32(-xv)))) if expf else np.float32(math.exp(float(np.float32(-xv))))
+                    y_flat[j] = np.float32(np.float32(1.0) / np.float32(np.float32(1.0) + ev))
+                op_kind = OP_LOGISTIC
             else:
                 r = np.minimum(np.maximum(x + 3.0, 0.0), 6.0)
                 y = x * r / np.float32(6.0)
@@ -2031,12 +2058,7 @@ def main():
                 op_kind = OP_AVG_POOL                    # routed through avg_pool path
                 count_include_pad = False
                 if in_t.Type() in FP_TFLITE_TYPES:
-                    if (last_output_arr is not None
-                        and last_output_arr.shape == (H, W, Cin)
-                        and last_output_arr.dtype == np.float16):
-                        in_arr = last_output_arr
-                    else:
-                        in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+                    in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
                     ref = pool_fp_ref(in_arr, Kh, Kw, s_h, s_w,
                                       (pT, pB, pL, pR), op_kind, count_include_pad)
                     ref_b = ref.tobytes(order="C")
@@ -2061,12 +2083,7 @@ def main():
             count_include_pad = False                 # TFLite default
             if in_t.Type() in FP_TFLITE_TYPES:
                 # v8.17: FP path. Pull a chained FP16 input or synth fresh.
-                if (last_output_arr is not None
-                    and last_output_arr.shape == (H, W, Cin)
-                    and last_output_arr.dtype == np.float16):
-                    in_arr = last_output_arr
-                else:
-                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+                in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 ref = pool_fp_ref(in_arr, Kh, Kw, s_h, s_w,
                                   (pT, pB, pL, pR), op_kind, count_include_pad)
                 ref_b = ref.tobytes(order="C")
@@ -2087,12 +2104,7 @@ def main():
                 # (mirrors the FP CONV/POOL path). compute_fp in EWE engine
                 # uses the same loop order as softmax_fp_ref so output is
                 # FP16 byte-identical.
-                if (last_output_arr is not None
-                    and last_output_arr.shape == (H, W, Cin)
-                    and last_output_arr.dtype == np.float16):
-                    in_arr = last_output_arr
-                else:
-                    in_arr = _input_array_for_tensor(int(op.Inputs(0)), (H, W, Cin), np.float16)
+                in_arr = _input_or_last(int(op.Inputs(0)), (H, W, Cin), np.float16)
                 in_i8 = in_arr
                 ref = softmax_fp_ref(in_arr)
                 ref_b = ref.tobytes(order="C")
@@ -2130,13 +2142,13 @@ def main():
                 continue
             # Verify all inputs share output's scale/zp (else skip — requant TBD).
             oq = out_t.Quantization()
-            scale_o = float(oq.Scale(0))     if oq and oq.ScaleLength()     else 1.0
+            scale_o = _qscale(oq)
             zp_o    = int  (oq.ZeroPoint(0)) if oq and oq.ZeroPointLength() else 0
             requant_needed = False
             for k in range(n_in):
                 tk = sg.Tensors(op.Inputs(k))
                 qk = tk.Quantization()
-                sk = float(qk.Scale(0))     if qk and qk.ScaleLength()     else 1.0
+                sk = _qscale(qk)
                 zk = int  (qk.ZeroPoint(0)) if qk and qk.ZeroPointLength() else 0
                 if abs(sk - scale_o) > 1e-9 or zk != zp_o:
                     requant_needed = True
@@ -2163,9 +2175,9 @@ def main():
                 arr = tensor_values.get(tensor_idx)
                 if arr is not None and arr.size == size and arr.dtype == dt:
                     return arr.reshape(shk)
-                if (k == 0 and last_output_arr is not None
-                    and last_output_arr.size == size
-                    and last_output_arr.dtype == dt):
+                if (k == 0
+                    and _last_output_matches(tensor_idx, last_output_arr.shape if last_output_arr is not None else (), dt)
+                    and last_output_arr.size == size):
                     return last_output_arr.reshape(shk)
                 return _input_array_for_tensor(tensor_idx, shk, dt)
 
@@ -2450,7 +2462,13 @@ def main():
                         tk = sg.Tensors(op.Inputs(k))
                         arr = _tensor_array(tk)
                         if arr is None:
-                            arr = last_output_arr if k == 0 and last_output_arr is not None else in_arr
+                            if tk.Type() in FP_TFLITE_TYPES:
+                                dt = np.float16
+                            elif tk.Type() == fb.TensorType.INT16:
+                                dt = np.int16
+                            else:
+                                dt = np.int8
+                            arr = _input_or_last(int(op.Inputs(k)), _tensor_shape(tk), dt)
                         parts.append(np.asarray(arr))
                     ref_full = np.stack(parts, axis=axis)
                     op_kind = OP_PACK
@@ -2537,7 +2555,7 @@ def main():
         elif op_kind in (OP_CONV, OP_DWCONV, OP_FC):
             wgt_b = conv_wgt_payload                      # weights + params blob
         elif op_kind in (OP_ADD, OP_MUL, OP_SUB,
-                         OP_HARD_SWISH, OP_GELU):
+                         OP_HARD_SWISH, OP_GELU, OP_LOGISTIC):
             wgt_b = add_wgt_payload                       # input-B + params (binary)
                                                           # or 8-byte clamp params (unary)
         elif wgt.size:
@@ -2603,8 +2621,12 @@ def main():
                   f"downstream chain consistency)")
             last_output_arr = None
             break
-        input0_tensor = int(op.Inputs(0)) if op.InputsLength() > 0 else -1
-        input1_tensor = int(op.Inputs(1)) if op.InputsLength() > 1 else -1
+        input0_tensor = int(op.Inputs(primary_input_slot)) if op.InputsLength() > primary_input_slot else -1
+        input1_tensor = -1
+        for _slot in range(op.InputsLength()):
+            if _slot != primary_input_slot:
+                input1_tensor = int(op.Inputs(_slot))
+                break
         output_tensor = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
         compiled_layer_idx = len(layers)
         layers.append(dict(
@@ -2641,6 +2663,7 @@ def main():
                 last_output_arr = None      # break chain at unusual shapes
         except Exception:
             last_output_arr = None
+        last_output_tensor = output_tensor if last_output_arr is not None else None
         if output_tensor >= 0:
             try:
                 tensor_values[int(output_tensor)] = ref.reshape(-1).copy()

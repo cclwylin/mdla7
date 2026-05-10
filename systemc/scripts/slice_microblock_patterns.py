@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 
@@ -113,7 +114,17 @@ def compact_subgraph(model_json: dict, selected_ops: list[dict],
     sg["outputs"] = [tensor_map[t] for t in boundary_outputs]
 
 
-def cut_one(row: dict[str, str], schema: Path, out_dir: Path) -> Path:
+def load_model_json(src: Path, schema: Path, tmp: Path) -> dict:
+    run([
+        "flatc", "-t", "--strict-json", "--defaults-json", "--raw-binary",
+        "-o", str(tmp), str(schema), "--", str(src),
+    ])
+    json_path = tmp / f"{src.stem}.json"
+    return json.loads(json_path.read_text())
+
+
+def cut_one_from_json(row: dict[str, str], model_json: dict,
+                      schema: Path, out_dir: Path, tmp: Path) -> Path:
     src = Path(row["source_path"])
     start = int(row["start_op"])
     end = int(row["end_op"])
@@ -123,33 +134,33 @@ def cut_one(row: dict[str, str], schema: Path, out_dir: Path) -> Path:
     pattern_dir.mkdir(parents=True, exist_ok=True)
     out_path = pattern_dir / f"{stem}.tflite"
 
-    with tempfile.TemporaryDirectory(prefix="mb_slice_") as td:
-        tmp = Path(td)
-        run([
-            "flatc", "-t", "--strict-json", "--defaults-json", "--raw-binary",
-            "-o", str(tmp), str(schema), "--", str(src),
-        ])
-        json_path = tmp / f"{src.stem}.json"
-        data = json.loads(json_path.read_text())
-        sg = data["subgraphs"][0]
-        all_ops = sg["operators"]
-        if start < 0 or end >= len(all_ops) or start > end:
-            raise ValueError(f"bad op range {start}:{end} for {src}")
-        inputs, outputs = boundary_tensors(data, start, end)
-        compact_subgraph(data, all_ops[start:end + 1], inputs, outputs)
-        sg["name"] = f"{src.stem}_L{start}_L{end}_{pattern}"
-        data["description"] = f"MDLA7 MB pattern slice from {src.name} ops {start}-{end}"
-        data["signature_defs"] = []
+    src_sg = model_json["subgraphs"][0]
+    all_ops = src_sg["operators"]
+    if start < 0 or end >= len(all_ops) or start > end:
+        raise ValueError(f"bad op range {start}:{end} for {src}")
 
-        cut_json = tmp / f"{stem}.json"
-        cut_json.write_text(json.dumps(data, separators=(",", ":")))
-        run([
-            "flatc", "-b", "--strict-json", "--raw-binary",
-            "-o", str(pattern_dir), str(schema), str(cut_json),
-        ])
-        produced = pattern_dir / f"{stem}.tflite"
-        if produced != out_path and produced.exists():
-            shutil.move(str(produced), out_path)
+    # Keep the expensive full-model JSON immutable and build a tiny shell for
+    # each slice.  compact_subgraph copies the tensors/operators/buffers it
+    # retains, so the shared source JSON is safe to reuse for every row from
+    # the same TFLite model.
+    data = dict(model_json)
+    data["subgraphs"] = [dict(src_sg)]
+    inputs, outputs = boundary_tensors(data, start, end)
+    compact_subgraph(data, all_ops[start:end + 1], inputs, outputs)
+    sg = data["subgraphs"][0]
+    sg["name"] = f"{src.stem}_L{start}_L{end}_{pattern}"
+    data["description"] = f"MDLA7 MB pattern slice from {src.name} ops {start}-{end}"
+    data["signature_defs"] = []
+
+    cut_json = tmp / f"{stem}.json"
+    cut_json.write_text(json.dumps(data, separators=(",", ":")))
+    run([
+        "flatc", "-b", "--strict-json", "--raw-binary",
+        "-o", str(pattern_dir), str(schema), str(cut_json),
+    ])
+    produced = pattern_dir / f"{stem}.tflite"
+    if produced != out_path and produced.exists():
+        shutil.move(str(produced), out_path)
     return out_path
 
 
@@ -174,6 +185,17 @@ def select_rows(rows: list[dict[str, str]], patterns: list[str],
     return picked
 
 
+def clean_pattern_outputs(out_dir: Path, patterns: list[str]) -> None:
+    for pattern in patterns:
+        pattern_dir = out_dir / pattern
+        if not pattern_dir.exists():
+            continue
+        for path in pattern_dir.glob("*.tflite"):
+            path.unlink(missing_ok=True)
+        for path in pattern_dir.glob("._*.tflite"):
+            path.unlink(missing_ok=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", type=Path, default=Path("model/MB_Path_Slice/microblock_pattern_candidates.csv"))
@@ -185,6 +207,8 @@ def main() -> int:
                     help="0 means all candidates")
     ap.add_argument("--max-ops", type=int, default=32,
                     help="skip candidate ranges longer than this; 0 keeps all")
+    ap.add_argument("--clean-output", action="store_true",
+                    help="remove stale .tflite slices in selected pattern directories before cutting")
     args = ap.parse_args()
 
     if not args.schema.exists():
@@ -193,31 +217,58 @@ def main() -> int:
         raise SystemExit("missing flatc")
 
     patterns = args.pattern or DEFAULT_PATTERNS
+    if args.clean_output:
+        clean_pattern_outputs(args.out_dir, patterns)
+
     with args.csv.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     rows = select_rows(rows, patterns, args.max_per_pattern, args.max_ops)
     manifest_rows: list[dict[str, str]] = []
+    by_src: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
-        try:
-            out = cut_one(row, args.schema, args.out_dir)
-            status = "ok"
-            err = ""
-        except Exception as exc:
-            out = Path("")
-            status = "fail"
-            err = str(exc)
-        manifest_rows.append({
-            **row,
-            "slice_path": str(out),
-            "slice_status": status,
-            "error": err,
-        })
-        print(f"{status:4s} {row['pattern']:18s} {row['model']} L{row['start_op']}-L{row['end_op']}")
+        by_src[row["source_path"]].append(row)
+
+    for src_name, src_rows in by_src.items():
+        src = Path(src_name)
+        with tempfile.TemporaryDirectory(prefix="mb_slice_") as td:
+            tmp = Path(td)
+            try:
+                model_json = load_model_json(src, args.schema, tmp)
+            except Exception as exc:
+                model_json = {}
+                load_error = str(exc)
+            else:
+                load_error = ""
+            for row in src_rows:
+                if load_error:
+                    out = Path("")
+                    status = "fail"
+                    err = load_error
+                else:
+                    try:
+                        out = cut_one_from_json(row, model_json, args.schema, args.out_dir, tmp)
+                        status = "ok"
+                        err = ""
+                    except Exception as exc:
+                        out = Path("")
+                        status = "fail"
+                        err = str(exc)
+                manifest_rows.append({
+                    **row,
+                    "slice_path": str(out),
+                    "slice_status": status,
+                    "error": err,
+                })
+                print(
+                    f"{status:4s} {row['pattern']:18s} "
+                    f"{row['model']} L{row['start_op']}-L{row['end_op']}",
+                    flush=True,
+                )
 
     out_manifest = args.out_dir / "microblock_pattern_slices.csv"
-    fields = list(manifest_rows[0].keys()) if manifest_rows else []
+    fields = (list(rows[0].keys()) + ["slice_path", "slice_status", "error"]) if rows else []
     with out_manifest.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, lineterminator="\n")
         w.writeheader()
         w.writerows(manifest_rows)
     print(f"wrote slice manifest -> {out_manifest}")

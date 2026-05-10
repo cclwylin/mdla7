@@ -137,10 +137,15 @@ Command Engine lookahead；INT16 仍保守關閉。
 本輪 Path9 另外補上 `RESHAPE/TRANSPOSE/CONCAT -> FC` final-store safe
 subset：batched FC 以 row tile x OC slice 產生 microblock，OC slice 的
 Requant 先 strided 寫回完整 L1 row tile，再由 UDMA_W 一次 linear store。
+後續又補上 `DEPTH_TO_SPACE -> CONV/DWCONV` true L1 tile-feed；因現有
+`microisp_quant_L99_L100_layout_bridge` 是相鄰但 shape 不接的 invalid
+candidate，驗證改用 `systemc/scripts/gen_d2s_compute_synth.py` 產生
+connected synthetic graph。該 synthetic 會觸發 `tiles=5x1`，D2S
+intermediate DRAM write 為 0，CONV PASS。
 
 ## 下一步
 
-1. 補更完整的 `DEPTH_TO_SPACE/PAD/TRANSPOSE -> CONV` true L1 layout-feed。
+1. 補更完整的 `PAD/TRANSPOSE/RESHAPE -> CONV/DW/FC` true L1 layout-feed。
 2. 補更通用的 multi-source concat / live-range ownership model。
 3. 依 regression 結果調整 candidate ranking，挑更小更準的代表。
 4. 用 slice 驗證通用 pattern，而不是每遇到一個模型就新增 special-case path。

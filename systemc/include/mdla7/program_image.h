@@ -59,6 +59,7 @@ enum OpKindEnum : uint16_t {
     OK_UNPACK      = 24,
     OK_TILE        = 25,
     OK_SPLIT       = 26,
+    OK_LOGISTIC    = 27,
 };
 
 inline const char* op_name(uint16_t k) {
@@ -90,6 +91,7 @@ inline const char* op_name(uint16_t k) {
         case OK_UNPACK:     return "unpack";
         case OK_TILE:       return "  tile";
         case OK_SPLIT:      return " split";
+        case OK_LOGISTIC:   return "logist";
     }
     return "??unknown";
 }

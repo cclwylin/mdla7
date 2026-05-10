@@ -18,6 +18,7 @@ import struct
 
 COMPUTE_OPS = {"CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"}
 BINARY_EWE_OPS = {"ADD", "MUL", "SUB"}
+UNARY_EWE_OPS = {"HARD_SWISH", "GELU", "LOGISTIC"}
 POOL_OPS = {"AVERAGE_POOL_2D", "MAX_POOL_2D"}
 LAYOUT_OPS = {
     "SLICE", "STRIDED_SLICE", "TRANSPOSE", "PACK", "UNPACK", "SPLIT",
@@ -33,6 +34,7 @@ BUILTIN_OPS = {
     4: "DEPTHWISE_CONV_2D",
     5: "DEPTH_TO_SPACE",
     9: "FULLY_CONNECTED",
+    14: "LOGISTIC",
     17: "MAX_POOL_2D",
     18: "MUL",
     22: "RESHAPE",
@@ -198,6 +200,13 @@ def build_consumers(ops: list[OpInfo]) -> dict[int, list[int]]:
     return consumers
 
 
+def feeds(producer: OpInfo, consumer: OpInfo) -> bool:
+    produced = {t for t in producer.outputs if t >= 0}
+    if not produced:
+        return False
+    return any(t in produced for t in consumer.inputs if t >= 0)
+
+
 def add_row(rows: list[dict[str, str]], *, pattern: str, model: Path,
             ops: list[OpInfo], start: int, end: int, notes: str) -> None:
     seq = ops[start:end + 1]
@@ -221,7 +230,8 @@ def scan_model(model: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
 
     for i, op in enumerate(ops):
-        if op.name in COMPUTE_OPS or op.name in BINARY_EWE_OPS or op.name in POOL_OPS or op.name in LAYOUT_OPS:
+        if (op.name in COMPUTE_OPS or op.name in BINARY_EWE_OPS or
+                op.name in UNARY_EWE_OPS or op.name in POOL_OPS or op.name in LAYOUT_OPS):
             add_row(rows, pattern="producer_compute", model=model,
                     ops=ops, start=i, end=i,
                     notes="single producer engine candidate")
@@ -232,6 +242,13 @@ def scan_model(model: Path) -> list[dict[str, str]]:
 
     for i in range(len(ops) - 1):
         a, b = ops[i], ops[i + 1]
+
+        if not feeds(a, b):
+            if b.name in COMPUTE_OPS:
+                add_row(rows, pattern="udma_as_engine", model=model,
+                        ops=ops, start=i + 1, end=i + 1,
+                        notes="compute consumer normally needs UDMA_R preload and optional UDMA_W store tail")
+            continue
 
         if a.name in COMPUTE_OPS and b.name in BINARY_EWE_OPS:
             add_row(rows, pattern="consumer_tail", model=model,
@@ -270,6 +287,8 @@ def scan_model(model: Path) -> list[dict[str, str]]:
 
     for i in range(len(ops) - 2):
         a, b, c = ops[i], ops[i + 1], ops[i + 2]
+        if not feeds(a, b) or not feeds(b, c):
+            continue
         if a.name in COMPUTE_OPS and b.name in BINARY_EWE_OPS and c.name in POOL_OPS:
             add_row(rows, pattern="consumer_tail", model=model,
                     ops=ops, start=i, end=i + 2,
@@ -349,7 +368,7 @@ def main() -> int:
         "input_shape", "output_shape", "suggested_slice", "notes", "source_path",
     ]
     with out_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
 

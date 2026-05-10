@@ -210,6 +210,8 @@ def run_corpus(*,
                     help="run only fast mode; leave conflict/mesh CSV fields empty")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
+    ap.add_argument("--no-html", action="store_true",
+                    help="skip per-model and index HTML generation; keep profile JSON/CSV")
     ap.add_argument("--list", action="store_true",
                     help="list selected models and exit")
     args = ap.parse_args()
@@ -237,7 +239,7 @@ def run_corpus(*,
 
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    prior_full = _load_prior_csv(csv_path)
+    prior_full = {} if args.rerun_all else _load_prior_csv(csv_path)
     prior_ok = {} if args.rerun_all else _load_prior_results(csv_path, fast_only=args.fast_only)
     if prior_ok:
         print(f"  (cache: {len(prior_ok)} prior ok rows in {csv_path.name}; "
@@ -278,7 +280,7 @@ def run_corpus(*,
     rows_out = []
     t_total = time.time()
     for i, pat in enumerate(patterns, 1):
-        if pat in prior_ok and _report_exists_for(pat, model_dir):
+        if pat in prior_ok and (args.no_html or _report_exists_for(pat, model_dir)):
             cached = prior_ok[pat]
             cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
             cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
@@ -321,7 +323,8 @@ def run_corpus(*,
                         f"running {stage}...")
 
         _, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
-            pat, model_dir, progress=_progress, fast_only=args.fast_only)
+            pat, model_dir, progress=_progress, fast_only=args.fast_only,
+            skip_html=args.no_html)
         elapsed = time.time() - t0
         ms_str = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         conflict_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
@@ -378,5 +381,6 @@ def run_corpus(*,
               f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
               flush=True)
     print(f"csv: {csv_path}", flush=True)
-    _refresh_profile_index(profile_title, profile_html, csv_path)
-    print(f"html: {HERE / profile_html}", flush=True)
+    if not args.no_html:
+        _refresh_profile_index(profile_title, profile_html, csv_path)
+        print(f"html: {HERE / profile_html}", flush=True)

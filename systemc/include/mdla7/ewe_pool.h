@@ -14,7 +14,10 @@
 //         cycle = ceil(elem/lanes) * 3 + Payload fill/drain.
 
 #include <systemc>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <cstring>
 #include "mdla7/descriptor.h"
@@ -220,6 +223,28 @@ SC_MODULE(EweEngine) {
         const int32_t zp_a = p[0], zp_b = p[1], zp_out = p[2];
         const int32_t mult_o = p[7], shift_o = p[8];
         const int32_t act_min = p[10], act_max = p[11];
+        if (const char* dump_dir = std::getenv("MDLA7_DUMP_EWE_MUL_DIR")) {
+            std::vector<int8_t> a(elems), b(elems), out(elems);
+            l1mgr.read(e.in_a_addr, a.data(), uint32_t(elems));
+            l1mgr.read(e.in_b_addr, b.data(), uint32_t(elems));
+            for (uint64_t i = 0; i < elems; ++i) {
+                const int32_t av = int32_t(a[i]) - zp_a;
+                const int32_t bv = int32_t(b[i]) - zp_b;
+                int32_t v = multiply_by_quantized_multiplier(av * bv, mult_o, shift_o) + zp_out;
+                if (v < act_min) v = act_min;
+                if (v > act_max) v = act_max;
+                out[i] = int8_t(v);
+            }
+            l1mgr.write(e.out_addr, out.data(), uint32_t(elems));
+            const std::string base = std::string(dump_dir) + "/ewe_mul";
+            std::ofstream(base + ".a.bin", std::ios::binary)
+                .write(reinterpret_cast<const char*>(a.data()), std::streamsize(a.size()));
+            std::ofstream(base + ".b.bin", std::ios::binary)
+                .write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+            std::ofstream(base + ".out.bin", std::ios::binary)
+                .write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
+            return;
+        }
         run_binary_int_chunked(e, elems, [&](int8_t av, int8_t bv) {
             const int32_t a = int32_t(av) - zp_a;
             const int32_t b = int32_t(bv) - zp_b;
@@ -302,6 +327,8 @@ SC_MODULE(EweEngine) {
     }
 
     // v8.30: FP unary activations (HARD_SWISH / GELU). Storage FP16; compute FP32.
+    // v10: LOGISTIC joins the same unary EWE datapath for EfficientNet-style
+    // x * sigmoid(x) fanout blocks.
     // HARD_SWISH: y = x * relu6(x + 3) / 6  (TFLite spec exactly).
     // GELU: tanh-approximation,
     //   y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
@@ -321,6 +348,8 @@ SC_MODULE(EweEngine) {
             if (subtype == ES_GELU) {
                 const float u = k * (x + c * x * x * x);
                 y = 0.5f * x * (1.0f + std::tanh(u));
+            } else if (subtype == ES_LOGISTIC) {
+                y = 1.0f / (1.0f + std::exp(-x));
             } else {                                    // ES_HARD_SWISH
                 float r = x + 3.0f;
                 if (r < 0.0f) r = 0.0f;
@@ -370,8 +399,12 @@ SC_MODULE(EweEngine) {
                     }
                 }
                 wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
-            } else if (e.subtype == ES_HARD_SWISH || e.subtype == ES_GELU) {
-                const char* nm = (e.subtype == ES_GELU) ? "gelu" : "h_swsh";
+            } else if (e.subtype == ES_HARD_SWISH ||
+                       e.subtype == ES_GELU ||
+                       e.subtype == ES_LOGISTIC) {
+                const char* nm = (e.subtype == ES_GELU) ? "gelu"
+                               : (e.subtype == ES_LOGISTIC) ? "logist"
+                               : "h_swsh";
                 std::cout << "[EWE] " << nm << " " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
                 if (elems > 0 && fp) {
@@ -479,6 +512,12 @@ SC_MODULE(PoolEngine) {
         const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
         std::vector<uint16_t> in16(in_elems), out16(out_elems);
         l1mgr.read(p.in_addr, in16.data(), in_elems * sizeof(uint16_t));
+        if (const char* dump_dir = std::getenv("MDLA7_DUMP_POOL_FP_DIR")) {
+            const std::string base = std::string(dump_dir) + "/pool_fp";
+            std::ofstream(base + ".in.bin", std::ios::binary)
+                .write(reinterpret_cast<const char*>(in16.data()),
+                       std::streamsize(in_elems * sizeof(uint16_t)));
+        }
 
         for (uint32_t oh = 0; oh < p.out_h; ++oh)
         for (uint32_t ow = 0; ow < p.out_w; ++ow)
@@ -514,6 +553,12 @@ SC_MODULE(PoolEngine) {
             }
         }
         l1mgr.write(p.out_addr, out16.data(), out_elems * sizeof(uint16_t));
+        if (const char* dump_dir = std::getenv("MDLA7_DUMP_POOL_FP_DIR")) {
+            const std::string base = std::string(dump_dir) + "/pool_fp";
+            std::ofstream(base + ".out.bin", std::ios::binary)
+                .write(reinterpret_cast<const char*>(out16.data()),
+                       std::streamsize(out_elems * sizeof(uint16_t)));
+        }
     }
 
     template <typename T>

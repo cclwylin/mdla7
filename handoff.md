@@ -1,11 +1,12 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-10 21:11:57 CST
+日期時間：2026-05-11 03:16:12 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
+- 最新本機 commit：`642a641 Expand microblock path slices and ratio chart`
 - 最新已 push commit：`31068a7 Remove old MDLA7 system report slides`
 - 前一版 code/doc commit：`9e3f70d Strengthen layout microblock handoffs`
 - 前一版 microblock commit：`3df0b4b Stream layout slice tails in microblocks`
@@ -15,7 +16,7 @@ Branch：`main`
 - 前一版 microblock tail commit：`a8dd50f Expand microblock fused pipeline tails`
 - Gantt task-meta commit：`a490aab Add task-meta microblock Gantt timeline`
 - Fast-only runner commit：`09d97cb Implement fused microblock fast-only runners`
-- 工作樹目前有本輪 Path9/Path10 code/profile/manifest/doc 修改，另有非本輪的
+- 工作樹目前有本輪 D2S layout-bridge code/doc/profile 修改，另有非本輪的
   `image/`、`reports/uArcSim Implementation by AI.pptx` 本機變更與 Office lock file。
   commit 時不要把非本輪項目混進 microblock code/doc commit。
 - 本輪另新增 MDLA6 Pattern Profiles 對照圖：
@@ -76,6 +77,12 @@ Branch：`main`
     TNPS 先把 S2D tile 寫到 L1，後續 CONV 直接吃該 L1 tile，不再把 S2D
     當成必須 materialize 的 DRAM boundary。已加 descriptor row 16-bit
     encodable guard，避免大 row tile 溢位。
+  - `DEPTH_TO_SPACE -> CONV/DWCONV` layout bridge 已新增 true L1 tile-feed：
+    D2S source tile 先載到 L1，TNPS D2S 在 L1 產出 aligned output rows，
+    後續 CONV/DW 直接從 L1 row offset 讀取需要的 conv input window。
+    已用 `systemc/scripts/gen_d2s_compute_synth.py` 產生 connected synthetic
+    graph 驗證，`d2s_compute_synth` 觸發 `tiles=5x1`，D2S intermediate
+    DRAM write 為 0，CONV PASS。
   - channel-only `SLICE/STRIDED_SLICE -> CONV/DWCONV` layout bridge 已新增
     L1 tile-feed safe subset：只接受空間維度不變、channel 連續切片、stride=1。
     cut/final consumer 預設啟用；full graph 的 intermediate consumer 目前用
@@ -98,7 +105,7 @@ Path 15、Path 16 這種 hardcoded special-case 擴張。
 
 | Next-Step | Pattern | 目標 |
 |---|---|---|
-| 1 | Layout bridge | 補更完整的 `DEPTH_TO_SPACE/PAD/TRANSPOSE/RESHAPE -> CONV/DW/FC` true L1 tile-feed；目前已有 safe subset，但 arbitrary layout permute 還沒完整 |
+| 1 | Layout bridge | `DEPTH_TO_SPACE -> CONV/DW` true L1 tile-feed 已補；下一步補 `PAD/TRANSPOSE/RESHAPE -> CONV/DW/FC` 更完整 tile-feed，尤其 arbitrary layout permute |
 | 2 | Layout bridge profitability | full graph intermediate `SLICE/STRIDED_SLICE -> CONV` 需要 ownership/profitability model；避免 `xlsr_quant` 這類 TNPS overhead 大於省下 DRAM reload 的 regression |
 | 3 | Fanout/live-range | 把 safe subset 擴成一般 producer multi-consumer live-range model，涵蓋 `producer -> two CONV + EWE/POOL/TNPS` 與 Requant output fanout |
 | 4 | Multi-source concat | cleanup packed concat / multi-source layout bridge，讓 `CONV/Requant -> CONCAT -> CONV` 不只靠個別 case |
@@ -120,6 +127,8 @@ make -C systemc -j8
 python3 batch/run_mb_path.py --fast-only --rerun-all --keep-bin
 python3 batch/run_mb_path.py --filter layout_bridge --fast-only --rerun-all --keep-bin
 python3 batch/run_mb_path.py --filter fanout_live_range --fast-only --rerun-all --keep-bin
+python3 systemc/scripts/gen_d2s_compute_synth.py --output batch/output/d2s_compute_synth.bin
+./systemc/build/mdla7_model_runner batch/output/d2s_compute_synth.bin --quiet --l1-timing=fast
 python3 batch/run_ethz_v6.py --fast-only --rerun-all --filter deeplab_v3_plus_float --limit 1
 python3 batch/run_ethz_v6.py --filter dped_float --fast-only --rerun-all --keep-bin
 ./batch/run_model.py unet_quant --fast-only --keep-intermediate
@@ -140,6 +149,9 @@ python3 batch/run_ethz_v6.py --filter dped_float --fast-only --rerun-all --keep-
   `16/16 ok`
 - `run_mb_path.py --filter layout_bridge --fast-only --rerun-all --keep-bin`:
   `17/17 ok`
+- `d2s_compute_synth`: `2/2 PASS`，`DEPTH_TO_SPACE -> CONV` 觸發
+  `tiles=5x1` microblock handoff；D2S layer `DRAM W=0`，summary 為
+  `1 fused/streamed`
 - `layout_bridge/dped_float_L1_L2`: `SPACE_TO_DEPTH -> CONV` 已觸發
   true L1 tile-feed，`1.096 ms / fuse=no` -> `1.007 ms / fuse=yes`，
   `mb=104:load+conv+requant+consumer+store`

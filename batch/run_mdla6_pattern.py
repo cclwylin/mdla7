@@ -291,7 +291,8 @@ def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, st
 
 
 def run_one(pattern: str, model_dir: Path, progress=None,
-            fast_only: bool = False) -> tuple[str, float | None, float | None, float | None, str, str, str]:
+            fast_only: bool = False,
+            skip_html: bool = False) -> tuple[str, float | None, float | None, float | None, str, str, str]:
     """Compile + simulate one model; optionally skip conflict/mesh."""
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
@@ -323,19 +324,20 @@ def run_one(pattern: str, model_dir: Path, progress=None,
         progress("simulate fast")
     ms, status, fast_stdout = _simulate_one(bin_path, "fast")
 
-    if progress:
-        progress("html fast")
     fast_html = OUT_DIR / f"{canonical}.fast.html"
-    try:
-        _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
-        if paths["html"].exists():
-            fast_html.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(paths["html"], fast_html)
-    except Exception as e:
-        if status == "ok":
-            status = f"html-fail: {str(e)[:80]}"
-        else:
-            status = f"{status}; html-fail"
+    if not skip_html:
+        if progress:
+            progress("html fast")
+        try:
+            _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
+            if paths["html"].exists():
+                fast_html.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(paths["html"], fast_html)
+        except Exception as e:
+            if status == "ok":
+                status = f"html-fail: {str(e)[:80]}"
+            else:
+                status = f"{status}; html-fail"
 
     if fast_only:
         return pattern, ms, None, None, status, "", ""
@@ -350,16 +352,17 @@ def run_one(pattern: str, model_dir: Path, progress=None,
     conflict_ms, conflict_status, conflict_stdout = _simulate_one(
         conflict_paths["prog"], "conflict")
 
-    if progress:
-        progress("html conflict")
     conflict_html = conflict_paths["html"]
-    try:
-        _write_mode_html(model_path, conflict_paths, cr.stdout or "", conflict_stdout)
-    except Exception as e:
-        if conflict_status == "ok":
-            conflict_status = f"html-fail: {str(e)[:80]}"
-        else:
-            conflict_status = f"{conflict_status}; html-fail"
+    if not skip_html:
+        if progress:
+            progress("html conflict")
+        try:
+            _write_mode_html(model_path, conflict_paths, cr.stdout or "", conflict_stdout)
+        except Exception as e:
+            if conflict_status == "ok":
+                conflict_status = f"html-fail: {str(e)[:80]}"
+            else:
+                conflict_status = f"{conflict_status}; html-fail"
 
     # ---- simulate: mesh timing + report ----
     if progress:
@@ -370,27 +373,29 @@ def run_one(pattern: str, model_dir: Path, progress=None,
         pass
     mesh_ms, mesh_status, mesh_stdout = _simulate_one(mesh_paths["prog"], "mesh")
 
-    if progress:
-        progress("html mesh")
     mesh_html = mesh_paths["html"]
-    try:
-        _write_mode_html(model_path, mesh_paths, cr.stdout or "", mesh_stdout)
-    except Exception as e:
-        if mesh_status == "ok":
-            mesh_status = f"html-fail: {str(e)[:80]}"
-        else:
-            mesh_status = f"{mesh_status}; html-fail"
+    if not skip_html:
+        if progress:
+            progress("html mesh")
+        try:
+            _write_mode_html(model_path, mesh_paths, cr.stdout or "", mesh_stdout)
+        except Exception as e:
+            if mesh_status == "ok":
+                mesh_status = f"html-fail: {str(e)[:80]}"
+            else:
+                mesh_status = f"{mesh_status}; html-fail"
 
-    if progress:
-        progress("html combined")
-    try:
-        if fast_html.exists() and conflict_html.exists() and mesh_html.exists():
-            _write_combined_html(model_path, fast_html, conflict_html, mesh_html,
-                                 ms, conflict_ms, mesh_ms,
-                                 status, conflict_status, mesh_status)
-    except Exception as e:
-        if status == "ok":
-            status = f"html-fail: combined {str(e)[:70]}"
+    if not skip_html:
+        if progress:
+            progress("html combined")
+        try:
+            if fast_html.exists() and conflict_html.exists() and mesh_html.exists():
+                _write_combined_html(model_path, fast_html, conflict_html, mesh_html,
+                                     ms, conflict_ms, mesh_ms,
+                                     status, conflict_status, mesh_status)
+        except Exception as e:
+            if status == "ok":
+                status = f"html-fail: combined {str(e)[:70]}"
     return pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status
 
 
