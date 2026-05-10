@@ -1,15 +1,17 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-11 05:37:06 CST
+日期時間：2026-05-11 06:05:09 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
-- 工作樹仍有非本輪的 `batch/profile_mb_path.html`、
-- `batch/profile_mdla6_pattern.html`、`image/`、
-  `reports/uArcSim Implementation by AI.pptx` 本機變更。commit 時不要混入。
-- 本輪另新增 MDLA6 Pattern Profiles 對照圖：
+- 最新已推到 GitHub `main`：`8e6a1a9 Fuse attention EWE softmax microblocks`。
+- push 後 `main` 與 `origin/main` 對齊；本次 handoff 更新前工作樹是 clean。
+- 本輪重點：`sd_diffusion_quant` 的 5 組大型 `mul -> softmax`
+  attention score tensor 已走 microblock fused path，非最後層 `DRAM_W >= 1MB`
+  掃描已清到 0 筆。
+- MDLA6 Pattern Profiles 對照圖：
   `batch/chart/mdla6_pattern_ratio_chart.{svg,png}`，由
   `batch/plot_mdla6_pattern_ratio.py` 從
   `batch/output/mdla6_pattern_regression.csv` 產生。X 軸是 Pattern，
@@ -22,6 +24,15 @@ Branch：`main`
 
 ## 本輪完成
 
+- 新增 `binary EWE ADD/MUL/SUB -> attention SOFTMAX` microblock fused path：
+  `try_stream_binary_ewe_softmax()` 以 L1 ping-pong slot 做
+  `load A/B -> EWE -> SOFTMAX -> optional store`，避免 attention score
+  matrix 先寫回 DRAM 再由 softmax 讀回。
+- `is_attention_softmax_meta()` 共用化 attention softmax 判斷；binary EWE
+  producer no-store 規則限定 INT8 且 exact single-consumer，避免 FP16 被標成
+  no-store 但還沒有對應 fused path。
+- `sd_diffusion_quant` L59/L140/L1318/L1401/L1484 的 8 MB `mul`
+  intermediate 已消掉：`mul DRAM_W = 0`，對應 softmax `DRAM_R/W = 0`。
 - `CONV/D2SPACE/POOL -> consumer` 大 tensor handoff guard 已改成 exact
   single-consumer 才保留 no-store，不再因 large upsample/pool tail 把可 fuse
   的 `producer_no_store` 打掉。
@@ -54,12 +65,11 @@ Path 15、Path 16 這種 hardcoded special-case 擴張。
 
 | Priority | Model                                       |                      Layer | Op              |  DRAM_W | 初步方向                                             |
 | -------: | ------------------------------------------- | -------------------------: | --------------- | ------: | ---------------------------------------------------- |
-|        1 | `sd_diffusion_quant`                      | L59/L140/L1318/L1401/L1484 | `mul`         |    8 MB | `mul -> softmax` large tensor tail                 |
-|        2 | `pynet_v2_quant`                          |                       L209 | `conv`        |    6 MB | conv output fanout / tail ownership                  |
-|        3 | `srgan_quant`                             |                        L55 | `conv`        |    3 MB | 可能是 output/side-output live-range，先查 GraphMeta |
-|        4 | `microisp_quant`                          |              L62/L125/L188 | `d2spac`      | 1.99 MB | `D2SPACE -> consumer` layout bridge                |
-|        5 | `sam_float`                               |                    L27/L70 | `pad`         | 1.20 MB | `PAD -> compute` layout bridge                     |
-|        6 | `sd_encoder_quant` / `sd_decoder_quant` |              L282/L283/L47 | `mul/softmax` |    1 MB | softmax tail streaming / no-store                    |
+|        1 | `pynet_v2_quant`                          |                       L209 | `conv`        |    6 MB | conv output fanout / tail ownership                  |
+|        2 | `srgan_quant`                             |                        L55 | `conv`        |    3 MB | 可能是 output/side-output live-range，先查 GraphMeta |
+|        3 | `microisp_quant`                          |              L62/L125/L188 | `d2spac`      | 1.99 MB | `D2SPACE -> consumer` layout bridge                |
+|        4 | `sam_float`                               |                    L27/L70 | `pad`         | 1.20 MB | `PAD -> compute` layout bridge                     |
+|        5 | `sd_encoder_quant` / `sd_decoder_quant` |              L282/L283/L47 | `mul/softmax` |    1 MB | softmax tail streaming / no-store                    |
 
 ## MB_Path_Slice Pattern Corpus
 
@@ -111,6 +121,9 @@ python3 systemc/scripts/slice_microblock_patterns.py --max-per-pattern 0 --clean
 ```bash
 make -C systemc -s
 git diff --check
+./batch/run_model.py sd_diffusion_quant --fast-only --no-build --keep-intermediate
+./batch/run_model.py midas_v3_quant --fast-only --no-build --keep-intermediate
+./batch/run_model.py llama2_quant.cut --fast-only --no-build --keep-intermediate
 ./batch/run_model.py --model model/MLPerf_Tiny/vww_96_int8.tflite --fast-only --no-build --keep-intermediate
 ./batch/run_model.py --model model/Hotspot/llama2_quant_L35_L74.tflite --fast-only --no-build --keep-intermediate
 ./batch/run_model.py --model model/ETHZ_v6/mobilenet_v3_quant.tflite --fast-only --no-build --keep-intermediate
@@ -132,6 +145,13 @@ python3 batch/run_ethz_v6.py --filter dped_float --fast-only --rerun-all --keep-
 ./batch/run_model.py unet_quant --fast-only --no-build --keep-intermediate
 ./batch/run_model.py llama2_quant.cut --fast-only --no-build --keep-intermediate
 ```
+
+最近一輪結果：
+
+- `sd_diffusion_quant`：`1524/1524 PASS`，`4551105 cycles = 2.395 ms`。
+- `sd_diffusion_quant` 非最後層 `DRAM_W >= 1MB`：0 筆。
+- `midas_v3_quant`：`348/348 PASS`。
+- `llama2_quant`：`400/400 PASS`。
 
 ## 快速命令
 
