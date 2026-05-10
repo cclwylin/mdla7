@@ -1256,6 +1256,19 @@ int sc_main(int argc, char* argv[]) {
         }
     }
 
+    for (uint32_t k = 0; k + 1 < N; ++k) {
+        const auto& P = metas[k];
+        const auto& S = metas[k + 1];
+        const bool large_conv_to_layout_slice =
+            is_conv_class_meta(P) &&
+            (S.op_kind == OK_SLICE || S.op_kind == OK_STRIDED_SLICE || S.op_kind == OK_SPLIT) &&
+            P.dtype == S.dtype &&
+            P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
+            uint64_t(P.ref_size) + 4096 > L1_BUDGET;
+        if (large_conv_to_layout_slice)
+            producer_no_store[k] = false;
+    }
+
     for (uint32_t i = 0; i < N; ++i) {
         if (i > 0 && is_conv_class_meta(metas[i]) &&
             metas[i - 1].op_kind == OK_PAD && udma_w_skipped[i - 1] &&
@@ -5507,10 +5520,11 @@ int sc_main(int argc, char* argv[]) {
             // "low" zone, those addresses overlap with prev layer's L1_IN
             // (still being read by prev's CONV). Wait on prev REQUANT done
             // before any UDMA write into L1, so we don't race.
+            const uint8_t l1_write_wait =
+                fused_this_layer ? fuse_prev_done_tag : layer_entry_wait;
             program.push_back(make_udma(params_dram, L1_PARAMS,
                                         uint32_t(params_blob),
-                                        /*dir*/ 0, params_tag,
-                                        fused_this_layer ? fuse_prev_done_tag : layer_entry_wait));
+                                        /*dir*/ 0, params_tag, l1_write_wait));
             acc[i].dram_r += params_blob;
             acc[i].sram_w += params_blob;
 
@@ -5519,7 +5533,7 @@ int sc_main(int argc, char* argv[]) {
                 persistent_wgt_tag = alloc_tag();
                 Descriptor wpd = make_udma(L.dram_wgt, L1_WGT, tile_wgt_max,
                                            /*dir*/ 0, persistent_wgt_tag,
-                                           layer_entry_wait);
+                                           l1_write_wait);
                 program.push_back(wpd);
                 acc[i].dram_r += tile_wgt_max;
                 acc[i].sram_w += tile_wgt_max;
@@ -5554,6 +5568,7 @@ int sc_main(int argc, char* argv[]) {
                 (planned_tiles_oc > 1) ? worst_tile_in_bytes * uint64_t(planned_tiles_oc - 1) : 0;
             const bool weight_stationary_layer =
                 pointwise_ws_candidate &&
+                !tiled_layout_tail.valid &&
                 !pingpong_tiles &&
                 planned_tiles_h > 1 &&
                 ws_weight_saved > ws_act_extra + (ws_act_extra / 4);
@@ -5796,10 +5811,14 @@ int sc_main(int argc, char* argv[]) {
                     // weights persistent in L1 when possible, so H tiles only
                     // stream input/output slots.
                     if (!pingpong_persistent_wgt && !use_prefetched_wgt) {
+                        const uint8_t wgt_wait_a =
+                            pingpong_tiles ? slot_free_tag[tile_slot] : layer_entry_wait;
+                        const uint8_t wgt_wait_b =
+                            (fused_this_layer && wgt_wait_a != fuse_prev_done_tag)
+                            ? fuse_prev_done_tag : 0;
                         Descriptor wd_r = make_udma(L.dram_wgt + wgt_dram_off, tile_l1_wgt,
                                                     wgt_slice_size, /*dir*/ 0, wgt_tag,
-                                                    pingpong_tiles ? slot_free_tag[tile_slot]
-                                                                   : layer_entry_wait);
+                                                    wgt_wait_a, wgt_wait_b);
                         if (pingpong_tiles && stream_pingpong_tiles) {
                             Microblock mb{};
                             mb.id = tile_id;
@@ -7287,7 +7306,7 @@ int sc_main(int argc, char* argv[]) {
                 pending.layer_idx = i;
                 layer_done_tag[i] = st_tag;
             }
-            // ADD output is single-tile L1-resident → can source-fuse.
+            // ADD output is single-tile L1-resident -> can source-fuse.
             fuse_prev_l1_out_addr   = L1_OUT;
             fuse_prev_l1_out_size   = L.ref_size;
             fuse_prev_done_tag      = req_tag;          // EWE ADD done = data in L1
@@ -7481,6 +7500,19 @@ int sc_main(int argc, char* argv[]) {
         }
         case OK_RESHAPE:
         case OK_GATHER: {
+            const bool reshape_from_multi_consumer_residual =
+                L.op_kind == OK_RESHAPE &&
+                graph_metas &&
+                i > 0 &&
+                metas[i - 1].op_kind == OK_FC &&
+                graph_metas[i - 1].producer0_layer >= 0 &&
+                graph_metas[i - 1].producer0_layer < int32_t(N) &&
+                (metas[uint32_t(graph_metas[i - 1].producer0_layer)].op_kind == OK_ADD ||
+                 metas[uint32_t(graph_metas[i - 1].producer0_layer)].op_kind == OK_MUL ||
+                 metas[uint32_t(graph_metas[i - 1].producer0_layer)].op_kind == OK_SUB) &&
+                graph_metas[uint32_t(graph_metas[i - 1].producer0_layer)].consumer_count > 1 &&
+                graph_metas[uint32_t(graph_metas[i - 1].producer0_layer)].last_consumer_layer >
+                    int32_t(i - 1);
             const bool fused_layout_tail =
                 L.op_kind == OK_RESHAPE &&
                 enable_microblocks &&
@@ -7510,6 +7542,10 @@ int sc_main(int argc, char* argv[]) {
                 acc[i].sram_r += L.ref_size;
                 acc[i].sram_w += L.ref_size;
                 acc[i].dram_w += L.ref_size;
+                if (reshape_from_multi_consumer_residual) {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                }
                 ++tnps_count_so_far;
                 tnps_count_at_layer_end[i] = tnps_count_so_far;
                 layer_done_tag[i] = tnps_tag;
@@ -7642,6 +7678,7 @@ int sc_main(int argc, char* argv[]) {
         udma_count_at_layer_end[pending.layer_idx] = udma_count_so_far;
         pending.active = false;
     }
+
     sys.host.program = std::move(program);
 
     if (quiet) {
