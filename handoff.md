@@ -1,13 +1,18 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-11 06:05:09 CST
+日期時間：2026-05-12 CST
 Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch：`main`
 
 ## 目前狀態
 
-- 最新已推到 GitHub `main`：`8e6a1a9 Fuse attention EWE softmax microblocks`。
-- push 後 `main` 與 `origin/main` 對齊；本次 handoff 更新前工作樹是 clean。
+- 最新 local commit：`6052c6e Add MDLA7 synth Verilog simulation`。
+- 此 commit 尚未確認已 push；之前 GitHub `main` 記錄仍是
+  `8e6a1a9 Fuse attention EWE softmax microblocks`。
+- 本次 commit 只收 `rtl/` synth Verilog source / runner / README；
+  沒有收 `rtl/bin`、`rtl/obj_dir`、`rtl/verilator`。
+- 工作樹仍有既有未提交變更在 `batch/`、`systemc/`、`reports/`
+  與幾個 generated profile HTML；這些不是本次 RTL commit 的內容。
 - 本輪重點：`sd_diffusion_quant` 的 5 組大型 `mul -> softmax`
   attention score tensor 已走 microblock fused path，非最後層 `DRAM_W >= 1MB`
   掃描已清到 0 筆。
@@ -21,6 +26,100 @@ Branch：`main`
   `batch/chart/mdla6_pattern_mode_ratio_chart.{svg,png}`；標題為
   `MDLA7 L1 Mesh Evaluation (v0.1)`，三條線是 `conflict/fast`、
   `mesh/fast`、`mesh/conflict`，X 軸依 `mesh/conflict` 由小到大排列。
+
+## 2026-05-12 RTL / Synth Verilog Update
+
+已新增並 commit 一套 `rtl/` synth Verilog simulation path：
+
+```text
+6052c6e Add MDLA7 synth Verilog simulation
+```
+
+### Commit 內容
+
+- `rtl/synth/`：
+  `command.v`、`conv.v`、`requant.v`、`ewe.v`、`pool.v`、`tnps.v`、
+  `udma.v`、`l1manager.v`、`l1mesh.v`、`mdla7_top.v`、
+  `host.v`、`dram.v`、`Testbench.v`、`common.v`、
+  `mdla7_dpi.cpp`、`filelist_system_tb.f`、`README.md`。
+- `rtl/batch/run_mdla7_verilog.py`：
+  quiet Verilator runner，支援 `--compare-synth-verilog`、
+  `--show-verilog-output`、`--verbose-build`、macOS Intel / Apple Silicon
+  host/architecture check，`rtl/obj_dir` build output，profile timing sidecar。
+- `rtl/.gitignore`：
+  忽略 `obj_dir/`、`verilator/`、`bin/`、macOS `._*` sidecar、
+  `__pycache__`。
+
+### 已實作的 RTL 架構
+
+- Top-level：
+  `Testbench.v` instance `host.v`、`dram.v`、`mdla7_top.v`。
+  `host.v` 讀 `+PROGRAM=<.bin>`，展開 layer microblock descriptor，
+  驅動 `mdla7_top.v`，並用 fast-model reference CRC 檢查 datapath 結果。
+- Engine modules：
+  `conv/requant/ewe/pool/tnps/udma` 都已 instance 並會動起來。
+  datapath correctness 目前透過 Verilator DPI-C `mdla7_dpi.cpp`
+  做 true datapath CRC compare；Verilog module 本身是 timing shell +
+  phase/handshake/backpressure 模型，不是完整 cycle-accurate arithmetic RTL。
+- Engine-side payload token handshake：
+  `udma/requant/ewe/pool/tnps` 會在 payload phase 發 `l1_req_valid` 到
+  L1Manager；若 L1Manager input FIFO 滿，engine phase 會透過
+  `phase_stall` 停住，反映 microblock 執行中的 backpressure。
+- CONV path：
+  依設計決策，`conv` 直接接 `L1Mesh`，不經 `L1Manager`。
+- L1Manager：
+  per-source input FIFO 2-deep，source 包含 UDMA / REQUANT / EWE /
+  POOL / TNPS / legacy；內建 arbiter，FIFO full 會回壓對應 engine。
+  `busy` 包含 FIFO queued token / phase busy / response pending，避免 top
+  太早判斷 L1 path drained。
+- L1Mesh：
+  已實作 `4 x Mesh4x4` 架構。`l1mesh.v` 內有 4 個
+  `mdla7_l1mesh4x4_tile` instance；address decode 用 64-bank global bank id：
+  `bank_global[5:4]` 選 4 個 tile，`bank_global[3:0]` 選 tile 內 4x4
+  node/bank。Timing phase 拆成：
+  `ADDR_DECODE -> GLOBAL_MESH -> TILE_MESH -> BANK_ARB -> SRAM_MACRO -> RESP`。
+
+### RTL 驗證結果
+
+最近一輪驗證全部 PASS：
+
+```bash
+rtl/verilator/bin/verilator --lint-only --sv --timing -Wall -Wno-fatal \
+  -Irtl/synth -f rtl/synth/filelist_system_tb.f --top-module Testbench
+
+rtl/verilator/bin/verilator --lint-only --sv --timing -Wall -Wno-fatal \
+  -Irtl/synth rtl/synth/common.v rtl/synth/command.v rtl/synth/conv.v \
+  rtl/synth/requant.v rtl/synth/ewe.v rtl/synth/pool.v rtl/synth/tnps.v \
+  rtl/synth/udma.v rtl/synth/l1manager.v rtl/synth/l1mesh.v \
+  rtl/synth/mdla7_top.v --top-module mdla7_top
+
+./rtl/batch/run_mdla7_verilog.py --compare-synth-verilog --filter '*.bin' \
+  --require-host-load --timeout 300 --stop-on-fail --build
+```
+
+Full Hotspot bin compare：
+
+```text
+summary: pass=11 fail=0 total=11
+compare: comparable=11/11 synth_total_ms=3.424 verilog_total_ms=3.326 verilog/synth=0.972x
+```
+
+重要：runner 預期 `.bin` 在 `rtl/bin/Hotspot/*.bin`，Verilator checkout 在
+`rtl/verilator`，但兩者都被 `.gitignore` 忽略，不在 commit 內。
+
+### RTL Next-Step
+
+1. 將 DPI-C datapath 逐步替換為真正 Verilog datapath：
+   先從較小的 `requant/pool/ewe/tnps` arithmetic pipeline 開始，再推進
+   `conv` MAC array / psum / tiling。
+2. 補 L1Mesh contention test：
+   synthetic pattern 讓多 source token 打到同 tile/bank，確認
+   `BANK_ARB` / FIFO backpressure / engine `phase_stall` 都能觀察到。
+3. 讓 `l1mesh_route_cycles` 更貼近 compiler/profile 的 physical placement，
+   目前 4x Mesh4x4 會根據 address tile/bank hops 加 latency，但 placement
+   還是簡化模型。
+4. 若要 push，先確認是否也要另外 commit/處理現有 `batch/`、`systemc/`、
+   `reports/` 未提交變更，避免混進 RTL commit。
 
 ## 本輪完成
 

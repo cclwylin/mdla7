@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -23,6 +24,11 @@ SIM_FINISH_RE = re.compile(
     re.IGNORECASE,
 )
 VERILOG_CYCLES_RE = re.compile(r"VERILOG_CYCLES:\s*([0-9]+)")
+ETHZ_FILTER_ALIASES = {"ethz", "ethz_v6", "ethz-v6"}
+HOTSPOT_FILTER_ALIASES = {"hotspot"}
+SLICE_FILTER_ALIASES = {"slice", "ethz_slice", "ethz-v6-slice", "ethz_v6_slice"}
+MDLA6_PATTERN_CSV = Path("batch") / "mdla6_ethz_v6_sorted.csv"
+MDLA6_EXCLUDED_PATTERNS = {"dped_float"}
 
 
 TIME_UNIT_TO_MS = {
@@ -177,6 +183,106 @@ def collect_bins(patterns: list[str], bin_root: Path, repo_root: Path, cwd: Path
     return sorted(found.values(), key=lambda p: str(p))
 
 
+def normalise_mdla6_pattern(pattern: str) -> str:
+    if pattern.endswith(".cut"):
+        pattern = pattern[: -len(".cut")]
+    return pattern.replace("__", "_")
+
+
+def read_mdla6_ethz_order(repo_root: Path) -> list[str]:
+    csv_path = repo_root / MDLA6_PATTERN_CSV
+    if not csv_path.exists():
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    with csv_path.open(newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+            stem = normalise_mdla6_pattern(row[0].strip())
+            if stem in MDLA6_EXCLUDED_PATTERNS or stem in seen:
+                continue
+            ordered.append(stem)
+            seen.add(stem)
+    return ordered
+
+
+def collect_corpus_bins(
+    filters: list[str],
+    bin_root: Path,
+    repo_root: Path,
+    cwd: Path,
+) -> tuple[list[Path], str | None]:
+    lowered = {f.strip().lower() for f in filters}
+    ethz_mode = bool(lowered & ETHZ_FILTER_ALIASES)
+    hotspot_mode = bool(lowered & HOTSPOT_FILTER_ALIASES)
+    slice_mode = bool(lowered & SLICE_FILTER_ALIASES)
+
+    if sum(1 for mode in (ethz_mode, hotspot_mode, slice_mode) if mode) > 1:
+        raise ValueError("--filter ethz, --filter hotspot, and --filter slice are mutually exclusive")
+
+    if ethz_mode:
+        corpus_root = bin_root / "ETHZ_v6"
+        order = read_mdla6_ethz_order(repo_root)
+        ordered_bins: list[Path] = []
+        seen: set[Path] = set()
+        for stem in order:
+            path = (corpus_root / f"{stem}.bin").resolve()
+            if path.exists() and path.is_file() and path not in seen:
+                ordered_bins.append(path)
+                seen.add(path)
+
+        if not ordered_bins:
+            ordered_bins = sorted(corpus_root.glob("*.bin"), key=lambda p: str(p))
+
+        extra_filters = [
+            f for f in filters
+            if f.strip().lower() not in ETHZ_FILTER_ALIASES and f.strip()
+        ]
+        if extra_filters:
+            kept: list[Path] = []
+            for path in ordered_bins:
+                rel = display(path, repo_root)
+                for pattern in extra_filters:
+                    if has_glob(pattern):
+                        if path.match(pattern) or Path(rel).match(pattern):
+                            kept.append(path)
+                            break
+                    elif pattern in path.stem or pattern in rel:
+                        kept.append(path)
+                        break
+            ordered_bins = kept
+        return ordered_bins, "ETHZ_v6 (MDLA6 small-pattern order)"
+
+    if hotspot_mode:
+        corpus_root = bin_root / "Hotspot"
+        extra_filters = [
+            f for f in filters
+            if f.strip().lower() not in HOTSPOT_FILTER_ALIASES and f.strip()
+        ]
+        if extra_filters:
+            bins = collect_bins(extra_filters, corpus_root, repo_root, cwd)
+        else:
+            bins = sorted(corpus_root.glob("*.bin"), key=lambda p: str(p))
+        return bins, "Hotspot"
+
+    if slice_mode:
+        corpus_root = bin_root / "ETHZ_v6_slice"
+        extra_filters = [
+            f for f in filters
+            if f.strip().lower() not in SLICE_FILTER_ALIASES and f.strip()
+        ]
+        if extra_filters:
+            bins = collect_bins(extra_filters, corpus_root, repo_root, cwd)
+        else:
+            bins = sorted(corpus_root.glob("*.bin"), key=lambda p: str(p))
+        return bins, "ETHZ_v6_slice"
+
+    return collect_bins(filters, bin_root, repo_root, cwd), None
+
+
 def latest_source_mtime(synth_dir: Path) -> float:
     mtimes = [
         p.stat().st_mtime
@@ -315,13 +421,7 @@ def parse_verilog_ms(output: str) -> float | None:
 
 
 def load_synth_ms(program: Path, profile_root: Path) -> float | None:
-    stem = program.stem
-    candidates = [
-        profile_root / f"{stem}.profile.json",
-        profile_root / f"{stem}.synth.profile.json",
-        profile_root / f"{stem}.mesh.profile.json",
-    ]
-    for path in candidates:
+    for path in profile_candidates(program, profile_root):
         if not path.exists() or path.name.startswith("._"):
             continue
         try:
@@ -339,13 +439,81 @@ def load_synth_ms(program: Path, profile_root: Path) -> float | None:
     return None
 
 
-def profile_path_for(program: Path, profile_root: Path) -> Path | None:
+def profile_candidates(program: Path, profile_root: Path) -> list[Path]:
     stem = program.stem
-    for suffix in (".profile.json", ".synth.profile.json", ".mesh.profile.json"):
-        path = profile_root / f"{stem}{suffix}"
+    return [
+        profile_root / f"{stem}.profile.json",
+        profile_root / f"{stem}.synth.profile.json",
+        profile_root / f"{stem}.mesh.profile.json",
+        program.with_suffix(".profile.json"),
+        program.with_suffix(".synth.profile.json"),
+        program.with_suffix(".mesh.profile.json"),
+    ]
+
+
+def profile_path_for(program: Path, profile_root: Path) -> Path | None:
+    for path in profile_candidates(program, profile_root):
         if path.exists() and not path.name.startswith("._"):
             return path
     return None
+
+
+def ensure_systemc_profile(
+    program: Path,
+    args: argparse.Namespace,
+    repo_root: Path,
+) -> Path | None:
+    existing = profile_path_for(program, args.profile_root)
+    if existing is not None or args.no_auto_profile:
+        return existing
+
+    if not args.model_runner.exists():
+        print(
+            "[run_mdla7_verilog] WARN: missing SystemC runner; cannot auto-generate profile: "
+            f"{display(args.model_runner, repo_root)}"
+        )
+        return None
+
+    cmd = [
+        str(args.model_runner),
+        str(program),
+        "--quiet",
+        f"--L1={args.profile_l1}",
+        f"--engine={args.profile_engine}",
+    ]
+    if args.show_profile_output:
+        print(
+            "[run_mdla7_verilog] profile: missing; generating "
+            f"{program.stem} with --L1={args.profile_l1} --engine={args.profile_engine}"
+        )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=args.profile_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[run_mdla7_verilog] WARN: profile generation timeout after "
+            f"{args.profile_timeout:.1f}s for {program.name}"
+        )
+        return None
+
+    if proc.returncode != 0:
+        reason = first_failure_line(proc.stdout or "")
+        if not reason:
+            reason = f"exit {proc.returncode}"
+        print(f"[run_mdla7_verilog] WARN: profile generation failed for {program.name}: {reason}")
+        if args.show_profile_output and proc.stdout:
+            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+        return None
+
+    if args.show_profile_output and proc.stdout:
+        print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    return profile_path_for(program, args.profile_root)
 
 
 def write_timing_sidecar(program: Path, profile_root: Path, timing_root: Path) -> Path | None:
@@ -418,7 +586,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--filter",
         nargs="+",
         default=["*.bin"],
-        help="Bin glob(s). Plain patterns search recursively under rtl/bin. Default: *.bin",
+        help=(
+            "Bin glob(s), or corpus aliases: ethz/ethz_v6 for rtl/bin/ETHZ_v6 "
+            "in MDLA6 small-pattern order, hotspot for rtl/bin/Hotspot, "
+            "slice for rtl/bin/ETHZ_v6_slice. "
+            "Plain patterns search recursively under rtl/bin. Default: *.bin"
+        ),
     )
     parser.add_argument(
         "--bin-root",
@@ -521,6 +694,40 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Profile directory used by --compare-synth-verilog. Default: batch/output",
     )
     parser.add_argument(
+        "--model-runner",
+        type=Path,
+        default=repo_root / "systemc" / "build" / "mdla7_model_runner",
+        help="SystemC runner used to auto-generate missing compare profiles.",
+    )
+    parser.add_argument(
+        "--profile-l1",
+        default="synth",
+        choices=("fast", "rtl", "synth"),
+        help="L1 mode used when auto-generating missing profiles. Default: synth",
+    )
+    parser.add_argument(
+        "--profile-engine",
+        default="synth",
+        choices=("fast", "rtl", "synth"),
+        help="Engine mode used when auto-generating missing profiles. Default: synth",
+    )
+    parser.add_argument(
+        "--profile-timeout",
+        type=float,
+        default=900.0,
+        help="Timeout in seconds for each auto-generated SystemC profile. Default: 900",
+    )
+    parser.add_argument(
+        "--no-auto-profile",
+        action="store_true",
+        help="Do not auto-run the SystemC runner when compare profiles are missing.",
+    )
+    parser.add_argument(
+        "--show-profile-output",
+        action="store_true",
+        help="Print raw SystemC runner output when auto-generating profiles.",
+    )
+    parser.add_argument(
         "--no-profile-timing",
         action="store_true",
         help="Do not pass profile-guided per-layer timing sidecars to Verilog.",
@@ -547,6 +754,7 @@ def main(argv: list[str]) -> int:
     args.bin_root = args.bin_root.resolve()
     args.obj_dir = args.obj_dir.resolve()
     args.profile_root = args.profile_root.resolve()
+    args.model_runner = args.model_runner.resolve()
     if args.sim is None:
         args.sim = args.obj_dir / "VTestbench"
     else:
@@ -557,12 +765,18 @@ def main(argv: list[str]) -> int:
     if args.verilator != Path("verilator"):
         args.verilator = args.verilator.resolve()
 
-    bins = collect_bins(args.filter, args.bin_root, repo_root, Path.cwd())
+    try:
+        bins, corpus_label = collect_corpus_bins(args.filter, args.bin_root, repo_root, Path.cwd())
+    except ValueError as exc:
+        print(f"[run_mdla7_verilog] ERROR: {exc}", file=sys.stderr)
+        return 2
     if args.limit > 0:
         bins = bins[: args.limit]
 
     print(f"[run_mdla7_verilog] host: {host_label} ({system} {arch})")
     print(f"[run_mdla7_verilog] bin_root: {display(args.bin_root, repo_root)}")
+    if corpus_label:
+        print(f"[run_mdla7_verilog] corpus: {corpus_label}")
     print(f"[run_mdla7_verilog] obj_dir: {display(args.obj_dir, repo_root)}")
     print(f"[run_mdla7_verilog] simulator: {display(args.sim, repo_root)}")
     if args.compare_synth_verilog:
@@ -661,6 +875,8 @@ def main(argv: list[str]) -> int:
         rel_program = display(program, repo_root)
         if not args.compare_synth_verilog:
             print(f"[run_mdla7_verilog] RUN {idx}/{len(bins)} {rel_program}")
+        if args.compare_synth_verilog:
+            ensure_systemc_profile(program, args, repo_root)
         timing_file = None
         if args.compare_synth_verilog and not args.no_profile_timing:
             timing_file = write_timing_sidecar(program, args.profile_root, timing_root)

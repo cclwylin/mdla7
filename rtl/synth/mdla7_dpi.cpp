@@ -444,6 +444,75 @@ std::vector<uint8_t> compute_tnps_meta(const Program& p, const Layer& L, bool tr
     return out;
 }
 
+std::vector<uint8_t> compute_depth_to_space(const Program& p, const Layer& L) {
+    std::vector<uint8_t> out(L.ref_size);
+    if (!region_ok(p, L.in_off, L.in_size))
+        return out;
+    const uint32_t H = L.in_h, W = L.in_w, Cin = L.in_c;
+    const uint32_t OH = L.out_h, OW = L.out_w, Cout = L.out_c;
+    const uint32_t block = L.k_h ? L.k_h : ((H && OH % H == 0) ? (OH / H) : 0);
+    const uint32_t elem = uint32_t(elem_bytes(L.dtype));
+    if (!H || !W || !Cin || !OH || !OW || !Cout || !block ||
+        OH != H * block || OW != W * block || Cin != Cout * block * block)
+        return compute_copy(p, L);
+    if (uint64_t(H) * W * Cin * elem != L.in_size ||
+        uint64_t(OH) * OW * Cout * elem != L.ref_size)
+        return compute_copy(p, L);
+
+    const uint8_t* src = p.bytes.data() + L.in_off;
+    for (uint32_t ih = 0; ih < H; ++ih) {
+        for (uint32_t iw = 0; iw < W; ++iw) {
+            for (uint32_t ic = 0; ic < Cin; ++ic) {
+                const uint32_t q = ic / Cout;
+                const uint32_t oc = ic % Cout;
+                const uint32_t bh = q / block;
+                const uint32_t bw = q % block;
+                const uint32_t oh = ih * block + bh;
+                const uint32_t ow = iw * block + bw;
+                const uint64_t src_off = uint64_t(index3(ih, iw, ic, W, Cin)) * elem;
+                const uint64_t dst_off = uint64_t(index3(oh, ow, oc, OW, Cout)) * elem;
+                std::memcpy(out.data() + dst_off, src + src_off, elem);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<uint8_t> compute_space_to_depth(const Program& p, const Layer& L) {
+    std::vector<uint8_t> out(L.ref_size);
+    if (!region_ok(p, L.in_off, L.in_size))
+        return out;
+    const uint32_t H = L.in_h, W = L.in_w, Cin = L.in_c;
+    const uint32_t OH = L.out_h, OW = L.out_w, Cout = L.out_c;
+    const uint32_t block = L.k_h ? L.k_h : ((OH && H % OH == 0) ? (H / OH) : 0);
+    const uint32_t elem = uint32_t(elem_bytes(L.dtype));
+    if (!H || !W || !Cin || !OH || !OW || !Cout || !block ||
+        H != OH * block || W != OW * block || Cout != Cin * block * block)
+        return compute_copy(p, L);
+    if (uint64_t(H) * W * Cin * elem != L.in_size ||
+        uint64_t(OH) * OW * Cout * elem != L.ref_size)
+        return compute_copy(p, L);
+
+    const uint8_t* src = p.bytes.data() + L.in_off;
+    for (uint32_t oh = 0; oh < OH; ++oh) {
+        for (uint32_t ow = 0; ow < OW; ++ow) {
+            for (uint32_t bh = 0; bh < block; ++bh) {
+                for (uint32_t bw = 0; bw < block; ++bw) {
+                    for (uint32_t ic = 0; ic < Cin; ++ic) {
+                        const uint32_t ih = oh * block + bh;
+                        const uint32_t iw = ow * block + bw;
+                        const uint32_t oc = (bh * block + bw) * Cin + ic;
+                        const uint64_t src_off = uint64_t(index3(ih, iw, ic, W, Cin)) * elem;
+                        const uint64_t dst_off = uint64_t(index3(oh, ow, oc, OW, Cout)) * elem;
+                        std::memcpy(out.data() + dst_off, src + src_off, elem);
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 std::vector<uint8_t> compute_ewe_int(const Program& p, const Layer& L) {
     std::vector<uint8_t> out(L.ref_size);
     if (L.wgt_size < 48 || !region_ok(p, L.in_off, L.in_size) ||
@@ -828,6 +897,10 @@ std::vector<uint8_t> compute_layer(const Program& p, const Layer& L) {
         return is_fp_dtype(L.dtype) ? compute_unary_fp(p, L) : compute_materialize(p, L);
     case OK_TRANSPOSE:
         return L.wgt_size ? compute_tnps_meta(p, L, true) : compute_copy(p, L);
+    case OK_D2SPACE:
+        return compute_depth_to_space(p, L);
+    case OK_S2SPACE:
+        return compute_space_to_depth(p, L);
     case OK_SLICE:
     case OK_STRIDED_SLICE:
     case OK_SPLIT:
