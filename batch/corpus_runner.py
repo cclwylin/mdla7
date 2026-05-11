@@ -117,7 +117,11 @@ def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
 
 
 def _ms_cell(value: str) -> str:
-    return f"{float(value):>10.3f} ms" if value else f"{'—':>10s}    "
+    return f"{float(value):>8.2f} ms" if value else f"{'—':>8s}    "
+
+
+def _ratio_cell(value: str) -> str:
+    return f"{float(value):>6.2f}" if value else f"{'':>6s}"
 
 
 def _ms_value_cell(value: str | float | None) -> str:
@@ -524,8 +528,8 @@ def run_corpus(*,
                            f"cx={_ms_cell(cached_filled.get('cx_ms', ''))} "
                            f"fast={_ms_cell(cached.get('fast_ms', ''))} "
                            f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
-                           f"rtl/fast={cached_filled.get('rtl_over_fast', ''):>8s} "
-                           f"rtl/cx={cached_filled.get('rtl_over_cx', ''):>8s} cached  "
+                           f"rtl/fast={_ratio_cell(cached_filled.get('rtl_over_fast', ''))} "
+                           f"rtl/cx={_ratio_cell(cached_filled.get('rtl_over_cx', ''))} cached  "
                            f"{cached.get('status', 'ok')}")
                 rows_out.append(cached_filled)
                 _checkpoint_compare(rows_out)
@@ -563,10 +567,10 @@ def run_corpus(*,
             elapsed = time.time() - t0
             display_pat = _fit_cell(pat)
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
-                       f"cx={f'{cx_ms:>10.3f} ms' if cx_ms is not None else f'{chr(8212):>10s}    '} "
-                       f"fast={f'{fast_ms:>10.3f} ms' if fast_ms is not None else f'{chr(8212):>10s}    '} "
-                       f"rtl={f'{rtl_ms:>10.3f} ms' if rtl_ms is not None else f'{chr(8212):>10s}    '} "
-                       f"rtl/fast={rtl_fast or '':>8s} rtl/cx={rtl_cx or '':>8s}  "
+                       f"cx={f'{cx_ms:>8.2f} ms' if cx_ms is not None else f'{chr(8212):>8s}    '} "
+                       f"fast={f'{fast_ms:>8.2f} ms' if fast_ms is not None else f'{chr(8212):>8s}    '} "
+                       f"rtl={f'{rtl_ms:>8.2f} ms' if rtl_ms is not None else f'{chr(8212):>8s}    '} "
+                       f"rtl/fast={_ratio_cell(rtl_fast)} rtl/cx={_ratio_cell(rtl_cx)}  "
                        f"({elapsed:5.1f}s)  {status}")
             row = {
                 "pattern": pat,
@@ -697,11 +701,11 @@ def run_corpus(*,
             pat, model_dir, progress=_progress, fast_only=args.fast_only,
             skip_html=args.no_html, engine_model=args.engine_model)
         elapsed = time.time() - t0
-        ms_str = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
-        conflict_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
-                        else f"{'—':>10s}    ")
-        mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
-                    else f"{'—':>10s}    ")
+        ms_str = f"{ms:>8.2f} ms" if ms is not None else f"{'—':>8s}    "
+        conflict_str = (f"{conflict_ms:>8.2f} ms" if conflict_ms is not None
+                        else f"{'—':>8s}    ")
+        mesh_str = (f"{mesh_ms:>8.2f} ms" if mesh_ms is not None
+                    else f"{'—':>8s}    ")
         model_suffix = "" if args.engine_model == "model" else f"/{args.engine_model}"
         suffix = ((status + model_suffix) if args.fast_only
                   else f"{status}/{conflict_status}/{mesh_status}{model_suffix}")
