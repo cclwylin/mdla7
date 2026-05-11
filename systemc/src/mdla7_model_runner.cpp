@@ -11060,15 +11060,16 @@ int sc_main(int argc, char* argv[]) {
         const char* name;
         uint64_t busy;
         const std::vector<std::pair<uint64_t, uint64_t>>* tasks;
+        const std::vector<std::vector<std::pair<std::string, uint64_t>>>* rtl_phases = nullptr;
     };
     EngStat engines[] = {
         {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read},
         {"udma_w",  cyc(sys.udma   .busy_time_write), &sys.udma   .tasks_write},
         {"conv",    cyc(sys.conv   .busy_time),       &sys.conv   .tasks},
         {"requant", cyc(sys.requant.busy_time),       &sys.requant.tasks},
-        {"ewe",     cyc(sys.ewe    .busy_time),       &sys.ewe    .tasks},
-        {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks},
-        {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks},
+        {"ewe",     cyc(sys.ewe    .busy_time),       &sys.ewe    .tasks, &sys.ewe .rtl_phase_tasks},
+        {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks, &sys.pool.rtl_phase_tasks},
+        {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks, &sys.tnps.rtl_phase_tasks},
     };
     // v7.1: aggregate engine utilization (sum-busy / (N_lanes * total_cycles)).
     // v8.4: 6 lanes now (udma_r/udma_w split).
@@ -11232,6 +11233,22 @@ int sc_main(int argc, char* argv[]) {
             for (size_t j = 0; j < tk.size(); ++j) {
                 pf << "[" << tk[j].first << "," << tk[j].second << "]";
                 if (j+1 < tk.size()) pf << ",";
+            }
+            if (engines[i].rtl_phases && !engines[i].rtl_phases->empty()) {
+                pf << "], \"rtl_phases\": [";
+                const auto& phase_tasks = *engines[i].rtl_phases;
+                for (size_t j = 0; j < tk.size(); ++j) {
+                    pf << "[";
+                    if (j < phase_tasks.size()) {
+                        const auto& phases = phase_tasks[j];
+                        for (size_t k = 0; k < phases.size(); ++k) {
+                            pf << "[\"" << phases[k].first << "\"," << phases[k].second << "]";
+                            if (k + 1 < phases.size()) pf << ",";
+                        }
+                    }
+                    pf << "]";
+                    if (j + 1 < tk.size()) pf << ",";
+                }
             }
             pf << "]}" << (i+1 < NE ? "," : "") << "\n";
         }

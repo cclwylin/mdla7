@@ -727,9 +727,10 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             return "ewe/pool/tnps"
         return engine
 
-    def _decorate_task_meta(engine: str, tasks: list) -> list:
+    def _decorate_task_meta(engine: str, tasks: list, rtl_phases: list | None = None) -> list:
         metas = list(task_meta.get(engine) or [])
-        if not metas:
+        phases = list(rtl_phases or [])
+        if not metas and not phases:
             return tasks
         out = []
         for idx, raw in enumerate(tasks):
@@ -737,7 +738,9 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             if len(t) < 2:
                 out.append(t)
                 continue
-            meta = metas[idx] if idx < len(metas) else {}
+            meta = dict(metas[idx]) if idx < len(metas) and isinstance(metas[idx], dict) else {}
+            if idx < len(phases) and phases[idx]:
+                meta["rtl_phases"] = phases[idx]
             layer_raw = meta.get("layer", -1)
             layer_idx = int(layer_raw if layer_raw is not None else -1)
             mb = int(meta.get("mb", 0) or 0)
@@ -777,15 +780,16 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     conv_wait_tasks = []
     for name, e in engines.items():
         tasks = list(e.get("tasks") or [])
+        rtl_phases = list(e.get("rtl_phases") or [])
         if name == "udma_r":
             tasks = _annotate_udma_read_tasks(tasks)
-            tasks = _decorate_task_meta(name, tasks)
+            tasks = _decorate_task_meta(name, tasks, rtl_phases)
             conv_wait_tasks = _conv_wait_tasks_from_udma(tasks)
         elif name == "udma_w":
             tasks = _annotate_udma_write_tasks(tasks)
-            tasks = _decorate_task_meta(name, tasks)
+            tasks = _decorate_task_meta(name, tasks, rtl_phases)
         else:
-            tasks = _decorate_task_meta(name, tasks)
+            tasks = _decorate_task_meta(name, tasks, rtl_phases)
         eng_payload[name] = {
             "busy": int(e.get("busy_cycles", 0) or 0),
             "tasks": tasks,
@@ -1359,6 +1363,16 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     const v = n / CYCLES_PER_MS;
     return (v >= 0 ? '+' : '-') + Math.abs(v).toFixed(6);
   }}
+  function taskMeta(task) {{
+    const m = task && task.length ? task[task.length - 1] : null;
+    return m && typeof m === 'object' && !Array.isArray(m) ? m : null;
+  }}
+  function rtlPhaseText(task) {{
+    const m = taskMeta(task);
+    const phases = m && Array.isArray(m.rtl_phases) ? m.rtl_phases : null;
+    if (!phases || !phases.length) return '';
+    return phases.map(p => `${{p[0]}}:${{fmt(+p[1] || 0)}}`).join('  ');
+  }}
   function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
   function esc(s) {{
     return String(s).replace(/[&<>"']/g, ch => ({{
@@ -1407,11 +1421,12 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         const w = Math.max(1, x1 - x0);
         const label = task.length > 2 ? String(task[2]) : '';
         const bytes = task.length > 3 ? String(task[3]) : '';
+        const phases = rtlPhaseText(task);
         const eng = task.length > 4 ? String(task[4]) : name;
         const color = ENG_COLORS[eng] || '#777';
         bars += `<rect class="gantt-task micro-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
               + `fill="${{color}}" data-eng="micro ${{name}} / ${{eng}}" data-s="${{s}}" data-e="${{e}}" `
-              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}"/>`;
+              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}" data-phases="${{esc(phases)}}"/>`;
         if (w >= Math.min(160, label.length * 6 + 8)) {{
           bars += `<text x="${{x0 + 4}}" y="${{yy + hh/2 + 4}}" font-size="10" fill="#111" pointer-events="none">${{esc(label)}}</text>`;
         }}
@@ -1526,9 +1541,10 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         const w  = Math.max(1, x1 - x0);
         const label = task.length > 2 ? String(task[2]) : '';
         const bytes = task.length > 3 ? String(task[3]) : '';
+        const phases = rtlPhaseText(task);
         bars += `<rect class="gantt-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
               + `fill="${{color}}" data-eng="${{name}}" data-s="${{s}}" data-e="${{e}}" `
-              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}"/>`;
+              + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}" data-phases="${{esc(phases)}}"/>`;
       }}
     }});
     const convLaneIdx = eng_names.indexOf('conv');
@@ -1745,10 +1761,12 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       const e = +t.getAttribute('data-e');
       const label = t.getAttribute('data-label') || '';
       const bytes = +(t.getAttribute('data-bytes') || 0);
+      const phases = t.getAttribute('data-phases') || '';
       let text = `${{t.getAttribute('data-eng')}}`;
       if (label) text += `\\n${{label}}`;
       text += `\\n${{fmt(s)}} → ${{fmt(e)}} cyc\\nΔ ${{fmt(e - s)}} cyc`;
       if (bytes) text += `\\n${{(bytes / 1024).toFixed(1)}} KB`;
+      if (phases) text += `\\nrtl phases: ${{phases}}`;
       tip.textContent = text;
       tip.style.left = (ev.pageX + 12) + 'px';
       tip.style.top  = (ev.pageY + 12) + 'px';

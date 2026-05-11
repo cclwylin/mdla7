@@ -59,6 +59,7 @@ SC_MODULE(EweEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
+    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -535,6 +536,9 @@ SC_MODULE(EweEngine) {
             busy_time += t_end - t_begin;
             tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
                                uint64_t(t_end  .to_seconds() * 1e9));
+            rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                      ? last_rtl_phases
+                                      : std::vector<std::pair<std::string, uint64_t>>{});
             done_tag_out.write(0);
         }
     }
@@ -556,6 +560,7 @@ SC_MODULE(PoolEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
+    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -750,6 +755,9 @@ SC_MODULE(PoolEngine) {
                 busy_time += t_end - t_begin;
                 tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
                                    uint64_t(t_end  .to_seconds() * 1e9));
+                rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                          ? last_rtl_phases
+                                          : std::vector<std::pair<std::string, uint64_t>>{});
                 done_tag_out.write(0);
                 continue;
             }
@@ -770,6 +778,9 @@ SC_MODULE(PoolEngine) {
             busy_time += t_end - t_begin;
             tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
                                uint64_t(t_end  .to_seconds() * 1e9));
+            rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                      ? last_rtl_phases
+                                      : std::vector<std::pair<std::string, uint64_t>>{});
             done_tag_out.write(0);
         }
     }

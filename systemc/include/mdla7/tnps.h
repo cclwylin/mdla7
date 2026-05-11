@@ -24,6 +24,7 @@ SC_MODULE(TnpsEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
+    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
     EngineModel engine_model = EngineModel::Analytical;
     sc_core::sc_time task_begin{sc_core::SC_ZERO_TIME};
 
@@ -58,6 +59,9 @@ SC_MODULE(TnpsEngine) {
             busy_time += t_end - t_begin;
             tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
                                uint64_t(t_end.to_seconds() * 1e9));
+            rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                      ? last_rtl_phases
+                                      : std::vector<std::pair<std::string, uint64_t>>{});
             done_tag_out.write(0);
         }
     }
