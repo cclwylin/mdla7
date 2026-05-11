@@ -439,9 +439,16 @@ def load_synth_ms(program: Path, profile_root: Path) -> float | None:
     return None
 
 
+def profile_dir_for(program: Path) -> Path:
+    return program.parent / "profile"
+
+
 def profile_candidates(program: Path, profile_root: Path) -> list[Path]:
     stem = program.stem
     return [
+        profile_dir_for(program) / f"{stem}.profile.json",
+        profile_dir_for(program) / f"{stem}.synth.profile.json",
+        profile_dir_for(program) / f"{stem}.mesh.profile.json",
         profile_root / f"{stem}.profile.json",
         profile_root / f"{stem}.synth.profile.json",
         profile_root / f"{stem}.mesh.profile.json",
@@ -449,6 +456,27 @@ def profile_candidates(program: Path, profile_root: Path) -> list[Path]:
         program.with_suffix(".synth.profile.json"),
         program.with_suffix(".mesh.profile.json"),
     ]
+
+
+def move_program_profiles_to_profile_dir(program: Path) -> None:
+    profile_dir = profile_dir_for(program)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    for suffix in (
+        ".profile.json",
+        ".profile.csv",
+        ".synth.profile.json",
+        ".synth.profile.csv",
+        ".mesh.profile.json",
+        ".mesh.profile.csv",
+    ):
+        src = program.with_suffix(suffix)
+        if not src.exists() or src.name.startswith("._"):
+            continue
+        dst = profile_dir / src.name
+        if dst.exists():
+            src.unlink()
+        else:
+            src.rename(dst)
 
 
 def profile_path_for(program: Path, profile_root: Path) -> Path | None:
@@ -513,6 +541,7 @@ def ensure_systemc_profile(
 
     if args.show_profile_output and proc.stdout:
         print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    move_program_profiles_to_profile_dir(program)
     return profile_path_for(program, args.profile_root)
 
 
@@ -683,8 +712,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help=(
             "Print a quiet synth-vs-Verilog comparison table. Synth ms is read "
-            "from batch/output/<bin-stem>.profile.json when available; Verilog "
-            "ms is parsed from the Verilator simulation report."
+            "from <bin-dir>/profile/<bin-stem>.profile.json when available; "
+            "Verilog ms is parsed from the Verilator simulation report."
         ),
     )
     parser.add_argument(
