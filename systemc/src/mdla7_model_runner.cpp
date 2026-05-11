@@ -1036,13 +1036,17 @@ int sc_main(int argc, char* argv[]) {
     bool     fuse_prev_single_tile  = false;
     bool     fuse_prev_is_conv_class = false;
     bool     fuse_prev_is_binary_ewe = false;
+    bool     fuse_prev_is_logistic_ewe = false;
     uint32_t fuse_prev_live_a_addr = 0, fuse_prev_live_a_size = 0;
     uint32_t fuse_prev_live_b_addr = 0, fuse_prev_live_b_size = 0;
     uint32_t fuse_prev_live_o_addr = 0, fuse_prev_live_o_size = 0;
+    uint32_t fuse_prev_logistic_input_addr = 0, fuse_prev_logistic_input_size = 0;
     std::vector<uint8_t> fuse_prev_mb_done_tags;
     auto clear_prev_binary_ewe_live = [&]() {
         fuse_prev_is_binary_ewe = false;
+        fuse_prev_is_logistic_ewe = false;
         fuse_prev_live_a_size = fuse_prev_live_b_size = fuse_prev_live_o_size = 0;
+        fuse_prev_logistic_input_size = 0;
         fuse_prev_mb_done_tags.clear();
     };
 
@@ -7008,6 +7012,31 @@ int sc_main(int argc, char* argv[]) {
                 if (layer_idx == 0) return false;
                 return graph_input0_is_exact_producer(layer_idx - 1, layer_idx);
             };
+        auto logistic_input_feeds_next_mul =
+            [&](uint32_t layer_idx) -> bool {
+                if (!graph_metas || layer_idx + 1 >= N) return false;
+                const auto& U = metas[layer_idx];
+                const auto& M = metas[layer_idx + 1];
+                if (U.op_kind != OK_LOGISTIC || M.op_kind != OK_MUL)
+                    return false;
+                const auto& GU = graph_metas[layer_idx];
+                const auto& GM = graph_metas[layer_idx + 1];
+                if (GU.consumer_count != 1 ||
+                    GU.first_consumer_layer != int32_t(layer_idx + 1) ||
+                    GU.last_consumer_layer  != int32_t(layer_idx + 1))
+                    return false;
+                const bool sigmoid_is_a =
+                    GM.input0_tensor == GU.output_tensor &&
+                    GM.producer0_layer == int32_t(layer_idx) &&
+                    GM.input1_tensor >= 0 &&
+                    GM.input1_tensor == GU.input0_tensor;
+                const bool sigmoid_is_b =
+                    GM.input1_tensor == GU.output_tensor &&
+                    GM.producer1_layer == int32_t(layer_idx) &&
+                    GM.input0_tensor >= 0 &&
+                    GM.input0_tensor == GU.input0_tensor;
+                return sigmoid_is_a || sigmoid_is_b;
+            };
 
         struct ChannelSliceTail {
             bool valid = false;
@@ -9036,25 +9065,58 @@ int sc_main(int argc, char* argv[]) {
                 && fuse_prev_out_w == L.in_w
                 && fuse_prev_out_c == L.in_c;
             bool fused_this_layer = false;
+            const bool keep_logistic_input_for_next_mul =
+                fuse_eligible && logistic_input_feeds_next_mul(i);
             uint32_t L1_PARAMS = 0;
             uint32_t L1_IN     = align64(L.wgt_size);
             uint32_t L1_OUT    = align64(L1_IN + L.in_size);
             if (fuse_eligible) {
                 const uint32_t in_lo = fuse_prev_l1_out_addr;
                 const uint32_t in_hi = fuse_prev_l1_out_addr + fuse_prev_l1_out_size;
-                if (L.wgt_size + 4096 <= in_lo) {
-                    L1_PARAMS = 0;
-                    fused_this_layer = true;
+                if (keep_logistic_input_for_next_mul) {
+                    std::set<uint32_t> params_candidates;
+                    std::set<uint32_t> out_candidates;
+                    params_candidates.insert(0);
+                    params_candidates.insert(align64(in_hi));
+                    out_candidates.insert(0);
+                    out_candidates.insert(align64(in_hi));
+                    auto range_available = [&](uint32_t addr, uint32_t bytes) -> bool {
+                        return uint64_t(addr) + bytes + 4096 <= L1_BUDGET &&
+                               !ranges_overlap(addr, bytes, in_lo, fuse_prev_l1_out_size);
+                    };
+                    for (uint32_t params_cand : params_candidates) {
+                        if (!range_available(params_cand, L.wgt_size))
+                            continue;
+                        out_candidates.insert(align64(params_cand + L.wgt_size));
+                        for (uint32_t out_cand : out_candidates) {
+                            if (!range_available(out_cand, L.ref_size))
+                                continue;
+                            if (ranges_overlap(out_cand, L.ref_size, params_cand, L.wgt_size))
+                                continue;
+                            L1_PARAMS = params_cand;
+                            L1_OUT = out_cand;
+                            fused_this_layer = true;
+                            break;
+                        }
+                        if (fused_this_layer)
+                            break;
+                    }
                 } else {
-                    const uint32_t par_hi = align64(in_hi);
-                    if (uint64_t(par_hi) + L.wgt_size + 4096 <= L1_BUDGET) {
-                        L1_PARAMS = par_hi;
+                    if (L.wgt_size + 4096 <= in_lo) {
+                        L1_PARAMS = 0;
                         fused_this_layer = true;
+                    } else {
+                        const uint32_t par_hi = align64(in_hi);
+                        if (uint64_t(par_hi) + L.wgt_size + 4096 <= L1_BUDGET) {
+                            L1_PARAMS = par_hi;
+                            fused_this_layer = true;
+                        }
                     }
                 }
                 if (fused_this_layer) {
                     L1_IN = fuse_prev_l1_out_addr;
-                    L1_OUT = L1_IN;       // unary FP path reads full input before writing output.
+                    if (!keep_logistic_input_for_next_mul)
+                        L1_OUT = L1_IN;   // unary FP path reads full input before writing output.
                 }
             }
             if (pending.active) {
@@ -9118,6 +9180,15 @@ int sc_main(int argc, char* argv[]) {
                 fuse_prev_single_tile   = true;
                 fuse_prev_is_conv_class = true;
                 clear_prev_binary_ewe_live();
+                if (keep_logistic_input_for_next_mul && fused_this_layer) {
+                    fuse_prev_is_logistic_ewe = true;
+                    fuse_prev_logistic_input_addr = L1_IN;
+                    fuse_prev_logistic_input_size = L.in_size;
+                    fuse_prev_live_a_addr = L1_IN;
+                    fuse_prev_live_a_size = L.in_size;
+                    fuse_prev_live_o_addr = L1_OUT;
+                    fuse_prev_live_o_size = L.ref_size;
+                }
                 chain_alt = (L1_OUT == 0) ? 1 : 0;
             } else {
                 const uint32_t elem_size = (L.dtype == DT_FP16 || L.dtype == DT_BFP16
@@ -9319,15 +9390,22 @@ int sc_main(int argc, char* argv[]) {
                 }
                 if (ok) fused_this_layer = true;
             }
+            const bool swish_live_reuse_possible =
+                L.op_kind == OK_MUL &&
+                i > 0 &&
+                metas[i - 1].op_kind == OK_LOGISTIC &&
+                fuse_prev_is_logistic_ewe &&
+                logistic_input_feeds_next_mul(i - 1) &&
+                fuse_prev_logistic_input_size == L.in_size;
             if (pending.active) {
-                if (fused_this_layer) {
+                if (fused_this_layer || swish_live_reuse_possible) {
                     udma_w_skipped[pending.layer_idx] = true;
                     pending.active = false;
                 } else {
                     flush_pending();
                 }
             }
-            if (fused_this_layer && i > 0)
+            if ((fused_this_layer || swish_live_reuse_possible) && i > 0)
                 mark_flow_edge(i - 1, i);
             // v8.22: try non-fused single-tile layout first; if input-A +
             // input-B + output don't all fit in 2 MB L1, fall through to the
@@ -9358,6 +9436,110 @@ int sc_main(int argc, char* argv[]) {
                 transformer_attention_matrix;
             if (force_fused_binary_wavefront || force_streamed_binary_wavefront) {
                 tile_mode = true;
+            }
+            if (swish_live_reuse_possible) {
+                const uint32_t L1_SIG = fuse_prev_l1_out_addr;
+                const uint32_t L1_X = fuse_prev_logistic_input_addr;
+                const uint32_t params_bytes = 48;
+                const uint32_t b_payload = (L.wgt_size >= params_bytes)
+                                         ? (L.wgt_size - params_bytes) : 0;
+                bool placed = false;
+                std::set<uint32_t> params_candidates;
+                std::set<uint32_t> out_candidates;
+                auto add_candidate_after = [&](std::set<uint32_t>& cands,
+                                               uint32_t addr, uint32_t size) {
+                    cands.insert(align64(addr + size));
+                };
+                params_candidates.insert(0);
+                add_candidate_after(params_candidates, L1_SIG, L.in_size);
+                add_candidate_after(params_candidates, L1_X, L.in_size);
+                out_candidates.insert(0);
+                add_candidate_after(out_candidates, L1_SIG, L.in_size);
+                add_candidate_after(out_candidates, L1_X, L.in_size);
+                auto free_for = [&](uint32_t addr, uint32_t size) -> bool {
+                    return uint64_t(addr) + size + 4096 <= L1_BUDGET &&
+                           !ranges_overlap(addr, size, L1_SIG, L.in_size) &&
+                           !ranges_overlap(addr, size, L1_X, L.in_size);
+                };
+                for (uint32_t params_cand : params_candidates) {
+                    if (!free_for(params_cand, params_bytes))
+                        continue;
+                    out_candidates.insert(align64(params_cand + params_bytes));
+                    for (uint32_t out_cand : out_candidates) {
+                        if (!free_for(out_cand, L.ref_size))
+                            continue;
+                        if (ranges_overlap(out_cand, L.ref_size, params_cand, params_bytes))
+                            continue;
+                        L1_WGT = params_cand;
+                        L1_OUT = out_cand;
+                        placed = true;
+                        break;
+                    }
+                    if (placed)
+                        break;
+                }
+
+                if (placed) {
+                    const bool sigmoid_is_a =
+                        graph_metas &&
+                        graph_metas[i].input0_tensor == graph_metas[i - 1].output_tensor;
+                    const uint32_t ewe_a = sigmoid_is_a ? L1_SIG : L1_X;
+                    const uint32_t ewe_b = sigmoid_is_a ? L1_X : L1_SIG;
+                    const uint8_t params_tag = alloc_tag();
+                    const uint8_t req_tag = alloc_tag();
+                    const uint8_t st_tag = alloc_tag();
+                    Descriptor pd = make_udma(L.dram_wgt + b_payload, L1_WGT,
+                                              params_bytes,
+                                              /*dir*/ 0, params_tag,
+                                              prev_l1_hazard_tag);
+                    program.push_back(pd);
+                    acc[i].dram_r += params_bytes;
+                    acc[i].sram_w += params_bytes;
+                    program.push_back(make_ewe_add(L, ewe_a, ewe_b, L1_OUT, L1_WGT,
+                                                   params_tag, fuse_prev_done_tag, req_tag));
+                    acc[i].sram_r += uint64_t(L.in_size) * 2 + params_bytes;
+                    acc[i].sram_w += L.ref_size;
+
+                    if (suppress_producer_store) {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
+                        const uint8_t barrier_tag = alloc_tag();
+                        program.push_back(make_store_barrier(i, L1_OUT, L.dram_out,
+                                                             barrier_tag, req_tag));
+                        acc[i].sram_r += 1;
+                        acc[i].dram_w += 1;
+                        layer_done_tag[i] = barrier_tag;
+                    } else {
+                        Descriptor wd = make_udma(L1_OUT, L.dram_out, L.ref_size,
+                                                  /*dir*/ 1, st_tag, req_tag);
+                        pending.active    = true;
+                        pending.desc      = wd;
+                        pending.bytes     = L.ref_size;
+                        pending.layer_idx = i;
+                        layer_done_tag[i] = st_tag;
+                    }
+
+                    fuse_prev_l1_out_addr   = L1_OUT;
+                    fuse_prev_l1_out_size   = L.ref_size;
+                    fuse_prev_done_tag      = req_tag;
+                    fuse_prev_out_h         = L.out_h;
+                    fuse_prev_out_w         = L.out_w;
+                    fuse_prev_out_c         = L.out_c;
+                    fuse_prev_dtype         = L.dtype;
+                    fuse_prev_single_tile   = true;
+                    fuse_prev_is_conv_class = true;
+                    fuse_prev_is_binary_ewe = true;
+                    fuse_prev_is_logistic_ewe = false;
+                    fuse_prev_live_a_addr   = ewe_a;
+                    fuse_prev_live_a_size   = L.in_size;
+                    fuse_prev_live_b_addr   = ewe_b;
+                    fuse_prev_live_b_size   = L.in_size;
+                    fuse_prev_live_o_addr   = L1_OUT;
+                    fuse_prev_live_o_size   = L.ref_size;
+                    fuse_prev_mb_done_tags.clear();
+                    chain_alt = 0;
+                    break;
+                }
             }
             if (tile_mode) {
                 // ---- v8.22/v8.31: tiled binary EWE ----
@@ -10216,6 +10398,8 @@ int sc_main(int argc, char* argv[]) {
         // v8.13: reset fusion state for any op that can't be a fusion source.
         // v8.20: ADD / POOL also produce single-tile L1-resident outputs and
         // set fuse_prev_* explicitly inside their cases — don't clobber them.
+        // LOGISTIC can additionally keep its input live for the following
+        // swish MUL, so preserve the explicit state from its case.
         // RESHAPE / CONCAT / GATHER / SOFTMAX go to DRAM directly → reset.
         const bool keep_layout_view_source =
             producer_no_store[i] &&
@@ -10225,7 +10409,8 @@ int sc_main(int argc, char* argv[]) {
         if (!keep_layout_view_source &&
             L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC
             && L.op_kind != OK_ADD && L.op_kind != OK_MUL && L.op_kind != OK_SUB
-            && L.op_kind != OK_AVG_POOL && L.op_kind != OK_MAX_POOL) {
+            && L.op_kind != OK_AVG_POOL && L.op_kind != OK_MAX_POOL
+            && L.op_kind != OK_LOGISTIC) {
             fuse_prev_is_conv_class = false;
             fuse_prev_single_tile   = false;
             fuse_prev_l1_out_size   = 0;
