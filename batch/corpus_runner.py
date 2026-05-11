@@ -155,7 +155,7 @@ def _load_cx_ms(csv_path: Path | None) -> dict[str, float]:
     return out
 
 
-def _fit_cell(value: str, width: int = 54) -> str:
+def _fit_cell(value: str, width: int = 30) -> str:
     if len(value) <= width:
         return f"{value:<{width}s}"
     keep = width - 1
