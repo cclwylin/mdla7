@@ -8837,22 +8837,46 @@ int sc_main(int argc, char* argv[]) {
                 const uint32_t elem_size = (L.dtype == DT_FP16 || L.dtype == DT_BFP16
                                          || L.dtype == DT_FP8) ? 2u : 1u;
                 const uint64_t safety = 4096;
-                const uint64_t budget = (uint64_t(L1_BUDGET) > align64(L.wgt_size) + safety)
-                                      ? (L1_BUDGET - align64(L.wgt_size) - safety) : 0;
-                uint64_t tile_elems = budget / (2 * elem_size);
+                const uint64_t fixed = align64(L.wgt_size);
+                const uint64_t budget = (uint64_t(L1_BUDGET) > fixed + safety)
+                                      ? (L1_BUDGET - fixed - safety) : 0;
+                uint64_t tile_elems = budget / (4 * elem_size);
                 if (tile_elems > 65535) tile_elems = 65535;
                 if (tile_elems < 1) {
                     std::cerr << "layer " << i << ": "
                               << (L.op_kind == OK_GELU ? "gelu"
                                   : (L.op_kind == OK_LOGISTIC ? "logistic" : "hard_swish"))
-                              << " no room for one tiled element\n";
+                              << " no room for one double-buffered tiled element\n";
+                    return 4;
+                }
+                auto slot_top = [&](uint64_t bytes) -> uint64_t {
+                    const uint32_t in0  = uint32_t(fixed);
+                    const uint32_t out0 = align64(in0 + uint32_t(bytes));
+                    const uint32_t in1  = align64(out0 + uint32_t(bytes));
+                    const uint32_t out1 = align64(in1 + uint32_t(bytes));
+                    return uint64_t(out1) + bytes;
+                };
+                while (tile_elems > 1 && slot_top(uint64_t(tile_elems) * elem_size) + safety > L1_BUDGET)
+                    tile_elems /= 2;
+                if (slot_top(uint64_t(tile_elems) * elem_size) + safety > L1_BUDGET) {
+                    std::cerr << "layer " << i << ": "
+                              << (L.op_kind == OK_GELU ? "gelu"
+                                  : (L.op_kind == OK_LOGISTIC ? "logistic" : "hard_swish"))
+                              << " no room for double-buffered tiled IO\n";
                     return 4;
                 }
                 const uint32_t tile_bytes_max = uint32_t(tile_elems * elem_size);
-                const uint32_t L1_IN_t  = align64(L.wgt_size);
-                const uint32_t L1_OUT_t = align64(L1_IN_t + tile_bytes_max);
+                const uint32_t L1_IN_t[2] = {
+                    uint32_t(fixed),
+                    align64(align64(uint32_t(fixed) + tile_bytes_max) + tile_bytes_max)
+                };
+                const uint32_t L1_OUT_t[2] = {
+                    align64(uint32_t(fixed) + tile_bytes_max),
+                    align64(L1_IN_t[1] + tile_bytes_max)
+                };
                 const uint64_t total_elems = uint64_t(L.in_h) * L.in_w * L.in_c;
                 uint8_t prev_st_tag = 0;
+                uint8_t slot_done[2] = {0, 0};
                 uint64_t elem_done = 0;
                 uint16_t mb_id = 0;
                 while (elem_done < total_elems) {
@@ -8870,9 +8894,10 @@ int sc_main(int argc, char* argv[]) {
                     mb.rows = 1;
                     mb.elems = uint32_t(this_elems);
                     mb.bytes = uint32_t(tile_bytes);
+                    const uint8_t slot = mb.slot;
                     auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_off),
-                                                       L1_IN_t, uint32_t(tile_bytes),
-                                                       in_tag, prev_st_tag);
+                                                       L1_IN_t[slot], uint32_t(tile_bytes),
+                                                       in_tag, slot_done[slot]);
                     mark_stream(id, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(id);
                     LayerMeta tile_L = L;
@@ -8882,7 +8907,7 @@ int sc_main(int argc, char* argv[]) {
                     tile_L.out_h = 1;
                     tile_L.out_w = 1;
                     tile_L.out_c = uint16_t(this_elems);
-                    Descriptor ed = make_ewe_unary(tile_L, L1_IN_t, L1_OUT_t, L1_PARAMS,
+                    Descriptor ed = make_ewe_unary(tile_L, L1_IN_t[slot], L1_OUT_t[slot], L1_PARAMS,
                                                    in_tag, req_tag, pa_tag);
                     mark_stream(ed, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(ed);
@@ -8891,14 +8916,16 @@ int sc_main(int argc, char* argv[]) {
                     acc[i].sram_r += 2 * tile_bytes;
                     if (producer_no_store[i]) {
                         prev_st_tag = req_tag;
+                        slot_done[slot] = req_tag;
                     } else {
-                        Descriptor sd = make_udma(L1_OUT_t, uint32_t(L.dram_out + dram_off),
+                        Descriptor sd = make_udma(L1_OUT_t[slot], uint32_t(L.dram_out + dram_off),
                                                   uint32_t(tile_bytes),
                                                   /*dir*/ 1, st_tag, req_tag);
                         mark_stream(sd, i, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(sd);
                         acc[i].dram_w += tile_bytes;
                         prev_st_tag = st_tag;
+                        slot_done[slot] = st_tag;
                     }
                     elem_done += this_elems;
                     ++mb_id;
@@ -8907,7 +8934,7 @@ int sc_main(int argc, char* argv[]) {
                     udma_w_skipped[i] = true;
                     udma_w_streamed[i] = true;
                     const uint8_t barrier_tag = alloc_tag();
-                    program.push_back(make_store_barrier(i, L1_OUT_t, L.dram_out,
+                    program.push_back(make_store_barrier(i, L1_OUT_t[uint8_t((mb_id - 1) & 1u)], L.dram_out,
                                                          barrier_tag, prev_st_tag));
                     acc[i].sram_r += 1;
                     acc[i].dram_w += 1;
