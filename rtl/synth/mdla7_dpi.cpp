@@ -164,6 +164,10 @@ uint16_t rdu16p(const uint8_t* p) {
     return uint16_t(p[0] | (uint16_t(p[1]) << 8));
 }
 
+int16_t rdi16p(const uint8_t* p) {
+    return int16_t(rdu16p(p));
+}
+
 void wr16(std::vector<uint8_t>& out, size_t off, uint16_t v) {
     out[off] = uint8_t(v & 0xffu);
     out[off + 1] = uint8_t((v >> 8) & 0xffu);
@@ -242,8 +246,12 @@ bool is_fp_dtype(uint16_t dt) {
     return dt == DT_FP8 || dt == DT_FP16 || dt == DT_BFP16;
 }
 
+bool is_int16_dtype(uint16_t dt) {
+    return dt == DT_INT16x4 || dt == DT_INT16x8 || dt == DT_INT16x16;
+}
+
 int elem_bytes(uint16_t dt) {
-    return is_fp_dtype(dt) || dt == DT_INT16x4 || dt == DT_INT16x8 || dt == DT_INT16x16 ? 2 : 1;
+    return is_fp_dtype(dt) || is_int16_dtype(dt) ? 2 : 1;
 }
 
 float fp16_to_fp32(uint16_t h) {
@@ -520,9 +528,12 @@ std::vector<uint8_t> compute_ewe_int(const Program& p, const Layer& L) {
         return out;
     const uint8_t* a = p.bytes.data() + L.in_off;
     const uint8_t* w = p.bytes.data() + L.wgt_off;
-    const uint32_t elems = L.ref_size;
+    const uint32_t elem = uint32_t(elem_bytes(L.dtype));
+    if (elem == 0 || (L.ref_size % elem) != 0)
+        return out;
+    const uint32_t elems = L.ref_size / elem;
     const uint32_t b_size = L.wgt_size - 48;
-    if (L.in_size < elems || b_size < elems)
+    if (L.in_size < elems * elem || b_size < elems * elem)
         return out;
     const uint8_t* b = w;
     const uint8_t* prm = w + b_size;
@@ -538,12 +549,17 @@ std::vector<uint8_t> compute_ewe_int(const Program& p, const Layer& L) {
     const int32_t left_shift = rdi32p(prm + 36);
     const int32_t act_min = rdi32p(prm + 40);
     const int32_t act_max = rdi32p(prm + 44);
+
+    const bool int16 = is_int16_dtype(L.dtype);
     for (uint32_t i = 0; i < elems; ++i) {
-        const int32_t av = int32_t(int8_t(a[i]));
-        const int32_t bv = int32_t(int8_t(b[i]));
+        const int32_t av = int16 ? int32_t(rdi16p(a + uint64_t(i) * elem))
+                                 : int32_t(int8_t(a[i]));
+        const int32_t bv = int16 ? int32_t(rdi16p(b + uint64_t(i) * elem))
+                                 : int32_t(int8_t(b[i]));
         int32_t v = 0;
         if (L.op_kind == OK_MUL) {
-            v = mbqm((av - zp_a) * (bv - zp_b), mult_o, shift_o) + zp_o;
+            int64_t raw64 = int64_t(av - zp_a) * int64_t(bv - zp_b);
+            v = mbqm(clamp_i32(raw64), mult_o, shift_o) + zp_o;
         } else {
             const int32_t aa = int32_t(uint32_t(av - zp_a) << uint32_t(left_shift));
             const int32_t bb = int32_t(uint32_t(bv - zp_b) << uint32_t(left_shift));
@@ -553,7 +569,10 @@ std::vector<uint8_t> compute_ewe_int(const Program& p, const Layer& L) {
             v = mbqm(clamp_i32(raw64), mult_o, shift_o) + zp_o;
         }
         v = std::min(std::max(v, act_min), act_max);
-        out[i] = uint8_t(int8_t(v));
+        if (int16)
+            wr16(out, uint64_t(i) * elem, uint16_t(int16_t(v)));
+        else
+            out[i] = uint8_t(int8_t(v));
     }
     return out;
 }
@@ -695,6 +714,10 @@ std::vector<uint8_t> compute_pool(const Program& p, const Layer& L) {
     const uint32_t sh = L.s_h ? L.s_h : 1;
     const uint32_t sw = L.s_w ? L.s_w : 1;
     const bool fp = is_fp_dtype(L.dtype);
+    const bool int16 = is_int16_dtype(L.dtype);
+    if (uint64_t(H) * W * C * eb > L.in_size ||
+        uint64_t(OH) * OW * C * eb != L.ref_size)
+        return out;
     for (uint32_t oh = 0; oh < OH; ++oh) {
         for (uint32_t ow = 0; ow < OW; ++ow) {
             for (uint32_t c = 0; c < C; ++c) {
@@ -745,6 +768,32 @@ std::vector<uint8_t> compute_pool(const Program& p, const Layer& L) {
                         v = std::min(std::max(v, -128), 127);
                     }
                     out[out_i] = uint8_t(int8_t(v));
+                } else if (int16) {
+                    int best = -32768;
+                    int64_t sum = 0;
+                    int n = 0;
+                    for (uint32_t kh = 0; kh < Kh; ++kh) {
+                        const int ih = int(oh * sh + kh) - int(L.p_t);
+                        if (ih < 0 || ih >= int(H))
+                            continue;
+                        for (uint32_t kw = 0; kw < Kw; ++kw) {
+                            const int iw = int(ow * sw + kw) - int(L.p_l);
+                            if (iw < 0 || iw >= int(W))
+                                continue;
+                            const int v = int(rdi16p(in + uint64_t(index3(ih, iw, c, W, C)) * 2ull));
+                            best = std::max(best, v);
+                            sum += v;
+                            ++n;
+                        }
+                    }
+                    int v = best;
+                    if (L.op_kind != OK_MAX_POOL) {
+                        const int div = n ? n : 1;
+                        const int64_t q = (sum >= 0) ? (sum + div / 2) / div
+                                                     : -((-sum + div / 2) / div);
+                        v = int(std::min<int64_t>(std::max<int64_t>(q, -32768), 32767));
+                    }
+                    wr16(out, out_i * 2ull, uint16_t(int16_t(v)));
                 }
             }
         }
@@ -818,7 +867,15 @@ std::vector<uint8_t> compute_conv_int(const Program& p, const Layer& L) {
     const uint32_t group = L.group ? L.group : 1;
     const uint32_t in_per_group = Cin / group;
     const uint32_t out_per_group = OC / group;
-    const uint64_t wgt_bytes = uint64_t(OC) * Kh * Kw * in_per_group;
+    const bool int16_out = (L.dtype == DT_INT16x16 || L.dtype == DT_INT16x8);
+    const bool int16_wgt = (L.dtype == DT_INT16x16);
+    const uint32_t act_elem = int16_out ? 2u : 1u;
+    const uint32_t out_elem = int16_out ? 2u : 1u;
+    const uint32_t wgt_elem = int16_wgt ? 2u : 1u;
+    if (uint64_t(H) * W * Cin * act_elem > L.in_size ||
+        uint64_t(OH) * OW * OC * out_elem != L.ref_size)
+        return out;
+    const uint64_t wgt_bytes = uint64_t(OC) * Kh * Kw * in_per_group * wgt_elem;
     const uint64_t min_params = 12ull + uint64_t(OC) * 4ull + OC + uint64_t(OC) * 4ull;
     if (wgt_bytes + min_params > L.wgt_size)
         return out;
@@ -848,11 +905,14 @@ std::vector<uint8_t> compute_conv_int(const Program& p, const Layer& L) {
                             int av = L.zp_in_eff;
                             if (ih >= 0 && ih < int(H) && iw >= 0 && iw < int(W)) {
                                 const uint32_t ic = g * in_per_group + icr;
-                                av = int(int8_t(in[index3(ih, iw, ic, W, Cin)]));
+                                const uint64_t ai = uint64_t(index3(ih, iw, ic, W, Cin)) * act_elem;
+                                av = int16_out ? int(rdi16p(in + ai))
+                                               : int(int8_t(in[ai]));
                             }
                             const uint64_t wi = (((uint64_t(oc) * Kh + kh) * Kw + kw) *
-                                                 in_per_group + icr);
-                            const int wv = int(int8_t(wgt[wi]));
+                                                 in_per_group + icr) * wgt_elem;
+                            const int wv = int16_wgt ? int(rdi16p(wgt + wi))
+                                                     : int(int8_t(wgt[wi]));
                             acc += int64_t(av) * wv;
                         }
                     }
@@ -869,7 +929,11 @@ std::vector<uint8_t> compute_conv_int(const Program& p, const Layer& L) {
                 int32_t v = mbqm(acc32, rdi32p(mult_p + oc * 4), int8_t(shift_p[oc]));
                 v += zp_out;
                 v = std::min(std::max(v, act_min), act_max);
-                out[index3(oh, ow, oc, OW, OC)] = uint8_t(int8_t(v));
+                const uint64_t oi = uint64_t(index3(oh, ow, oc, OW, OC)) * out_elem;
+                if (int16_out)
+                    wr16(out, oi, uint16_t(int16_t(v)));
+                else
+                    out[oi] = uint8_t(int8_t(v));
             }
         }
     }

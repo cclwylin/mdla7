@@ -1,7 +1,8 @@
-# MDLA7 Synth RTL Shells
+# MDLA7 Verilog Ctrl RTL Shells
 
-This directory contains synthesizable Verilog control/latency shells for the
-SystemC `--engine=synth --L1=synth` blocks:
+This directory is the `verilog_ctrl` simulator path. It contains synthesizable
+Verilog control/latency shells for the SystemC `--engine=synth --L1=synth`
+blocks:
 
 - `command.v`
 - `conv.v`
@@ -60,15 +61,12 @@ Override it with:
 vvp /tmp/mdla7_system_tb.vvp +PROGRAM=rtl/bin/Hotspot/swin_quant_L298_L319.bin
 ```
 
-The checked-in testbench validates both microblock control dispatch and
-functional datapath results. `host.v` reads each layer's fast-model reference
-bytes from the program image, computes an FNV-1a checksum, and compares it with
-the checksum produced on the final microblock store descriptor. Earlier
-load/compute descriptors carry `ref_size=0`, so they exercise control without
-re-running the full-layer DPI compare. The engine checksum is computed from the
-layer's real input/weight/parameter bytes. `OP_MATERIALIZE` remains the
-compiler's pre-materialized-output fallback. Synthesis builds see a stable
-file-I/O-free stub around the DPI-only simulation core.
+The checked-in testbench validates microblock control dispatch and compares
+functional datapath CRCs against the fast-model reference. In `verilog_ctrl`,
+the CRC-producing datapath is still a Verilator DPI-C helper, not true Verilog
+arithmetic RTL. Earlier load/compute descriptors carry `ref_size=0`, so they
+exercise control without re-running the full-layer DPI compare. The future
+full Verilog datapath work belongs under `rtl/verilog_final`.
 
 Regenerate Hotspot bins:
 
@@ -97,7 +95,7 @@ iverilog -g2012 -Wall -I rtl/synth -o /tmp/mdla7_system_tb.vvp -f rtl/synth/file
 Verilator batch smoke over the compiled bins:
 
 ```sh
-rtl/batch/run_mdla7_verilog.py --filter '*.bin' --require-host-load --timeout 300
+rtl/batch/run_verilog_ctrl.py --filter '*.bin' --require-host-load --timeout 300
 ```
 
 The Verilator object directory is `rtl/obj_dir`; `rtl/verilator` is only used as

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run the MDLA7 Verilog control-path testbench over compiled .bin programs."""
+"""Run MDLA7 Verilog simulator variants over compiled .bin programs.
+
+Simulator version:
+  verilog_ctrl  - control/timing shell with DPI-C golden datapath CRC checking.
+
+Separate simulator version:
+  verilog_final - full Verilog datapath implementation.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +31,9 @@ SIM_FINISH_RE = re.compile(
     re.IGNORECASE,
 )
 VERILOG_CYCLES_RE = re.compile(r"VERILOG_CYCLES:\s*([0-9]+)")
+VERILOG_CTRL_VERSION = "verilog_ctrl"
+VERILOG_FINAL_VERSION = "verilog_final"
+CACHE_VERSION = 1
 ETHZ_FILTER_ALIASES = {"ethz", "ethz_v6", "ethz-v6"}
 HOTSPOT_FILTER_ALIASES = {"hotspot"}
 SLICE_FILTER_ALIASES = {"slice", "ethz_slice", "ethz-v6-slice", "ethz_v6_slice"}
@@ -81,7 +91,7 @@ def host_info() -> tuple[str, str, str]:
 def validate_host(system: str, arch: str) -> bool:
     if system == "Darwin" and arch not in ("x86_64", "arm64"):
         print(
-            f"[run_mdla7_verilog] ERROR: unsupported macOS architecture: {arch}",
+            f"[run_verilog_ctrl] ERROR: unsupported macOS architecture: {arch}",
             file=sys.stderr,
         )
         return False
@@ -283,6 +293,23 @@ def collect_corpus_bins(
     return collect_bins(filters, bin_root, repo_root, cwd), None
 
 
+def matches_filter(path: Path, pattern: str, repo_root: Path) -> bool:
+    rel = display(path, repo_root)
+    if has_glob(pattern):
+        return path.match(pattern) or Path(rel).match(pattern)
+    return pattern in path.name or pattern in path.stem or pattern in rel
+
+
+def apply_excludes(bins: list[Path], excludes: list[str], repo_root: Path) -> list[Path]:
+    patterns = [p.strip() for p in excludes if p.strip()]
+    if not patterns:
+        return bins
+    return [
+        path for path in bins
+        if not any(matches_filter(path, pattern, repo_root) for pattern in patterns)
+    ]
+
+
 def latest_source_mtime(synth_dir: Path) -> float:
     mtimes = [
         p.stat().st_mtime
@@ -293,6 +320,65 @@ def latest_source_mtime(synth_dir: Path) -> float:
     if filelist.exists():
         mtimes.append(filelist.stat().st_mtime)
     return max(mtimes) if mtimes else 0.0
+
+
+def latest_source_mtime_ns(synth_dir: Path) -> int:
+    mtimes = [
+        p.stat().st_mtime_ns
+        for pattern in ("*.v", "*.sv", "*.cpp", "*.cc", "*.h", "*.hpp")
+        for p in synth_dir.glob(pattern)
+    ]
+    filelist = synth_dir / "filelist_system_tb.f"
+    if filelist.exists():
+        mtimes.append(filelist.stat().st_mtime_ns)
+    return max(mtimes) if mtimes else 0
+
+
+def file_signature(path: Path) -> dict[str, int | str]:
+    st = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+    }
+
+
+def load_cache(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": CACHE_VERSION, "entries": {}}
+    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
+        return {"version": CACHE_VERSION, "entries": {}}
+    if not isinstance(data.get("entries"), dict):
+        data["entries"] = {}
+    return data
+
+
+def save_cache(path: Path, cache: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def cache_hit(
+    entry: object,
+    program: Path,
+    runner_mtime_ns: int,
+    source_mtime_ns: int,
+) -> dict[str, object] | None:
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("status") != "PASS":
+        return None
+    if entry.get("program_sig") != file_signature(program):
+        return None
+    if entry.get("runner_mtime_ns") != runner_mtime_ns:
+        return None
+    if entry.get("source_mtime_ns") != source_mtime_ns:
+        return None
+    return entry
 
 
 def find_cxx_stdlib_include() -> Path | None:
@@ -346,7 +432,7 @@ def build_sim(args: argparse.Namespace, rtl_dir: Path, synth_dir: Path) -> tuple
     if cxx_stdlib_include is not None:
         cmd.extend(["-CFLAGS", f"-isystem {cxx_stdlib_include}"])
         if args.verbose_build:
-            print(f"[run_mdla7_verilog] cxx_stdlib_include: {cxx_stdlib_include}")
+            print(f"[run_verilog_ctrl] cxx_stdlib_include: {cxx_stdlib_include}")
 
     cmd.extend([
         f"-I{synth_dir}",
@@ -357,7 +443,7 @@ def build_sim(args: argparse.Namespace, rtl_dir: Path, synth_dir: Path) -> tuple
     if dpi_cpp.exists():
         cmd.append(str(dpi_cpp))
         if args.verbose_build:
-            print(f"[run_mdla7_verilog] dpi_cpp: {dpi_cpp}")
+            print(f"[run_verilog_ctrl] dpi_cpp: {dpi_cpp}")
     cmd.extend([
         "--top-module",
         args.top,
@@ -365,7 +451,7 @@ def build_sim(args: argparse.Namespace, rtl_dir: Path, synth_dir: Path) -> tuple
         str(args.obj_dir),
     ])
     if args.verbose_build:
-        print("[run_mdla7_verilog] build: " + " ".join(cmd))
+        print("[run_verilog_ctrl] build: " + " ".join(cmd))
     proc = subprocess.run(
         cmd,
         cwd=rtl_dir.parent,
@@ -497,7 +583,7 @@ def ensure_systemc_profile(
 
     if not args.model_runner.exists():
         print(
-            "[run_mdla7_verilog] WARN: missing SystemC runner; cannot auto-generate profile: "
+            "[run_verilog_ctrl] WARN: missing SystemC runner; cannot auto-generate profile: "
             f"{display(args.model_runner, repo_root)}"
         )
         return None
@@ -511,7 +597,7 @@ def ensure_systemc_profile(
     ]
     if args.show_profile_output:
         print(
-            "[run_mdla7_verilog] profile: missing; generating "
+            "[run_verilog_ctrl] profile: missing; generating "
             f"{program.stem} with --L1={args.profile_l1} --engine={args.profile_engine}"
         )
     try:
@@ -525,7 +611,7 @@ def ensure_systemc_profile(
         )
     except subprocess.TimeoutExpired:
         print(
-            f"[run_mdla7_verilog] WARN: profile generation timeout after "
+            f"[run_verilog_ctrl] WARN: profile generation timeout after "
             f"{args.profile_timeout:.1f}s for {program.name}"
         )
         return None
@@ -534,7 +620,7 @@ def ensure_systemc_profile(
         reason = first_failure_line(proc.stdout or "")
         if not reason:
             reason = f"exit {proc.returncode}"
-        print(f"[run_mdla7_verilog] WARN: profile generation failed for {program.name}: {reason}")
+        print(f"[run_verilog_ctrl] WARN: profile generation failed for {program.name}: {reason}")
         if args.show_profile_output and proc.stdout:
             print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
         return None
@@ -623,6 +709,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Exclude matched .bin files by substring or glob, e.g. --exclude yolo_v8_quant.bin.",
+    )
+    parser.add_argument(
+        "--rerun-all",
+        action="store_true",
+        help="Ignore cached PASS results and rerun every matched .bin.",
+    )
+    parser.add_argument(
+        "--cache-file",
+        type=Path,
+        default=rtl_dir / "obj" / "verilog_ctrl" / "cache.json",
+        help="Regression cache JSON. Default: rtl/obj/verilog_ctrl/cache.json",
+    )
+    parser.add_argument(
         "--bin-root",
         type=Path,
         default=rtl_dir / "bin",
@@ -686,8 +789,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Timeout per .bin in seconds. Default: 30, or 300 with "
-            "--compare-synth-verilog."
+            "Timeout per .bin in seconds. Default: 300 because "
+            "synth-vs-verilog_ctrl compare mode is enabled by default."
         ),
     )
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N matched .bin files.")
@@ -708,19 +811,44 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Do not check the simulator binary architecture before running.",
     )
     parser.add_argument(
-        "--compare-synth-verilog",
+        "--compare-synth-verilog_ctrl",
+        dest="compare_synth_verilog_ctrl",
         action="store_true",
         help=(
-            "Print a quiet synth-vs-Verilog comparison table. Synth ms is read "
+            "Print a quiet synth-vs-verilog_ctrl comparison table. Synth ms is read "
             "from <bin-dir>/profile/<bin-stem>.profile.json when available; "
-            "Verilog ms is parsed from the Verilator simulation report."
+            "verilog_ctrl ms is parsed from the Verilator simulation report."
+        ),
+    )
+    parser.add_argument(
+        "--no-compare-synth-verilog_ctrl",
+        dest="compare_synth_verilog_ctrl",
+        action="store_false",
+        help="Disable the default quiet synth-vs-verilog_ctrl comparison table.",
+    )
+    parser.add_argument(
+        "--compare-synth-verilog_final",
+        dest="compare_synth_verilog_final",
+        action="store_true",
+        help=(
+            "Reserved for the future synth-vs-verilog_final comparison using "
+            "the full Verilog datapath simulator."
+        ),
+    )
+    parser.add_argument(
+        "--sim-version",
+        default=VERILOG_CTRL_VERSION,
+        choices=(VERILOG_CTRL_VERSION, VERILOG_FINAL_VERSION),
+        help=(
+            "Simulator version name. Current RTL testbench implements verilog_ctrl; "
+            "verilog_final is reserved for the future full datapath simulator."
         ),
     )
     parser.add_argument(
         "--profile-root",
         type=Path,
         default=repo_root / "batch" / "output",
-        help="Profile directory used by --compare-synth-verilog. Default: batch/output",
+        help="Profile directory used by compare modes. Default: batch/output",
     )
     parser.add_argument(
         "--model-runner",
@@ -766,6 +894,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Print raw Verilator simulation output for each run.",
     )
+    parser.set_defaults(compare_synth_verilog_ctrl=True)
     return parser.parse_args(argv)
 
 
@@ -773,8 +902,26 @@ def main(argv: list[str]) -> int:
     repo_root, rtl_dir = repo_paths()
     synth_dir = rtl_dir / "synth"
     args = parse_args(argv)
+    if args.compare_synth_verilog_ctrl and args.compare_synth_verilog_final:
+        print(
+            "[run_verilog_ctrl] ERROR: choose only one compare mode: "
+            "--compare-synth-verilog_ctrl or --compare-synth-verilog_final",
+            file=sys.stderr,
+        )
+        return 2
+    if args.compare_synth_verilog_final:
+        args.sim_version = VERILOG_FINAL_VERSION
+    compare_mode = args.compare_synth_verilog_ctrl or args.compare_synth_verilog_final
     if args.timeout is None:
-        args.timeout = 300.0 if args.compare_synth_verilog else 30.0
+        args.timeout = 300.0 if compare_mode else 30.0
+    if args.sim_version != VERILOG_CTRL_VERSION:
+        print(
+            f"[run_verilog_ctrl] ERROR: {args.sim_version} is reserved for the "
+            "future full datapath simulator; this runner currently implements "
+            f"{VERILOG_CTRL_VERSION}.",
+            file=sys.stderr,
+        )
+        return 2
     system, arch, host_label = host_info()
     if not validate_host(system, arch):
         return 2
@@ -784,6 +931,7 @@ def main(argv: list[str]) -> int:
     args.obj_dir = args.obj_dir.resolve()
     args.profile_root = args.profile_root.resolve()
     args.model_runner = args.model_runner.resolve()
+    args.cache_file = args.cache_file.resolve()
     if args.sim is None:
         args.sim = args.obj_dir / "VTestbench"
     else:
@@ -797,23 +945,31 @@ def main(argv: list[str]) -> int:
     try:
         bins, corpus_label = collect_corpus_bins(args.filter, args.bin_root, repo_root, Path.cwd())
     except ValueError as exc:
-        print(f"[run_mdla7_verilog] ERROR: {exc}", file=sys.stderr)
+        print(f"[run_verilog_ctrl] ERROR: {exc}", file=sys.stderr)
         return 2
+    before_exclude = len(bins)
+    bins = apply_excludes(bins, args.exclude, repo_root)
     if args.limit > 0:
         bins = bins[: args.limit]
 
-    print(f"[run_mdla7_verilog] host: {host_label} ({system} {arch})")
-    print(f"[run_mdla7_verilog] bin_root: {display(args.bin_root, repo_root)}")
+    print(f"[run_verilog_ctrl] host: {host_label} ({system} {arch})")
+    print(f"[run_verilog_ctrl] bin_root: {display(args.bin_root, repo_root)}")
     if corpus_label:
-        print(f"[run_mdla7_verilog] corpus: {corpus_label}")
-    print(f"[run_mdla7_verilog] obj_dir: {display(args.obj_dir, repo_root)}")
-    print(f"[run_mdla7_verilog] simulator: {display(args.sim, repo_root)}")
-    if args.compare_synth_verilog:
-        print(f"[run_mdla7_verilog] profile_root: {display(args.profile_root, repo_root)}")
-    print(f"[run_mdla7_verilog] matched: {len(bins)}")
+        print(f"[run_verilog_ctrl] corpus: {corpus_label}")
+    print(f"[run_verilog_ctrl] obj_dir: {display(args.obj_dir, repo_root)}")
+    print(f"[run_verilog_ctrl] simulator: {display(args.sim, repo_root)}")
+    print(f"[run_verilog_ctrl] sim_version: {args.sim_version}")
+    print(f"[run_verilog_ctrl] cache: {display(args.cache_file, repo_root)}")
+    if args.rerun_all:
+        print("[run_verilog_ctrl] cache_mode: rerun-all")
+    if compare_mode:
+        print(f"[run_verilog_ctrl] profile_root: {display(args.profile_root, repo_root)}")
+    if args.exclude:
+        print(f"[run_verilog_ctrl] excluded: {before_exclude - len(bins)}")
+    print(f"[run_verilog_ctrl] matched: {len(bins)}")
 
     if not bins:
-        print("[run_mdla7_verilog] ERROR: no .bin files matched --filter", file=sys.stderr)
+        print("[run_verilog_ctrl] ERROR: no .bin files matched --filter", file=sys.stderr)
         return 2
 
     if args.list:
@@ -833,16 +989,16 @@ def main(argv: list[str]) -> int:
     )
     if should_build:
         if args.build:
-            print("[run_mdla7_verilog] build_reason: forced by --build")
+            print("[run_verilog_ctrl] build_reason: forced by --build")
         elif not args.sim.exists():
-            print("[run_mdla7_verilog] build_reason: simulator missing")
+            print("[run_verilog_ctrl] build_reason: simulator missing")
         elif not arch_ok:
-            print(f"[run_mdla7_verilog] build_reason: {arch_detail}")
+            print(f"[run_verilog_ctrl] build_reason: {arch_detail}")
         build_rc, build_output = build_sim(args, rtl_dir, synth_dir)
         if build_rc != 0:
             if build_output:
                 print(build_output, end="" if build_output.endswith("\n") else "\n")
-            print(f"[run_mdla7_verilog] ERROR: build failed rc={build_rc}", file=sys.stderr)
+            print(f"[run_verilog_ctrl] ERROR: build failed rc={build_rc}", file=sys.stderr)
             return build_rc
         if args.verbose_build and build_output:
             print(build_output, end="" if build_output.endswith("\n") else "\n")
@@ -851,19 +1007,19 @@ def main(argv: list[str]) -> int:
         legacy_sim = legacy_sim_path(rtl_dir)
         if legacy_sim.exists() and args.sim == args.obj_dir / "VTestbench":
             print(
-                "[run_mdla7_verilog] NOTE: found an older simulator at "
+                "[run_verilog_ctrl] NOTE: found an older simulator at "
                 f"{display(legacy_sim, repo_root)}",
                 file=sys.stderr,
             )
             print(
-                "[run_mdla7_verilog] To move generated output out of rtl/verilator, run:\n"
+                "[run_verilog_ctrl] To move generated output out of rtl/verilator, run:\n"
                 f"  mkdir -p {display(args.obj_dir, repo_root)} && "
                 f"cp {display(legacy_sim, repo_root)} {display(args.sim, repo_root)}",
                 file=sys.stderr,
             )
         print(
-            f"[run_mdla7_verilog] ERROR: simulator not found: {args.sim}\n"
-            "[run_mdla7_verilog] Hint: run with --build after the C++ toolchain is fixed, "
+            f"[run_verilog_ctrl] ERROR: simulator not found: {args.sim}\n"
+            "[run_verilog_ctrl] Hint: run with --build after the C++ toolchain is fixed, "
             "or pass --sim <path>.",
             file=sys.stderr,
         )
@@ -872,19 +1028,21 @@ def main(argv: list[str]) -> int:
     if not args.no_arch_check:
         arch_ok, arch_detail = simulator_matches_host(args.sim, system, arch)
         if not arch_ok:
-            print(f"[run_mdla7_verilog] ERROR: {arch_detail}", file=sys.stderr)
+            print(f"[run_verilog_ctrl] ERROR: {arch_detail}", file=sys.stderr)
             print(
-                "[run_mdla7_verilog] Hint: run with --build to rebuild for this host, "
+                "[run_verilog_ctrl] Hint: run with --build to rebuild for this host, "
                 "or use --no-arch-check if you intentionally want this simulator.",
                 file=sys.stderr,
             )
             return 2
-        print(f"[run_mdla7_verilog] {arch_detail}")
+        print(f"[run_verilog_ctrl] {arch_detail}")
 
     latest_src = latest_source_mtime(synth_dir)
+    source_mtime_ns = latest_source_mtime_ns(synth_dir)
+    runner_mtime_ns = Path(__file__).resolve().stat().st_mtime_ns
     if args.sim.stat().st_mtime < latest_src:
         print(
-            "[run_mdla7_verilog] WARN: simulator is older than rtl/synth sources; "
+            "[run_verilog_ctrl] WARN: simulator is older than rtl/synth sources; "
             "use --build when the Verilator C++ toolchain is available."
         )
 
@@ -892,22 +1050,60 @@ def main(argv: list[str]) -> int:
     missing_host_load = 0
     rows: list[dict[str, object]] = []
     timing_root = args.obj_dir / "timing"
+    cache = load_cache(args.cache_file)
+    cache_entries = cache.setdefault("entries", {})
+    if not isinstance(cache_entries, dict):
+        cache_entries = {}
+        cache["entries"] = cache_entries
+    cache_hits = 0
 
-    if args.compare_synth_verilog:
+    if compare_mode:
         print(
             f"{'idx':>3}  {'program':<42} {'ans':<6} "
-            f"{'synth_ms':>10} {'verilog_ms':>11} {'v/synth':>9} {'wall_s':>8}"
+            f"{'synth_ms':>10} {'verilog_ctrl_ms':>15} {'vc/synth':>9} {'wall_s':>8}"
         )
-        print("-" * 98)
+        print("-" * 102)
 
     for idx, program in enumerate(bins, start=1):
         rel_program = display(program, repo_root)
-        if not args.compare_synth_verilog:
-            print(f"[run_mdla7_verilog] RUN {idx}/{len(bins)} {rel_program}")
-        if args.compare_synth_verilog:
+        cached = None
+        if not args.rerun_all:
+            cached = cache_hit(
+                cache_entries.get(rel_program),
+                program,
+                runner_mtime_ns,
+                source_mtime_ns,
+            )
+        if cached is not None:
+            cache_hits += 1
+            synth_ms = cached.get("synth_ms")
+            verilog_ms = cached.get("verilog_ctrl_ms")
+            synth_ms = synth_ms if isinstance(synth_ms, float) else None
+            verilog_ms = verilog_ms if isinstance(verilog_ms, float) else None
+            rows.append({
+                "program": rel_program,
+                "passed": True,
+                "synth_ms": synth_ms,
+                "verilog_ctrl_ms": verilog_ms,
+                "wall_s": 0.0,
+                "reason": "",
+                "cached": True,
+            })
+            if compare_mode:
+                print(
+                    f"{idx:>3}  {program.stem:<42} {'CACHED':<6} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
+                    f"{fmt_ratio(verilog_ms, synth_ms):>9} {0.0:>8.2f}"
+                )
+            else:
+                print(f"[run_verilog_ctrl] CACHED {rel_program}")
+            continue
+        if not compare_mode:
+            print(f"[run_verilog_ctrl] RUN {idx}/{len(bins)} {rel_program}")
+        if compare_mode:
             ensure_systemc_profile(program, args, repo_root)
         timing_file = None
-        if args.compare_synth_verilog and not args.no_profile_timing:
+        if compare_mode and not args.no_profile_timing:
             timing_file = write_timing_sidecar(program, args.profile_root, timing_root)
         rc, output, elapsed = run_one(
             args.sim,
@@ -931,82 +1127,96 @@ def main(argv: list[str]) -> int:
             missing_host_load += 1
 
         verilog_ms = parse_verilog_ms(output)
-        synth_ms = load_synth_ms(program, args.profile_root) if args.compare_synth_verilog else None
+        synth_ms = load_synth_ms(program, args.profile_root) if compare_mode else None
         reason = "" if passed else first_failure_line(output)
         rows.append({
             "program": rel_program,
             "passed": passed,
             "synth_ms": synth_ms,
-            "verilog_ms": verilog_ms,
+            "verilog_ctrl_ms": verilog_ms,
             "wall_s": elapsed,
             "reason": reason,
+            "cached": False,
         })
+        cache_entries[rel_program] = {
+            "status": "PASS" if passed else "FAIL",
+            "program_sig": file_signature(program),
+            "runner_mtime_ns": runner_mtime_ns,
+            "source_mtime_ns": source_mtime_ns,
+            "synth_ms": synth_ms,
+            "verilog_ctrl_ms": verilog_ms,
+            "wall_s": elapsed,
+            "reason": reason,
+        }
+        save_cache(args.cache_file, cache)
 
         if passed:
-            if args.compare_synth_verilog:
+            if compare_mode:
                 print(
                     f"{idx:>3}  {program.stem:<42} {'PASS':<6} "
-                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>11} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {elapsed:>8.2f}"
                 )
             else:
                 print(
-                    f"[run_mdla7_verilog] PASS {rel_program} "
+                    f"[run_verilog_ctrl] PASS {rel_program} "
                     f"(verilog_ms={fmt_ms(verilog_ms)}, wall={elapsed:.2f}s, {host_note})"
                 )
         else:
-            if args.compare_synth_verilog:
+            if compare_mode:
                 print(
                     f"{idx:>3}  {program.stem:<42} {'FAIL':<6} "
-                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>11} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {elapsed:>8.2f}"
                 )
                 if reason:
                     print(f"     reason: {reason}")
             else:
                 print(
-                    f"[run_mdla7_verilog] FAIL {rel_program} "
+                    f"[run_verilog_ctrl] FAIL {rel_program} "
                     f"(rc={rc}, verilog_ms={fmt_ms(verilog_ms)}, wall={elapsed:.2f}s, {host_note})"
                 )
                 if reason:
-                    print(f"[run_mdla7_verilog] reason: {reason}")
+                    print(f"[run_verilog_ctrl] reason: {reason}")
             failures.append(rel_program)
             if args.stop_on_fail:
                 break
 
     run_count = len(rows)
     passed_count = run_count - len(failures)
-    print(f"[run_mdla7_verilog] summary: pass={passed_count} fail={len(failures)} total={run_count}")
-    if args.compare_synth_verilog and rows:
+    print(f"[run_verilog_ctrl] summary: pass={passed_count} fail={len(failures)} total={run_count}")
+    if cache_hits:
+        print(f"[run_verilog_ctrl] cache_hits: {cache_hits}")
+    if compare_mode and rows:
         synth_total = sum(
             row["synth_ms"] for row in rows
             if isinstance(row.get("synth_ms"), float)
         )
         verilog_total = sum(
-            row["verilog_ms"] for row in rows
-            if isinstance(row.get("verilog_ms"), float)
+            row["verilog_ctrl_ms"] for row in rows
+            if isinstance(row.get("verilog_ctrl_ms"), float)
         )
         comparable = sum(
             1 for row in rows
             if isinstance(row.get("synth_ms"), float)
-            and isinstance(row.get("verilog_ms"), float)
+            and isinstance(row.get("verilog_ctrl_ms"), float)
         )
         ratio = (verilog_total / synth_total) if synth_total else None
         print(
-            "[run_mdla7_verilog] compare: "
+            "[run_verilog_ctrl] compare: "
             f"comparable={comparable}/{run_count} "
             f"synth_total_ms={fmt_ms(synth_total if synth_total else None)} "
-            f"verilog_total_ms={fmt_ms(verilog_total if verilog_total else None)} "
-            f"verilog/synth={fmt_ratio(verilog_total if verilog_total else None, synth_total if synth_total else None)}"
+            f"verilog_ctrl_total_ms={fmt_ms(verilog_total if verilog_total else None)} "
+            f"verilog_ctrl/synth={fmt_ratio(verilog_total if verilog_total else None, synth_total if synth_total else None)}"
         )
     if missing_host_load:
         print(
-            "[run_mdla7_verilog] WARN: some runs did not print HOST: loaded; "
+            "[run_verilog_ctrl] WARN: some runs did not print HOST: loaded; "
             "that usually means VTestbench was built before host.v loaded .bin files."
         )
 
     if failures:
-        print("[run_mdla7_verilog] failed programs:")
+        print("[run_verilog_ctrl] failed programs:")
         for failure in failures:
             print(f"  {failure}")
         return 1
