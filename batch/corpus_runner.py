@@ -120,6 +120,41 @@ def _ms_cell(value: str) -> str:
     return f"{float(value):>10.3f} ms" if value else f"{'—':>10s}    "
 
 
+def _ms_value_cell(value: str | float | None) -> str:
+    if value in (None, ""):
+        return ""
+    return f"{float(value):.3f}"
+
+
+def _ratio_from_ms(num: float | str | None, den: float | str | None) -> str:
+    if num is None or den in (None, 0):
+        return ""
+    if num == "" or den == "":
+        return ""
+    den_f = float(den)
+    if den_f <= 0:
+        return ""
+    return f"{float(num) / den_f:.3f}"
+
+
+def _load_cx_ms(csv_path: Path | None) -> dict[str, float]:
+    if not csv_path or not csv_path.exists():
+        return {}
+    out: dict[str, float] = {}
+    with csv_path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            pattern = row.get("Pattern") or row.get("pattern") or ""
+            pattern = _normalise_pattern(pattern.strip())
+            if not pattern:
+                continue
+            value = row.get("CX") or row.get("cx") or ""
+            try:
+                out[pattern] = float(value)
+            except ValueError:
+                continue
+    return out
+
+
 def _fit_cell(value: str, width: int = 54) -> str:
     if len(value) <= width:
         return f"{value:<{width}s}"
@@ -220,21 +255,17 @@ def _compare_report_exists_for(pattern: str, model_dir: Path) -> bool:
     return _compare_paths(model_dir / f"{canonical}.tflite")["html"].exists()
 
 
-def _ratio_cell(num: float | None, den: float | None) -> str:
-    if num is None or den is None or den <= 0:
-        return ""
-    return f"{num / den:.3f}"
-
-
 def _write_rtl_compare_html(model_path: Path,
                             fast_html: Path,
                             rtl_html: Path,
+                            cx_ms: float | None,
                             fast_ms: float | None,
                             rtl_ms: float | None,
                             fast_status: str,
                             rtl_status: str) -> Path:
     out = _compare_paths(model_path)["html"]
-    ratio = _ratio_cell(rtl_ms, fast_ms)
+    rtl_fast = _ratio_from_ms(rtl_ms, fast_ms)
+    rtl_cx = _ratio_from_ms(rtl_ms, cx_ms)
     fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
     rtl_doc = rtl_html.read_text(errors="ignore") if rtl_html.exists() else ""
 
@@ -264,9 +295,11 @@ iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; dis
 <header>
   <h1>{html.escape(model_path.name)} — fast/rtl profile</h1>
   <div class="summary">
+    <span><b>cx:</b> {html.escape(ms(cx_ms))}</span>
     <span><b>fast:</b> {html.escape(ms(fast_ms))} {html.escape(fast_status)}</span>
     <span><b>rtl:</b> {html.escape(ms(rtl_ms))} {html.escape(rtl_status)}</span>
-    <span><b>rtl/fast:</b> {html.escape(ratio + 'x' if ratio else '')}</span>
+    <span><b>rtl/fast:</b> {html.escape(rtl_fast + 'x' if rtl_fast else '')}</span>
+    <span><b>rtl/cx:</b> {html.escape(rtl_cx + 'x' if rtl_cx else '')}</span>
   </div>
   <div class="tabs">
     <button class="tab active" data-target="fast">fast</button>
@@ -293,9 +326,6 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
 
 def _write_rtl_compare_index(title: str, html_out: str,
                              rows: list[dict], csv_path: Path) -> None:
-    def ms(v: str) -> str:
-        return f"{float(v):.3f}" if v else ""
-
     body = []
     for row in rows:
         pat = row.get("pattern", "")
@@ -304,9 +334,11 @@ def _write_rtl_compare_index(title: str, html_out: str,
         body.append(
             "<tr>"
             f"<td><a href=\"{link}\">{html.escape(pat)}</a></td>"
-            f"<td style='text-align:right'>{html.escape(ms(row.get('fast_ms', '')))}</td>"
-            f"<td style='text-align:right'>{html.escape(ms(row.get('rtl_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('cx_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('fast_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('rtl_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(row.get('rtl_over_fast', ''))}</td>"
+            f"<td style='text-align:right'>{html.escape(row.get('rtl_over_cx', ''))}</td>"
             f"<td>{html.escape(status)}</td>"
             "</tr>"
         )
@@ -328,7 +360,7 @@ a:hover {{ text-decoration:underline; }}
 <h1>{html.escape(title)}</h1>
 <div class="meta">csv: {html.escape(str(csv_path))}</div>
 <table>
-  <thead><tr><th>pattern</th><th>fast ms</th><th>rtl ms</th><th>rtl/fast</th><th>status</th></tr></thead>
+  <thead><tr><th>pattern</th><th>cx ms</th><th>fast ms</th><th>rtl ms</th><th>rtl/fast</th><th>rtl/cx</th><th>status</th></tr></thead>
   <tbody>{''.join(body)}</tbody>
 </table>
 </body></html>
@@ -437,15 +469,34 @@ def run_corpus(*,
         }
         profile_path = Path(profile_html)
         compare_html = f"{profile_path.stem}.rtl_compare{profile_path.suffix}"
+        cx_ms_by_pattern = _load_cx_ms(order_csv)
+
+        def _cx_ms_for(pattern: str) -> float | None:
+            return cx_ms_by_pattern.get(_normalise_pattern(pattern))
+
+        def _fill_compare_ms(row: dict) -> dict:
+            out = dict(row)
+            cx_ms = out.get("cx_ms")
+            if not cx_ms:
+                value = _cx_ms_for(out.get("pattern", ""))
+                out["cx_ms"] = f"{value:.3f}" if value is not None else ""
+            if not out.get("rtl_over_fast"):
+                out["rtl_over_fast"] = _ratio_from_ms(
+                    out.get("rtl_ms", ""), out.get("fast_ms", ""))
+            if not out.get("rtl_over_cx"):
+                out["rtl_over_cx"] = _ratio_from_ms(
+                    out.get("rtl_ms", ""), out.get("cx_ms", ""))
+            return out
 
         def _checkpoint_compare(rows: list[dict]) -> None:
             seen = {r["pattern"] for r in rows}
-            merged = list(rows)
+            merged = [_fill_compare_ms(r) for r in rows]
             for pat, prow in prior_full.items():
                 if pat not in seen:
-                    merged.append(prow)
+                    merged.append(_fill_compare_ms(prow))
             fields = [
-                "pattern", "fast_ms", "rtl_ms", "rtl_over_fast",
+                "pattern", "cx_ms", "fast_ms", "rtl_ms",
+                "rtl_over_fast", "rtl_over_cx",
                 "status", "fast_status", "rtl_status",
             ]
             with csv_path.open("w", newline="") as f:
@@ -467,13 +518,16 @@ def run_corpus(*,
         for i, pat in enumerate(patterns, 1):
             if pat in prior_ok and (args.no_html or _compare_report_exists_for(pat, model_dir)):
                 cached = prior_ok[pat]
+                cached_filled = _fill_compare_ms(cached)
                 display_pat = _fit_cell(pat)
                 _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
+                           f"cx={_ms_cell(cached_filled.get('cx_ms', ''))} "
                            f"fast={_ms_cell(cached.get('fast_ms', ''))} "
                            f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
-                           f"ratio={cached.get('rtl_over_fast', ''):>8s} cached  "
+                           f"rtl/fast={cached_filled.get('rtl_over_fast', ''):>8s} "
+                           f"rtl/cx={cached_filled.get('rtl_over_cx', ''):>8s} cached  "
                            f"{cached.get('status', 'ok')}")
-                rows_out.append(cached)
+                rows_out.append(cached_filled)
                 _checkpoint_compare(rows_out)
                 continue
 
@@ -492,7 +546,9 @@ def run_corpus(*,
             _, rtl_ms, _, _, rtl_status, _, _ = run_one(
                 pat, model_dir, progress=lambda s: _progress(f"rtl {s}"),
                 fast_only=True, skip_html=args.no_html, engine_model="rtl")
-            ratio = _ratio_cell(rtl_ms, fast_ms)
+            cx_ms = _cx_ms_for(pat)
+            rtl_fast = _ratio_from_ms(rtl_ms, fast_ms)
+            rtl_cx = _ratio_from_ms(rtl_ms, cx_ms)
             status = "ok" if fast_status == "ok" and rtl_status == "ok" else f"{fast_status}/{rtl_status}"
             model_path = model_dir / f"{_normalise_pattern(pat)}.tflite"
             if not args.no_html and fast_ms is not None and rtl_ms is not None:
@@ -501,20 +557,24 @@ def run_corpus(*,
                         model_path,
                         OUT_DIR / f"{model_path.stem}.fast.html",
                         _mode_paths(model_path, "rtl")["html"],
-                        fast_ms, rtl_ms, fast_status, rtl_status)
+                        cx_ms, fast_ms, rtl_ms, fast_status, rtl_status)
                 except Exception as e:
                     status = f"{status}; html-fail: {str(e)[:80]}"
             elapsed = time.time() - t0
             display_pat = _fit_cell(pat)
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
+                       f"cx={f'{cx_ms:>10.3f} ms' if cx_ms is not None else f'{chr(8212):>10s}    '} "
                        f"fast={f'{fast_ms:>10.3f} ms' if fast_ms is not None else f'{chr(8212):>10s}    '} "
                        f"rtl={f'{rtl_ms:>10.3f} ms' if rtl_ms is not None else f'{chr(8212):>10s}    '} "
-                       f"ratio={ratio or '':>8s}  ({elapsed:5.1f}s)  {status}")
+                       f"rtl/fast={rtl_fast or '':>8s} rtl/cx={rtl_cx or '':>8s}  "
+                       f"({elapsed:5.1f}s)  {status}")
             row = {
                 "pattern": pat,
+                "cx_ms": f"{cx_ms:.3f}" if cx_ms is not None else "",
                 "fast_ms": f"{fast_ms:.3f}" if fast_ms is not None else "",
                 "rtl_ms": f"{rtl_ms:.3f}" if rtl_ms is not None else "",
-                "rtl_over_fast": ratio,
+                "rtl_over_fast": rtl_fast,
+                "rtl_over_cx": rtl_cx,
                 "status": status,
                 "fast_status": fast_status,
                 "rtl_status": rtl_status,
