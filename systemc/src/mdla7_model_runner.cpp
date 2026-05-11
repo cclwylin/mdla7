@@ -780,6 +780,227 @@ int sc_main(int argc, char* argv[]) {
         return r;
     };
 
+    struct TnpsWavefrontResult {
+        uint8_t done_tag = 0;
+        uint64_t dram_r = 0, dram_w = 0, sram_r = 0, sram_w = 0;
+        uint16_t tiles = 1;
+    };
+
+    auto emit_linear_tnps_wavefront = [&](uint32_t layer_idx, const LayerMeta& L,
+                                          uint8_t initial_wait) -> TnpsWavefrontResult {
+        TnpsWavefrontResult r{};
+        const uint64_t total = L.ref_size;
+        const uint64_t safety = 4096;
+        uint64_t tile_bytes = (L1_BUDGET > safety) ? ((L1_BUDGET - safety) / 4) : 0;
+        tile_bytes &= ~uint64_t(63);
+        if (tile_bytes < 64)
+            tile_bytes = 64;
+        tile_bytes = std::min<uint64_t>(tile_bytes, total);
+        const uint32_t seg = align64(uint32_t(tile_bytes));
+        const uint32_t in_l1[2]  = {0, align64(seg + seg)};
+        const uint32_t out_l1[2] = {seg, align64(in_l1[1] + seg)};
+        if (uint64_t(out_l1[1]) + seg + safety > L1_BUDGET) {
+            std::cerr << "layer " << layer_idx
+                      << ": linear TNPS no room for double-buffered tile\n";
+            r.done_tag = 0;
+            return r;
+        }
+        uint8_t slot_done[2] = {initial_wait, initial_wait};
+        uint64_t off = 0;
+        uint16_t mb_id = 0;
+        while (off < total) {
+            const uint32_t bytes = uint32_t(std::min<uint64_t>(tile_bytes, total - off));
+            const bool final_mb = (off + bytes == total);
+            Microblock mb{};
+            mb.id = mb_id;
+            mb.slot = uint8_t(mb_id & 1u);
+            mb.elem_off = off;
+            mb.rows = 1;
+            mb.elems = bytes;
+            mb.bytes = bytes;
+            const uint8_t load_tag = alloc_tag();
+            const uint8_t tnps_tag = alloc_tag();
+            const uint8_t store_tag = alloc_tag();
+            auto [ld, charged] = make_act_load(L, uint32_t(L.dram_in + off),
+                                               in_l1[mb.slot], bytes,
+                                               load_tag, slot_done[mb.slot]);
+            mark_stream(ld, layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(ld);
+            Descriptor td = make_tnps(in_l1[mb.slot], out_l1[mb.slot], bytes,
+                                      tnps_tag, load_tag);
+            mark_stream(td, layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(td);
+            Descriptor sd = make_udma(out_l1[mb.slot], uint32_t(L.dram_out + off),
+                                      bytes, /*dir*/ 1, store_tag, tnps_tag);
+            mark_stream(sd, layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(sd);
+            r.dram_r += charged;
+            r.dram_w += bytes;
+            r.sram_w += uint64_t(bytes) * 2;
+            r.sram_r += uint64_t(bytes) * 2;
+            r.done_tag = store_tag;
+            slot_done[mb.slot] = store_tag;
+            off += bytes;
+            ++mb_id;
+        }
+        r.tiles = std::max<uint16_t>(1, mb_id);
+        return r;
+    };
+
+    auto emit_d2s_tnps_wavefront = [&](uint32_t layer_idx, const LayerMeta& L,
+                                       uint16_t block, uint32_t elem_size,
+                                       uint8_t initial_wait) -> TnpsWavefrontResult {
+        TnpsWavefrontResult r{};
+        const uint64_t safety = 4096;
+        const uint32_t in_row = uint32_t(L.in_w) * L.in_c * elem_size;
+        const uint32_t dst_stride = uint32_t(L.in_w) * block * L.out_c * elem_size;
+        const uint32_t out_rows_per_in = block;
+        uint32_t tile_h = L.in_h;
+        auto top_for = [&](uint32_t rows) -> uint64_t {
+            const uint32_t in_bytes = rows * in_row;
+            const uint32_t out_bytes = rows * out_rows_per_in * dst_stride;
+            const uint32_t in0 = 0;
+            const uint32_t out0 = align64(in0 + in_bytes);
+            const uint32_t in1 = align64(out0 + out_bytes);
+            const uint32_t out1 = align64(in1 + in_bytes);
+            return uint64_t(out1) + out_bytes;
+        };
+        while (tile_h > 1 && top_for(tile_h) + safety > L1_BUDGET)
+            --tile_h;
+        if (top_for(tile_h) + safety > L1_BUDGET) {
+            std::cerr << "layer " << layer_idx
+                      << ": D2SPACE no room for double-buffered row tile\n";
+            return r;
+        }
+        const uint32_t in_seg = tile_h * in_row;
+        const uint32_t out_seg = tile_h * out_rows_per_in * dst_stride;
+        const uint32_t in_l1[2]  = {0, align64(align64(in_seg) + out_seg)};
+        const uint32_t out_l1[2] = {align64(in_seg), align64(in_l1[1] + in_seg)};
+        uint8_t slot_done[2] = {initial_wait, initial_wait};
+        uint32_t ih = 0;
+        uint16_t mb_id = 0;
+        while (ih < L.in_h) {
+            const uint32_t rows = std::min<uint32_t>(tile_h, L.in_h - ih);
+            const uint32_t in_bytes = rows * in_row;
+            const uint32_t out_bytes = rows * out_rows_per_in * dst_stride;
+            const uint32_t src_off = ih * in_row;
+            const uint32_t dst_off = ih * out_rows_per_in * dst_stride;
+            const bool final_mb = (ih + rows == L.in_h);
+            Microblock mb{};
+            mb.id = mb_id;
+            mb.slot = uint8_t(mb_id & 1u);
+            mb.elem_off = uint64_t(ih) * L.in_w * L.in_c;
+            mb.rows = rows;
+            mb.elems = rows * L.in_w * L.in_c;
+            mb.bytes = in_bytes;
+            const uint8_t load_tag = alloc_tag();
+            const uint8_t tnps_tag = alloc_tag();
+            const uint8_t store_tag = alloc_tag();
+            auto [ld, charged] = make_act_load(L, uint32_t(L.dram_in + src_off),
+                                               in_l1[mb.slot], in_bytes,
+                                               load_tag, slot_done[mb.slot]);
+            mark_stream(ld, layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(ld);
+            Descriptor td = make_tnps_d2s(in_l1[mb.slot], out_l1[mb.slot],
+                                          uint16_t(rows), L.in_w, L.in_c,
+                                          block, uint8_t(elem_size),
+                                          tnps_tag, load_tag);
+            mark_stream(td, layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(td);
+            Descriptor sd = make_udma(out_l1[mb.slot], uint32_t(L.dram_out + dst_off),
+                                      out_bytes, /*dir*/ 1, store_tag, tnps_tag);
+            mark_stream(sd, layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(sd);
+            r.dram_r += charged;
+            r.dram_w += out_bytes;
+            r.sram_w += uint64_t(in_bytes) + out_bytes;
+            r.sram_r += uint64_t(in_bytes) + out_bytes;
+            r.done_tag = store_tag;
+            slot_done[mb.slot] = store_tag;
+            ih += rows;
+            ++mb_id;
+        }
+        r.tiles = std::max<uint16_t>(1, mb_id);
+        return r;
+    };
+
+    auto emit_s2d_tnps_wavefront = [&](uint32_t layer_idx, const LayerMeta& L,
+                                       uint16_t block, uint32_t elem_size,
+                                       uint8_t initial_wait) -> TnpsWavefrontResult {
+        TnpsWavefrontResult r{};
+        const uint64_t safety = 4096;
+        const uint32_t in_row = uint32_t(L.in_w) * L.in_c * elem_size;
+        const uint32_t out_row = uint32_t(L.out_w) * L.out_c * elem_size;
+        uint32_t tile_groups = std::max<uint32_t>(1, L.out_h);
+        auto top_for = [&](uint32_t groups) -> uint64_t {
+            const uint32_t in_bytes = groups * block * in_row;
+            const uint32_t out_bytes = groups * out_row;
+            const uint32_t in0 = 0;
+            const uint32_t out0 = align64(in0 + in_bytes);
+            const uint32_t in1 = align64(out0 + out_bytes);
+            const uint32_t out1 = align64(in1 + in_bytes);
+            return uint64_t(out1) + out_bytes;
+        };
+        while (tile_groups > 1 && top_for(tile_groups) + safety > L1_BUDGET)
+            --tile_groups;
+        if (top_for(tile_groups) + safety > L1_BUDGET) {
+            std::cerr << "layer " << layer_idx
+                      << ": S2SPACE no room for double-buffered row tile\n";
+            return r;
+        }
+        const uint32_t in_seg = tile_groups * block * in_row;
+        const uint32_t out_seg = tile_groups * out_row;
+        const uint32_t in_l1[2]  = {0, align64(align64(in_seg) + out_seg)};
+        const uint32_t out_l1[2] = {align64(in_seg), align64(in_l1[1] + in_seg)};
+        uint8_t slot_done[2] = {initial_wait, initial_wait};
+        uint32_t og = 0;
+        uint16_t mb_id = 0;
+        while (og < L.out_h) {
+            const uint32_t groups = std::min<uint32_t>(tile_groups, L.out_h - og);
+            const uint32_t in_rows = groups * block;
+            const uint32_t in_bytes = in_rows * in_row;
+            const uint32_t out_bytes = groups * out_row;
+            const uint32_t src_off = og * block * in_row;
+            const uint32_t dst_off = og * out_row;
+            const bool final_mb = (og + groups == L.out_h);
+            Microblock mb{};
+            mb.id = mb_id;
+            mb.slot = uint8_t(mb_id & 1u);
+            mb.elem_off = uint64_t(og) * L.out_w * L.out_c;
+            mb.rows = groups;
+            mb.elems = groups * L.out_w * L.out_c;
+            mb.bytes = out_bytes;
+            const uint8_t load_tag = alloc_tag();
+            const uint8_t tnps_tag = alloc_tag();
+            const uint8_t store_tag = alloc_tag();
+            auto [ld, charged] = make_act_load(L, uint32_t(L.dram_in + src_off),
+                                               in_l1[mb.slot], in_bytes,
+                                               load_tag, slot_done[mb.slot]);
+            mark_stream(ld, layer_idx, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(ld);
+            Descriptor td = make_tnps_s2d(in_l1[mb.slot], out_l1[mb.slot],
+                                          uint16_t(in_rows), L.in_w, L.in_c,
+                                          block, L.out_c, uint8_t(elem_size),
+                                          tnps_tag, load_tag);
+            mark_stream(td, layer_idx, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(td);
+            Descriptor sd = make_udma(out_l1[mb.slot], uint32_t(L.dram_out + dst_off),
+                                      out_bytes, /*dir*/ 1, store_tag, tnps_tag);
+            mark_stream(sd, layer_idx, mb, SMF_STORE | (final_mb ? SMF_FINAL_TILE : 0));
+            program.push_back(sd);
+            r.dram_r += charged;
+            r.dram_w += out_bytes;
+            r.sram_w += uint64_t(in_bytes) + out_bytes;
+            r.sram_r += uint64_t(in_bytes) + out_bytes;
+            r.done_tag = store_tag;
+            slot_done[mb.slot] = store_tag;
+            og += groups;
+            ++mb_id;
+        }
+        r.tiles = std::max<uint16_t>(1, mb_id);
+        return r;
+    };
+
     // v7.1 (post-rolling-tags): tag_fire_time can't tell us per-layer done
     // anymore (tag values cycle 1..255 and get overwritten). UDMA serializes
     // its task queue, so the end_ns of the N-th UDMA task = the time the N-th
@@ -8318,7 +8539,6 @@ int sc_main(int argc, char* argv[]) {
                 const uint64_t safety = 4096;
                 const uint64_t out_total = uint64_t(L.out_h) * per_row_out;
                 const bool output_resident = (out_total + safety < L1_BUDGET);
-                const uint32_t L1_OUT_t = 0;
                 const uint64_t out_budget = output_resident
                                           ? out_total
                                           : std::min<uint64_t>(out_total, L1_BUDGET / 3);
@@ -8367,10 +8587,42 @@ int sc_main(int argc, char* argv[]) {
                               << " B, in_row=" << per_row_in << " B)\n";
                     return 4;
                 }
-                const uint32_t L1_IN_t = output_resident
-                                        ? align64(uint32_t(out_total))
-                                        : align64(uint32_t(uint64_t(tile_oh) * per_row_out));
+                auto pool_slot_top = [&](uint32_t rows) -> uint64_t {
+                    const uint32_t max_out = uint32_t(uint64_t(rows) * per_row_out);
+                    const uint32_t max_in  = uint32_t(uint64_t(rows * L.s_h + k_h_eff) * per_row_in);
+                    if (output_resident) {
+                        const uint32_t in0 = align64(uint32_t(out_total));
+                        const uint32_t in1 = align64(in0 + max_in);
+                        return uint64_t(in1) + max_in;
+                    }
+                    const uint32_t out0 = 0;
+                    const uint32_t in0  = align64(out0 + max_out);
+                    const uint32_t out1 = align64(in0 + max_in);
+                    const uint32_t in1  = align64(out1 + max_out);
+                    return uint64_t(in1) + max_in;
+                };
+                while (tile_oh > 1 && pool_slot_top(tile_oh) + safety > L1_BUDGET)
+                    --tile_oh;
+                if (pool_slot_top(tile_oh) + safety > L1_BUDGET) {
+                    std::cerr << "layer " << i << ": pool no room for one double-buffered tile\n";
+                    return 4;
+                }
+                const uint32_t pool_tile_out_max = uint32_t(uint64_t(tile_oh) * per_row_out);
+                const uint32_t pool_tile_in_max =
+                    uint32_t(uint64_t(tile_oh * L.s_h + k_h_eff) * per_row_in);
+                const uint32_t L1_OUT_t[2] = {
+                    0,
+                    output_resident ? 0
+                                    : align64(align64(pool_tile_out_max) + pool_tile_in_max)
+                };
+                const uint32_t L1_IN_t[2] = {
+                    output_resident ? align64(uint32_t(out_total))
+                                    : align64(pool_tile_out_max),
+                    output_resident ? align64(align64(uint32_t(out_total)) + pool_tile_in_max)
+                                    : align64(L1_OUT_t[1] + pool_tile_out_max)
+                };
                 uint8_t prev_tag = 0;
+                uint8_t slot_done[2] = {0, 0};
                 uint32_t oh_done = 0;
                 uint16_t mb_id = 0;
                 while (oh_done < L.out_h) {
@@ -8392,9 +8644,10 @@ int sc_main(int argc, char* argv[]) {
                     mb.rows = this_oh;
                     mb.elems = this_oh * L.out_w * L.out_c;
                     mb.bytes = this_oh * per_row_out;
+                    const uint8_t slot = mb.slot;
                     auto [id, charged] = make_act_load(L, uint32_t(L.dram_in + dram_in_off),
-                                                       L1_IN_t, tile_in_size,
-                                                       in_tag_t, prev_tag);
+                                                       L1_IN_t[slot], tile_in_size,
+                                                       in_tag_t, slot_done[slot]);
                     mark_stream(id, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(id);
                     acc[i].dram_r += charged;
@@ -8405,9 +8658,9 @@ int sc_main(int argc, char* argv[]) {
                     tile_L.p_t   = uint8_t((oh_done == 0) ? L.p_t : 0);
                     tile_L.p_b   = uint8_t((oh_done + this_oh == L.out_h) ? L.p_b : 0);
                     const uint32_t L1_OUT_tile = output_resident
-                                               ? (L1_OUT_t + uint32_t(oh_done) * per_row_out)
-                                               : L1_OUT_t;
-                    Descriptor pd = make_pool(tile_L, L1_IN_t, L1_OUT_tile,
+                                               ? (L1_OUT_t[0] + uint32_t(oh_done) * per_row_out)
+                                               : L1_OUT_t[slot];
+                    Descriptor pd = make_pool(tile_L, L1_IN_t[slot], L1_OUT_tile,
                                               in_tag_t, pool_tag);
                     mark_stream(pd, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
                     program.push_back(pd);
@@ -8415,6 +8668,7 @@ int sc_main(int argc, char* argv[]) {
                     acc[i].sram_w += this_oh * per_row_out;
                     if (output_resident) {
                         prev_tag = pool_tag;
+                        slot_done[slot] = pool_tag;
                     } else {
                         const uint8_t st_tag_tile = alloc_tag();
                         const uint32_t tile_out_size = this_oh * per_row_out;
@@ -8424,6 +8678,7 @@ int sc_main(int argc, char* argv[]) {
                             udma_w_skipped[i] = true;
                             udma_w_streamed[i] = true;
                             prev_tag = pool_tag;
+                            slot_done[slot] = pool_tag;
                         } else {
                             Descriptor sd = make_udma(L1_OUT_tile,
                                                       uint32_t(L.dram_out + dram_out_off),
@@ -8434,6 +8689,7 @@ int sc_main(int argc, char* argv[]) {
                             program.push_back(sd);
                             acc[i].dram_w += tile_out_size;
                             prev_tag = st_tag_tile;
+                            slot_done[slot] = st_tag_tile;
                         }
                     }
                     oh_done += this_oh;
@@ -8447,7 +8703,7 @@ int sc_main(int argc, char* argv[]) {
                         layer_done_tag[i] = prev_tag;
                     } else {
                         const uint8_t st_tag_t = alloc_tag();
-                        Descriptor wd_t = make_udma(L1_OUT_t, L.dram_out, uint32_t(out_total),
+                        Descriptor wd_t = make_udma(L1_OUT_t[0], L.dram_out, uint32_t(out_total),
                                                     /*dir*/ 1, st_tag_t, prev_tag);
                         pending.active    = true;
                         pending.desc      = wd_t;
@@ -8455,7 +8711,7 @@ int sc_main(int argc, char* argv[]) {
                         pending.layer_idx = i;
                         layer_done_tag[i] = st_tag_t;
                     }
-                    fuse_prev_l1_out_addr   = L1_OUT_t;
+                    fuse_prev_l1_out_addr   = L1_OUT_t[0];
                     fuse_prev_l1_out_size   = uint32_t(out_total);
                     fuse_prev_done_tag      = prev_tag;
                     fuse_prev_out_h         = L.out_h;
@@ -8616,7 +8872,8 @@ int sc_main(int argc, char* argv[]) {
                         ? (L1_BUDGET - softmax_l1_safety) : L1_BUDGET;
                 uint32_t softmax_slots = 1;
                 uint64_t row_tile = 1;
-                if (!fuse_eligible && early_split_idx >= N && vec_bytes != 0) {
+                uint32_t softmax_fused_out_base = L1_OUT;
+                if (!fuse_eligible && vec_bytes != 0) {
                     const uint64_t pp_rows = softmax_l1_usable / (4 * vec_bytes);
                     if (pp_rows >= 2) {
                         softmax_slots = 2;
@@ -8628,12 +8885,38 @@ int sc_main(int argc, char* argv[]) {
                     }
                     row_tile = std::min<uint64_t>(rows, row_tile);
                     row_tile = std::min<uint64_t>(row_tile, 65535);
+                } else if (fuse_eligible && vec_bytes != 0) {
+                    const uint32_t hi_base = align64(uint32_t(L1_IN + L.in_size));
+                    const uint64_t hi_avail = (uint64_t(hi_base) + softmax_l1_safety < L1_BUDGET)
+                                            ? (L1_BUDGET - hi_base - softmax_l1_safety) : 0;
+                    const uint64_t lo_avail = (L1_IN > softmax_l1_safety)
+                                            ? (uint64_t(L1_IN) - softmax_l1_safety) : 0;
+                    const bool use_hi = hi_avail >= lo_avail;
+                    const uint64_t pp_rows = (use_hi ? hi_avail : lo_avail) / (2 * vec_bytes);
+                    if (pp_rows >= 2) {
+                        softmax_slots = 2;
+                        row_tile = std::min<uint64_t>(rows, std::min<uint64_t>(pp_rows, 65535));
+                        softmax_fused_out_base = use_hi ? hi_base : 0;
+                    }
                 }
-                const uint64_t tile_count = (rows + row_tile - 1) / row_tile;
-                const uint32_t softmax_seg =
-                    align64(uint32_t(row_tile * vec_bytes));
-                if (softmax_slots == 2 && uint64_t(softmax_seg) * 4 > L1_BUDGET)
+                uint64_t tile_count = (rows + row_tile - 1) / row_tile;
+                uint32_t softmax_seg = align64(uint32_t(row_tile * vec_bytes));
+                auto disable_softmax_slots = [&]() {
                     softmax_slots = 1;
+                    if (fuse_eligible)
+                        row_tile = 1;
+                    tile_count = (rows + row_tile - 1) / row_tile;
+                    softmax_seg = align64(uint32_t(row_tile * vec_bytes));
+                };
+                if (softmax_slots == 2 && uint64_t(softmax_seg) * 4 > L1_BUDGET)
+                    disable_softmax_slots();
+                if (softmax_slots == 2 && fuse_eligible) {
+                    const bool out_fits = uint64_t(softmax_fused_out_base) + 2ull * softmax_seg <= L1_BUDGET;
+                    const bool out_overlaps_in =
+                        ranges_overlap(softmax_fused_out_base, 2 * softmax_seg, L1_IN, L.in_size);
+                    if (!out_fits || out_overlaps_in)
+                        disable_softmax_slots();
+                }
                 uint8_t softmax_slot_free[2] = {0, 0};
                 tiles_h_per_layer[i] = uint16_t(std::min<uint64_t>(tile_count, 65535));
                 for (uint64_t row = 0, tile_id = 0; row < rows; row += row_tile, ++tile_id) {
@@ -8648,7 +8931,9 @@ int sc_main(int argc, char* argv[]) {
                                                    ? uint32_t(slot * 2 * softmax_seg)
                                                    : L1_IN;
                     const uint32_t tile_l1_out = (softmax_slots == 2)
-                                               ? uint32_t(tile_l1_in + softmax_seg)
+                                               ? (fuse_eligible
+                                                   ? uint32_t(softmax_fused_out_base + slot * softmax_seg)
+                                                   : uint32_t(tile_l1_in + softmax_seg))
                                                : (row_tile == 1) ? L1_OUT
                                                : align64(tile_bytes);
                     if (uint64_t(tile_l1_out) + tile_bytes > L1_BUDGET) {
@@ -8710,7 +8995,8 @@ int sc_main(int argc, char* argv[]) {
                         prev_st_tag = st_tag;
                         softmax_slot_free[slot] = st_tag;
                     }
-                    if (early_split_idx < N && row + this_rows == early_split_rows) {
+                    if (early_split_idx < N && row < early_split_rows &&
+                        row + this_rows >= early_split_rows) {
                         const auto& S = metas[early_split_idx];
                         const uint8_t split_tag = alloc_tag();
                         Descriptor td = make_tnps(S.dram_in, S.dram_out, S.ref_size,
@@ -8960,20 +9246,22 @@ int sc_main(int argc, char* argv[]) {
                           << block << " in_c=" << L.in_c << " out_c=" << L.out_c << "\n";
                 return 4;
             }
-            acc[i].dram_r += L.in_size;
             if (producer_no_store[i]) {
                 udma_w_skipped[i] = true;
                 udma_w_streamed[i] = true;
+                acc[i].dram_r += L.in_size;
                 layer_done_tag[i] = 0;
             } else {
-                const uint8_t d2s_tag = alloc_tag();
                 const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
-                program.push_back(make_tnps_d2s(L.dram_in, L.dram_out,
-                                                L.in_h, L.in_w, L.in_c,
-                                                block, uint8_t(elem_size),
-                                                d2s_tag, wait_prev));
-                acc[i].dram_w += L.ref_size;
-                layer_done_tag[i] = d2s_tag;
+                auto wr = emit_d2s_tnps_wavefront(i, L, block, elem_size, wait_prev);
+                if (!wr.done_tag)
+                    return 4;
+                acc[i].dram_r += wr.dram_r;
+                acc[i].dram_w += wr.dram_w;
+                acc[i].sram_r += wr.sram_r;
+                acc[i].sram_w += wr.sram_w;
+                tiles_h_per_layer[i] = wr.tiles;
+                layer_done_tag[i] = wr.done_tag;
             }
             fuse_prev_l1_out_addr   = 0;
             fuse_prev_l1_out_size   = 0;
@@ -9707,10 +9995,15 @@ int sc_main(int argc, char* argv[]) {
             const uint8_t wait_prev = (i > 0) ? layer_done_tag[i - 1] : 0;
             if (L.op_kind == OK_S2SPACE) {
                 const uint16_t block = L.k_h ? L.k_h : 1;
-                program.push_back(make_tnps_s2d(L.dram_in, L.dram_out,
-                                                L.in_h, L.in_w, L.in_c,
-                                                block, L.out_c, uint8_t(elem_size),
-                                                tnps_tag, wait_prev));
+                auto wr = emit_s2d_tnps_wavefront(i, L, block, elem_size, wait_prev);
+                if (!wr.done_tag)
+                    return 4;
+                acc[i].dram_r += wr.dram_r;
+                acc[i].dram_w += wr.dram_w;
+                acc[i].sram_r += wr.sram_r;
+                acc[i].sram_w += wr.sram_w;
+                tiles_h_per_layer[i] = wr.tiles;
+                layer_done_tag[i] = wr.done_tag;
             } else if ((L.op_kind == OK_TRANSPOSE ||
                         L.op_kind == OK_SLICE ||
                         L.op_kind == OK_STRIDED_SLICE ||
@@ -9721,15 +10014,30 @@ int sc_main(int argc, char* argv[]) {
                                                  L.ref_size, L.dram_wgt,
                                                  tnps_tag, wait_prev));
                 acc[i].dram_r += L.wgt_size;
+                acc[i].dram_r += L.in_size;
+                acc[i].dram_w += L.ref_size;
+                acc[i].sram_r += L.in_size;
+                acc[i].sram_w += L.ref_size;
+                layer_done_tag[i] = tnps_tag;
+            } else if (L.in_size == L.ref_size && L.ref_size > 0) {
+                auto wr = emit_linear_tnps_wavefront(i, L, wait_prev);
+                if (!wr.done_tag)
+                    return 4;
+                acc[i].dram_r += wr.dram_r;
+                acc[i].dram_w += wr.dram_w;
+                acc[i].sram_r += wr.sram_r;
+                acc[i].sram_w += wr.sram_w;
+                tiles_h_per_layer[i] = wr.tiles;
+                layer_done_tag[i] = wr.done_tag;
             } else {
                 program.push_back(make_tnps(L.dram_in, L.dram_out, L.ref_size,
                                             tnps_tag, wait_prev));
+                acc[i].dram_r += L.in_size;
+                acc[i].dram_w += L.ref_size;
+                acc[i].sram_r += L.in_size;
+                acc[i].sram_w += L.ref_size;
+                layer_done_tag[i] = tnps_tag;
             }
-            acc[i].dram_r += L.in_size;
-            acc[i].dram_w += L.ref_size;
-            acc[i].sram_r += L.in_size;
-            acc[i].sram_w += L.ref_size;
-            layer_done_tag[i] = tnps_tag;
             fuse_prev_l1_out_addr   = 0;
             fuse_prev_l1_out_size   = 0;
             fuse_prev_single_tile   = false;
