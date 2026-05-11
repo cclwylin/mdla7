@@ -11,9 +11,18 @@ from pathlib import Path
 
 MAGIC_MDL7 = 0x374C444D
 OP_DONE = 0
+OP_CONV = 1
+OP_REQUANT = 2
+OP_EWE = 3
+OP_POOL = 4
 OP_TNPS = 5
 OP_UDMA = 6
 
+OK_CONV = {0, 1, 6}
+OK_POOL = {2, 3}
+OK_ADD = 7
+OK_MUL = 10
+OK_SUB = 11
 OK_RESHAPE = 5
 OK_CONCAT = 8
 OK_GATHER = 9
@@ -30,6 +39,8 @@ OK_PACK = 23
 OK_UNPACK = 24
 OK_TILE = 25
 OK_SPLIT = 26
+
+OK_EWE = {OK_ADD, OK_MUL, OK_SUB}
 
 META_TNPS_OPS = {OK_TRANSPOSE, OK_SLICE, OK_STRIDED_SLICE, OK_SPLIT}
 TNPS_OPS = {
@@ -53,6 +64,7 @@ UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 20
+DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 
 
 @dataclass
@@ -79,6 +91,63 @@ class Layer:
 
 def elem_bytes(dtype: int) -> int:
     return 2 if dtype in DT_INT16 or dtype in DT_FP else 1
+
+
+def i8(value: int) -> int:
+    value &= 0xFF
+    return value - 256 if value >= 128 else value
+
+
+def pack_word(chunk: bytes) -> int:
+    value = 0
+    for idx, byte in enumerate(chunk):
+        value |= byte << (idx * 8)
+    return value
+
+
+def sample_bytes(data: bytes, offset: int, size: int, count: int = 16) -> bytes:
+    return data[offset:offset + min(count, size)].ljust(count, b"\x00")
+
+
+def sim_bytes(value: int) -> int:
+    cap = descriptor_for_layer.max_payload_bytes
+    if cap <= 0:
+        return max(value, 1)
+    return max(1, min(value, cap))
+
+
+def clamp_i32(value: int) -> int:
+    return max(-(1 << 31), min((1 << 31) - 1, value))
+
+
+def saturating_doubling_high_mul(a: int, b: int) -> int:
+    if a == -(1 << 31) and b == -(1 << 31):
+        return (1 << 31) - 1
+    p = int(a) * int(b)
+    nudge = (1 << 30) if p >= 0 else (1 - (1 << 30))
+    return clamp_i32((p + nudge) >> 31)
+
+
+def rounding_divide_by_pot(x: int, exponent: int) -> int:
+    if exponent <= 0:
+        return clamp_i32(x)
+    mask = (1 << exponent) - 1
+    remainder = x & mask
+    threshold = (mask >> 1) + (1 if x < 0 else 0)
+    shifted = x >> exponent
+    return clamp_i32(shifted + (1 if remainder > threshold else 0))
+
+
+def mbqm(x: int, multiplier: int, shift: int) -> int:
+    left_shift = shift if shift > 0 else 0
+    right_shift = 0 if shift > 0 else -shift
+    shifted = clamp_i32(x << left_shift)
+    high = saturating_doubling_high_mul(shifted, multiplier)
+    return rounding_divide_by_pot(high, right_shift)
+
+
+def clamp_i8(value: int) -> int:
+    return max(-128, min(127, value))
 
 
 def parse_layers(path: Path) -> list[Layer]:
@@ -230,10 +299,97 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
 
+    if layer.op_kind in OK_CONV and elem == 1 and layer.in_size > 0 and layer.wgt_size > 0:
+        # Emit a real Verilog MAC sample from the layer payload. This is intentionally
+        # small while the final datapath grows from sample MAC to full tile streaming.
+        data = descriptor_for_layer.program_bytes
+        act = data[layer.in_off:layer.in_off + min(16, layer.in_size)]
+        wgt = data[layer.wgt_off:layer.wgt_off + min(16, layer.wgt_size)]
+        elem_count = min(len(act), len(wgt), 16)
+        if elem_count == 0:
+            return None
+        act = act.ljust(16, b"\x00")
+        wgt = wgt.ljust(16, b"\x00")
+        bias = 0
+        multiplier = 1073741824
+        shift = 1
+        acc = bias
+        for idx in range(elem_count):
+            acc += i8(act[idx]) * i8(wgt[idx])
+        scaled = mbqm(clamp_i32(acc), multiplier, shift)
+        scaled = max(-128, min(127, scaled))
+        words[0] = OP_CONV
+        words[1] = elem_count
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(act[idx * 4:(idx + 1) * 4])
+            words[8 + idx] = pack_word(wgt[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count
+        words[13] = bias & 0xFFFF_FFFF
+        words[14] = multiplier & 0xFFFF_FFFF
+        words[15] = shift & 0xFF
+        words[16] = (-128) & 0xFFFF_FFFF
+        words[17] = 127
+        words[18] = scaled & 0xFF
+        words[19] = layer.index
+        return words
+
+    if layer.op_kind in OK_POOL and elem == 1 and layer.in_size > 0:
+        data = descriptor_for_layer.program_bytes
+        sample = sample_bytes(data, layer.in_off, layer.in_size)
+        elem_count = min(layer.in_size, 16)
+        vals = [i8(sample[idx]) for idx in range(elem_count)]
+        if not vals:
+            return None
+        avg_mode = 1 if layer.op_kind == 2 else 0
+        if avg_mode:
+            expected = int(sum(vals) / len(vals))
+        else:
+            expected = max(vals)
+        expected = max(-128, min(127, expected))
+        words[0] = OP_POOL
+        words[1] = elem_count
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(sample[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (avg_mode << 8)
+        words[18] = expected & 0xFF
+        words[19] = layer.index
+        return words
+
+    if layer.op_kind in OK_EWE and elem == 1 and layer.in_size > 0 and layer.wgt_size > 0:
+        data = descriptor_for_layer.program_bytes
+        a_sample = sample_bytes(data, layer.in_off, layer.in_size)
+        b_sample = sample_bytes(data, layer.wgt_off, layer.wgt_size)
+        elem_count = min(layer.in_size, layer.wgt_size, 16)
+        if elem_count == 0:
+            return None
+        av = i8(a_sample[0])
+        bv = i8(b_sample[0])
+        if layer.op_kind == OK_MUL:
+            op_mode = 1
+            expected = clamp_i8(av * bv)
+        elif layer.op_kind == OK_SUB:
+            op_mode = 2
+            expected = clamp_i8(av - bv)
+        else:
+            op_mode = 0
+            expected = clamp_i8(av + bv)
+        words[0] = OP_EWE
+        words[1] = elem_count
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(a_sample[idx * 4:(idx + 1) * 4])
+            words[8 + idx] = pack_word(b_sample[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (op_mode << 8)
+        words[18] = expected & 0xFF
+        words[19] = layer.index
+        return words
+
     if layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
         sample_out, sample_in, expected_src, expected_dst, sample_valid = tnps_sample(layer)
         words[0] = OP_TNPS
-        words[1] = max(layer.ref_size, layer.in_size)
+        words[1] = sim_bytes(max(layer.ref_size, layer.in_size))
         words[2] = addr
         words[3] = 0x2 if layer.op_kind == OK_S2SPACE else 0x0
         words[6] = layer.in_h
@@ -255,7 +411,7 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
     if enable_meta_tnps and layer.op_kind in META_TNPS_OPS and layer.tnps_meta is not None:
         sample_out, sample_in, expected_src, expected_dst, sample_valid = tnps_meta_sample(layer)
         words[0] = OP_TNPS
-        words[1] = max(layer.ref_size, layer.in_size)
+        words[1] = sim_bytes(max(layer.ref_size, layer.in_size))
         words[2] = addr
         words[3] = 0x4 if layer.op_kind == OK_TRANSPOSE else 0x8
         words[6] = layer.in_h
@@ -276,15 +432,50 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
 
     if layer.op_kind in TNPS_OPS or layer.op_kind in UDMA_OPS:
         words[0] = OP_UDMA
-        words[1] = max(layer.ref_size, layer.in_size, 1)
+        words[1] = sim_bytes(max(layer.ref_size, layer.in_size, 1))
         words[2] = addr
         words[3] = 0x1
-        words[4] = max(layer.in_size, layer.ref_size, 1)
+        words[4] = sim_bytes(max(layer.in_size, layer.ref_size, 1))
         words[5] = 1 + (max(layer.ref_size, layer.in_size) // 4096)
         words[19] = layer.index
         return words
 
     return None
+
+
+def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
+    elem = elem_bytes(layer.dtype)
+    if layer.op_kind not in OK_CONV or elem != 1 or layer.in_size == 0 or layer.wgt_size == 0:
+        return None
+    data = descriptor_for_layer.program_bytes
+    act = data[layer.in_off:layer.in_off + min(16, layer.in_size)]
+    wgt = data[layer.wgt_off:layer.wgt_off + min(16, layer.wgt_size)]
+    elem_count = min(len(act), len(wgt), 16)
+    if elem_count == 0:
+        return None
+
+    bias = 0
+    multiplier = 1073741824
+    shift = 1
+    acc = bias
+    for idx in range(elem_count):
+        acc += i8(act[idx]) * i8(wgt[idx])
+    scaled = mbqm(clamp_i32(acc), multiplier, shift)
+    scaled = max(-128, min(127, scaled))
+
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x10) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_REQUANT
+    words[1] = 1
+    words[2] = addr
+    words[4] = acc & 0xFFFF_FFFF
+    words[14] = multiplier & 0xFFFF_FFFF
+    words[15] = shift & 0xFF
+    words[16] = (-128) & 0xFFFF_FFFF
+    words[17] = 127
+    words[18] = scaled & 0xFF
+    words[19] = layer.index
+    return words
 
 
 def parse_args() -> argparse.Namespace:
@@ -297,25 +488,54 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Experimental: emit TRANSPOSE/SLICE/SPLIT as TNPS meta descriptors.",
     )
+    ap.add_argument(
+        "--max-payload-bytes",
+        type=int,
+        default=DEFAULT_MAX_PAYLOAD_BYTES,
+        help=(
+            "Cap generated payload bytes for sample-path simulation. "
+            "Use 0 to disable. Default: 1048576"
+        ),
+    )
     return ap.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    descriptor_for_layer.program_bytes = args.program.read_bytes()
+    descriptor_for_layer.max_payload_bytes = args.max_payload_bytes
     layers = parse_layers(args.program)
     commands: list[list[int]] = []
+    conv_count = 0
+    pool_count = 0
+    requant_count = 0
+    ewe_count = 0
     tnps_count = 0
     udma_count = 0
     for layer in layers:
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
-        if desc is not None:
+        descs = [desc] if desc is not None else []
+        req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
+        if req_desc is not None:
+            descs.append(req_desc)
+        for desc in descs:
             commands.append(desc)
-            if (desc[0] & 0xF) == OP_TNPS:
+            if (desc[0] & 0xF) == OP_CONV:
+                conv_count += 1
+            elif (desc[0] & 0xF) == OP_REQUANT:
+                requant_count += 1
+            elif (desc[0] & 0xF) == OP_POOL:
+                pool_count += 1
+            elif (desc[0] & 0xF) == OP_EWE:
+                ewe_count += 1
+            elif (desc[0] & 0xF) == OP_TNPS:
                 tnps_count += 1
             elif (desc[0] & 0xF) == OP_UDMA:
                 udma_count += 1
             if len(commands) >= args.max_commands:
                 break
+        if len(commands) >= args.max_commands:
+            break
     commands.append([0] * WORDS_PER_COMMAND)
 
     out = args.output
@@ -329,7 +549,8 @@ def main() -> int:
 
     print(
         f"[gen_verilog_final_program] wrote {out} "
-        f"commands={len(commands)-1} tnps={tnps_count} udma={udma_count}"
+        f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
+        f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count}"
     )
     return 0
 

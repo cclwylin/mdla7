@@ -28,6 +28,24 @@ module host_final #(
     output reg [1:0]   tnps_elem_bytes,
     output reg [31:0]  tnps_sample_out_elem_index,
     output reg [31:0]  tnps_sample_in_elem_index,
+    output reg [127:0] conv_act_vec,
+    output reg [127:0] conv_wgt_vec,
+    output reg [7:0]   conv_elem_count,
+    output reg signed [15:0] conv_zp_in,
+    output reg signed [31:0] conv_bias,
+    output reg signed [31:0] conv_multiplier,
+    output reg signed [7:0]  conv_shift,
+    output reg signed [31:0] conv_zp_out,
+    output reg signed [31:0] conv_act_min,
+    output reg signed [31:0] conv_act_max,
+    output reg signed [31:0] requant_input_value,
+    output reg         pool_avg_mode,
+    output reg [127:0] pool_sample_vec,
+    output reg [7:0]   pool_elem_count,
+    output reg [1:0]   ewe_op_mode,
+    output reg [127:0] ewe_a_vec,
+    output reg [127:0] ewe_b_vec,
+    output reg [7:0]   ewe_elem_count,
 
     input              top_done_valid,
     output             top_done_ready,
@@ -39,6 +57,15 @@ module host_final #(
     input      [31:0]  tnps_sample_src_byte_offset,
     input      [31:0]  tnps_sample_dst_byte_offset,
     input              tnps_sample_valid,
+    input signed [31:0] conv_acc_out,
+    input signed [31:0] conv_scaled_out,
+    input signed [7:0]  conv_out_q,
+    input signed [31:0] requant_scaled_out,
+    input signed [7:0]  requant_out_q,
+    input signed [31:0] pool_out,
+    input signed [7:0]  pool_out_q,
+    input signed [31:0] ewe_out,
+    input signed [7:0]  ewe_out_q,
     input      [8:0]   block_busy,
     input      [8:0]   block_done_valid,
 
@@ -48,6 +75,10 @@ module host_final #(
     output reg [31:0]  done_count
 );
     localparam [3:0] OP_DONE = 4'd0;
+    localparam [3:0] OP_CONV = 4'd1;
+    localparam [3:0] OP_REQUANT = 4'd2;
+    localparam [3:0] OP_EWE = 4'd3;
+    localparam [3:0] OP_POOL = 4'd4;
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
 
@@ -90,6 +121,29 @@ module host_final #(
             tnps_elem_bytes <= cmd_mem[base + 13][1:0];
             tnps_sample_out_elem_index <= cmd_mem[base + 14];
             tnps_sample_in_elem_index <= cmd_mem[base + 15];
+            conv_act_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
+                             cmd_mem[base + 5], cmd_mem[base + 4]};
+            conv_wgt_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
+                             cmd_mem[base + 9], cmd_mem[base + 8]};
+            conv_elem_count <= cmd_mem[base + 12][7:0];
+            conv_zp_in <= cmd_mem[base + 12][31:16];
+            conv_bias <= cmd_mem[base + 13];
+            conv_multiplier <= cmd_mem[base + 14];
+            conv_shift <= cmd_mem[base + 15][7:0];
+            conv_zp_out <= {{24{cmd_mem[base + 15][15]}}, cmd_mem[base + 15][15:8]};
+            conv_act_min <= cmd_mem[base + 16];
+            conv_act_max <= cmd_mem[base + 17];
+            requant_input_value <= cmd_mem[base + 4];
+            pool_sample_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
+                                cmd_mem[base + 5], cmd_mem[base + 4]};
+            pool_elem_count <= cmd_mem[base + 12][7:0];
+            pool_avg_mode <= cmd_mem[base + 12][8];
+            ewe_a_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
+                          cmd_mem[base + 5], cmd_mem[base + 4]};
+            ewe_b_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
+                          cmd_mem[base + 9], cmd_mem[base + 8]};
+            ewe_elem_count <= cmd_mem[base + 12][7:0];
+            ewe_op_mode <= cmd_mem[base + 12][9:8];
             l1mesh_wdata <= {cmd_mem[base + 2], cmd_mem[base + 1],
                              cmd_mem[base + 14], cmd_mem[base + 15]};
             l1mesh_wstrb <= 16'hffff;
@@ -100,35 +154,80 @@ module host_final #(
         for (load_i = 0; load_i < MAX_COMMANDS * WORDS_PER_COMMAND; load_i = load_i + 1)
             cmd_mem[load_i] = 32'd0;
 
-        // Command 0: UDMA read path.
-        cmd_mem[0] = {28'd0, OP_UDMA};
-        cmd_mem[1] = 32'd256;
+        // Command 0: CONV sample MAC.
+        cmd_mem[0] = {28'd0, OP_CONV};
+        cmd_mem[1] = 32'd16;
         cmd_mem[2] = 32'h0000_02a0;
-        cmd_mem[3] = 32'd0;
-        cmd_mem[4] = 32'd512;
-        cmd_mem[5] = 32'd3;
+        cmd_mem[4] = 32'h0102_0304;
+        cmd_mem[5] = 32'hfc07_0000;
+        cmd_mem[8] = 32'h0201_ff03;
+        cmd_mem[9] = 32'h0506_0000;
+        cmd_mem[12] = 32'd6;
+        cmd_mem[13] = 32'd5;
+        cmd_mem[14] = 32'sd1073741824;
+        cmd_mem[15] = 32'd1;
+        cmd_mem[16] = -32'sd128;
+        cmd_mem[17] = 32'sd127;
+        cmd_mem[18] = 32'd18;
 
-        // Command 1: TNPS space-to-depth over a 4x4x1 tensor, block=2.
-        cmd_mem[20] = {28'd0, OP_TNPS};
-        cmd_mem[21] = 32'd128;
-        cmd_mem[22] = 32'h0000_03f0;
-        cmd_mem[23] = 32'd2;
-        cmd_mem[26] = 32'd4;
-        cmd_mem[27] = 32'd4;
-        cmd_mem[28] = 32'd1;
-        cmd_mem[29] = 32'd2;
-        cmd_mem[30] = 32'd2;
-        cmd_mem[31] = 32'd4;
-        cmd_mem[32] = 32'd2;
-        cmd_mem[33] = 32'd1;
-        cmd_mem[34] = 32'd2;
-        cmd_mem[35] = 32'd0;
-        cmd_mem[36] = 32'd4;
-        cmd_mem[37] = 32'd2;
-        cmd_mem[38] = 32'd1;
+        // Command 1: REQUANT sample using the CONV raw accumulator.
+        cmd_mem[20] = {28'd0, OP_REQUANT};
+        cmd_mem[21] = 32'd1;
+        cmd_mem[22] = 32'h0000_02b0;
+        cmd_mem[24] = 32'd18;
+        cmd_mem[34] = 32'sd1073741824;
+        cmd_mem[35] = 32'd1;
+        cmd_mem[36] = -32'sd128;
+        cmd_mem[37] = 32'sd127;
+        cmd_mem[38] = 32'd18;
 
-        // Command 2: stop.
-        cmd_mem[40] = {28'd0, OP_DONE};
+        // Command 2: POOL sample max over 7 INT8 elements.
+        cmd_mem[40] = {28'd0, OP_POOL};
+        cmd_mem[41] = 32'd7;
+        cmd_mem[42] = 32'h0000_02c0;
+        cmd_mem[44] = 32'h0102_0304;
+        cmd_mem[45] = 32'hfc07_0000;
+        cmd_mem[52] = 32'd7;
+        cmd_mem[58] = 32'd7;
+
+        // Command 3: EWE sample add over 4 INT8 elements.
+        cmd_mem[60] = {28'd0, OP_EWE};
+        cmd_mem[61] = 32'd4;
+        cmd_mem[62] = 32'h0000_02d0;
+        cmd_mem[64] = 32'h0102_0304;
+        cmd_mem[68] = 32'h0201_ff03;
+        cmd_mem[72] = 32'd4;
+        cmd_mem[78] = 32'd7;
+
+        // Command 4: UDMA read path.
+        cmd_mem[80] = {28'd0, OP_UDMA};
+        cmd_mem[81] = 32'd256;
+        cmd_mem[82] = 32'h0000_02a0;
+        cmd_mem[83] = 32'd0;
+        cmd_mem[84] = 32'd512;
+        cmd_mem[85] = 32'd3;
+
+        // Command 5: TNPS space-to-depth over a 4x4x1 tensor, block=2.
+        cmd_mem[100] = {28'd0, OP_TNPS};
+        cmd_mem[101] = 32'd128;
+        cmd_mem[102] = 32'h0000_03f0;
+        cmd_mem[103] = 32'd2;
+        cmd_mem[106] = 32'd4;
+        cmd_mem[107] = 32'd4;
+        cmd_mem[108] = 32'd1;
+        cmd_mem[109] = 32'd2;
+        cmd_mem[110] = 32'd2;
+        cmd_mem[111] = 32'd4;
+        cmd_mem[112] = 32'd2;
+        cmd_mem[113] = 32'd1;
+        cmd_mem[114] = 32'd2;
+        cmd_mem[115] = 32'd0;
+        cmd_mem[116] = 32'd4;
+        cmd_mem[117] = 32'd2;
+        cmd_mem[118] = 32'd1;
+
+        // Command 6: stop.
+        cmd_mem[120] = {28'd0, OP_DONE};
 
         program_path = "";
         if ($value$plusargs("FINAL_PROGRAM=%s", program_path))
@@ -160,6 +259,24 @@ module host_final #(
             tnps_elem_bytes <= 2'd1;
             tnps_sample_out_elem_index <= 32'd0;
             tnps_sample_in_elem_index <= 32'd0;
+            conv_act_vec <= 128'd0;
+            conv_wgt_vec <= 128'd0;
+            conv_elem_count <= 8'd0;
+            conv_zp_in <= 16'sd0;
+            conv_bias <= 32'sd0;
+            conv_multiplier <= 32'sd1073741824;
+            conv_shift <= 8'sd1;
+            conv_zp_out <= 32'sd0;
+            conv_act_min <= -32'sd128;
+            conv_act_max <= 32'sd127;
+            requant_input_value <= 32'sd0;
+            pool_avg_mode <= 1'b0;
+            pool_sample_vec <= 128'd0;
+            pool_elem_count <= 8'd0;
+            ewe_op_mode <= 2'd0;
+            ewe_a_vec <= 128'd0;
+            ewe_b_vec <= 128'd0;
+            ewe_elem_count <= 8'd0;
             test_done <= 1'b0;
             test_fail <= 1'b0;
             issued_count <= 32'd0;
@@ -200,6 +317,36 @@ module host_final #(
                         if (placement_route_cycles == 32'd0) begin
                             $display("HOST_FINAL_FAIL: zero route cycles cmd=%0d op=%0d",
                                      command_index, desc_op_class);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) &&
+                            (conv_out_q !== cmd_mem[base + 18][7:0])) begin
+                            $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
+                                     command_index, conv_acc_out, conv_scaled_out,
+                                     conv_out_q, $signed(cmd_mem[base + 18][7:0]));
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_REQUANT) &&
+                            (requant_out_q !== cmd_mem[base + 18][7:0])) begin
+                            $display("HOST_FINAL_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
+                                     command_index, requant_scaled_out,
+                                     requant_out_q, $signed(cmd_mem[base + 18][7:0]));
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_POOL) &&
+                            (pool_out_q !== cmd_mem[base + 18][7:0])) begin
+                            $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
+                                     command_index, pool_out,
+                                     $signed(cmd_mem[base + 18][7:0]),
+                                     pool_avg_mode);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_EWE) &&
+                            (ewe_out_q !== cmd_mem[base + 18][7:0])) begin
+                            $display("HOST_FINAL_FAIL: EWE sample cmd=%0d out=%0d expected=%0d mode=%0d",
+                                     command_index, ewe_out,
+                                     $signed(cmd_mem[base + 18][7:0]),
+                                     ewe_op_mode);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_TNPS) &&

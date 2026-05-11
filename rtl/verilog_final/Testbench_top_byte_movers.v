@@ -27,6 +27,24 @@ module Testbench_top_byte_movers;
     reg [1:0] tnps_elem_bytes;
     reg [31:0] tnps_sample_out_elem_index;
     reg [31:0] tnps_sample_in_elem_index;
+    reg [127:0] conv_act_vec;
+    reg [127:0] conv_wgt_vec;
+    reg [7:0] conv_elem_count;
+    reg signed [15:0] conv_zp_in;
+    reg signed [31:0] conv_bias;
+    reg signed [31:0] conv_multiplier;
+    reg signed [7:0] conv_shift;
+    reg signed [31:0] conv_zp_out;
+    reg signed [31:0] conv_act_min;
+    reg signed [31:0] conv_act_max;
+    reg signed [31:0] requant_input_value;
+    reg pool_avg_mode;
+    reg [127:0] pool_sample_vec;
+    reg [7:0] pool_elem_count;
+    reg [1:0] ewe_op_mode;
+    reg [127:0] ewe_a_vec;
+    reg [127:0] ewe_b_vec;
+    reg [7:0] ewe_elem_count;
     wire done_valid;
     wire busy;
     wire [3:0] active_op_class;
@@ -35,6 +53,15 @@ module Testbench_top_byte_movers;
     wire [31:0] tnps_sample_src_byte_offset;
     wire [31:0] tnps_sample_dst_byte_offset;
     wire tnps_sample_valid;
+    wire signed [31:0] conv_acc_out;
+    wire signed [31:0] conv_scaled_out;
+    wire signed [7:0] conv_out_q;
+    wire signed [31:0] requant_scaled_out;
+    wire signed [7:0] requant_out_q;
+    wire signed [31:0] pool_out;
+    wire signed [7:0] pool_out_q;
+    wire signed [31:0] ewe_out;
+    wire signed [7:0] ewe_out_q;
     wire [31:0] placement_route_cycles;
     wire [8:0] block_busy;
     wire [8:0] block_done_valid;
@@ -67,6 +94,24 @@ module Testbench_top_byte_movers;
         .tnps_elem_bytes(tnps_elem_bytes),
         .tnps_sample_out_elem_index(tnps_sample_out_elem_index),
         .tnps_sample_in_elem_index(tnps_sample_in_elem_index),
+        .conv_act_vec(conv_act_vec),
+        .conv_wgt_vec(conv_wgt_vec),
+        .conv_elem_count(conv_elem_count),
+        .conv_zp_in(conv_zp_in),
+        .conv_bias(conv_bias),
+        .conv_multiplier(conv_multiplier),
+        .conv_shift(conv_shift),
+        .conv_zp_out(conv_zp_out),
+        .conv_act_min(conv_act_min),
+        .conv_act_max(conv_act_max),
+        .requant_input_value(requant_input_value),
+        .pool_avg_mode(pool_avg_mode),
+        .pool_sample_vec(pool_sample_vec),
+        .pool_elem_count(pool_elem_count),
+        .ewe_op_mode(ewe_op_mode),
+        .ewe_a_vec(ewe_a_vec),
+        .ewe_b_vec(ewe_b_vec),
+        .ewe_elem_count(ewe_elem_count),
         .done_valid(done_valid),
         .done_ready(1'b1),
         .busy(busy),
@@ -78,7 +123,16 @@ module Testbench_top_byte_movers;
         .tnps_sample_valid(tnps_sample_valid),
         .placement_route_cycles(placement_route_cycles),
         .block_busy(block_busy),
-        .block_done_valid(block_done_valid)
+        .block_done_valid(block_done_valid),
+        .conv_acc_out(conv_acc_out),
+        .conv_scaled_out(conv_scaled_out),
+        .conv_out_q(conv_out_q),
+        .requant_scaled_out(requant_scaled_out),
+        .requant_out_q(requant_out_q),
+        .pool_out(pool_out),
+        .pool_out_q(pool_out_q),
+        .ewe_out(ewe_out),
+        .ewe_out_q(ewe_out_q)
     );
 
     task issue_desc;
@@ -135,6 +189,24 @@ module Testbench_top_byte_movers;
         tnps_elem_bytes = 2'd1;
         tnps_sample_out_elem_index = 32'd2;
         tnps_sample_in_elem_index = 32'd0;
+        conv_act_vec = 128'd0;
+        conv_wgt_vec = 128'd0;
+        conv_elem_count = 8'd0;
+        conv_zp_in = 16'sd0;
+        conv_bias = 32'sd0;
+        conv_multiplier = 32'sd1073741824;
+        conv_shift = 8'sd1;
+        conv_zp_out = 32'sd0;
+        conv_act_min = -32'sd128;
+        conv_act_max = 32'sd127;
+        requant_input_value = 32'sd0;
+        pool_avg_mode = 1'b0;
+        pool_sample_vec = 128'd0;
+        pool_elem_count = 8'd0;
+        ewe_op_mode = 2'd0;
+        ewe_a_vec = 128'd0;
+        ewe_b_vec = 128'd0;
+        ewe_elem_count = 8'd0;
         failures = 0;
 
         repeat (4) @(posedge clk);
