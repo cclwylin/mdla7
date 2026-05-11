@@ -2126,6 +2126,8 @@ def main():
     ap.add_argument("--l1-timing", choices=("fast", "conflict", "mesh"), default="fast",
                     help="L1Mesh timing mode: fast aggregate estimate (default) "
                          "or per-bank SRAM port conflict model, or 4x4 mesh router/link conflict model")
+    ap.add_argument("--engine-model", choices=("model", "rtl"), default="model",
+                    help="Engine timing model for EWE/POOL/TNPS: analytical model or RTL-style model")
     ap.add_argument("--fast-only", action="store_true",
                     help="alias for --l1-timing fast, matching sweep runners")
     args = ap.parse_args()
@@ -2171,7 +2173,8 @@ def main():
     elif args.all_layers:
         ok = run_all_layers(target, l1_timing=args.l1_timing)  # legacy: N independent sims
     else:
-        ok = compile_and_run(target, l1_timing=args.l1_timing)
+        ok = compile_and_run(target, l1_timing=args.l1_timing,
+                             engine_model=args.engine_model)
     sys.exit(0 if ok else 1)
 
 

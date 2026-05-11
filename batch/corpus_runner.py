@@ -246,6 +246,10 @@ def run_corpus(*,
                     help="ignore prior --csv-out cache and re-run everything")
     ap.add_argument("--fast-only", action="store_true",
                     help="run only fast mode; leave conflict/mesh CSV fields empty")
+    ap.add_argument("--engine-model", choices=("model", "rtl"), default="model",
+                    help="engine timing model: analytical model or RTL-style EWE/POOL/TNPS")
+    ap.add_argument("--rtl-fast", action="store_true",
+                    help="alias for --fast-only --engine-model=rtl")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
     ap.add_argument("--no-html", action="store_true",
@@ -253,9 +257,18 @@ def run_corpus(*,
     ap.add_argument("--list", action="store_true",
                     help="list selected models and exit")
     args = ap.parse_args()
+    if args.rtl_fast:
+        args.fast_only = True
+        args.engine_model = "rtl"
 
     OUT_DIR.mkdir(exist_ok=True)
     default_csv = Path(default_csv_out)
+    if args.engine_model != "model" and Path(args.csv_out) == default_csv:
+        args.csv_out = str(default_csv.with_name(
+            f"{default_csv.stem}.{args.engine_model}{default_csv.suffix}"))
+    if args.engine_model != "model":
+        profile_path = Path(profile_html)
+        profile_html = f"{profile_path.stem}.{args.engine_model}{profile_path.suffix}"
     model_dir = Path(args.model_dir)
     patterns = _discover_models(model_dir, args.filter, recursive=recursive)
     order_csv = Path(args.pattern_order_csv) if args.pattern_order_csv else None
@@ -315,20 +328,23 @@ def run_corpus(*,
         rel_model_dir = model_dir.relative_to(REPO_ROOT)
     except ValueError:
         rel_model_dir = model_dir
+    model_label = "" if args.engine_model == "model" else f", engine={args.engine_model}"
     print(f"==== MDLA7 {corpus_name} regression: {len(patterns)} models "
-          f"(from {rel_model_dir}) ====", flush=True)
+          f"(from {rel_model_dir}{model_label}) ====", flush=True)
 
     rows_out = []
     t_total = time.time()
     for i, pat in enumerate(patterns, 1):
-        if pat in prior_ok and (args.no_html or _report_exists_for(pat, model_dir)):
+        if pat in prior_ok and (args.no_html or _report_exists_for(
+                pat, model_dir, engine_model=args.engine_model)):
             cached = prior_ok[pat]
             cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
             cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
             cached_conflict_status = "" if args.fast_only else cached.get("conflict_status", "ok")
             cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
-            suffix = (cached.get("status", "ok") if args.fast_only
-                      else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}")
+            model_suffix = "" if args.engine_model == "model" else f"/{args.engine_model}"
+            suffix = ((cached.get("status", "ok") + model_suffix) if args.fast_only
+                      else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}{model_suffix}")
             model_path = model_dir / f"{pat}.tflite"
             mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
             mb_suffix = (f" fuse={mb.get('fuse_hit', 'no')}"
@@ -365,14 +381,16 @@ def run_corpus(*,
 
         _, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
             pat, model_dir, progress=_progress, fast_only=args.fast_only,
-            skip_html=args.no_html)
+            skip_html=args.no_html, engine_model=args.engine_model)
         elapsed = time.time() - t0
         ms_str = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         conflict_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
                         else f"{'—':>10s}    ")
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
-        suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
+        model_suffix = "" if args.engine_model == "model" else f"/{args.engine_model}"
+        suffix = ((status + model_suffix) if args.fast_only
+                  else f"{status}/{conflict_status}/{mesh_status}{model_suffix}")
         model_path = model_dir / f"{pat}.tflite"
         mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
         mb_suffix = (f" fuse={mb.get('fuse_hit', 'no')}"
@@ -399,7 +417,10 @@ def run_corpus(*,
         if not args.keep_bin:
             for bin_path in (_artefact_paths(model_path)["prog"],
                              OUT_DIR / f"{pat}.conflict.bin",
-                             OUT_DIR / f"{pat}.mesh.bin"):
+                             OUT_DIR / f"{pat}.mesh.bin",
+                             OUT_DIR / f"{pat}.rtl.bin",
+                             OUT_DIR / f"{pat}.rtl.conflict.bin",
+                             OUT_DIR / f"{pat}.rtl.mesh.bin"):
                 try:
                     if bin_path.exists():
                         bin_path.unlink()

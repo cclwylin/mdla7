@@ -64,7 +64,17 @@ SC_MODULE(TnpsEngine) {
     void wait_bytes(uint64_t bytes) {
         // 8 R + 8 W payload lanes = 128 B/cyc in each direction.
         const uint64_t model_cycles = (bytes + 127) / 128 + 8;
-        wait(double(model_cycles), sc_core::SC_NS);
+        if (!is_rtl_style(engine_model)) {
+            wait(double(model_cycles), sc_core::SC_NS);
+            return;
+        }
+        const uint64_t read_cyc =
+            (bytes + PayloadPortCount::TNPS_R * PAYLOAD_BYTES - 1) /
+            (PayloadPortCount::TNPS_R * PAYLOAD_BYTES);
+        const uint64_t write_cyc =
+            (bytes + PayloadPortCount::TNPS_W * PAYLOAD_BYTES - 1) /
+            (PayloadPortCount::TNPS_W * PAYLOAD_BYTES);
+        wait(4 + read_cyc + write_cyc + 4, sc_core::SC_NS);
     }
 
     void do_linear(const TnpsBody& t) {

@@ -347,7 +347,7 @@ int sc_main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
                   << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
-                  << " [--engine-model=model] [--no-microblock]\n";
+                  << " [--engine-model=model|rtl] [--no-microblock]\n";
         return 2;
     }
     bool quiet = false;
@@ -370,11 +370,13 @@ int sc_main(int argc, char* argv[]) {
             enable_microblocks = false;
         } else if (arg == "--engine-model=model" || arg == "--engine-model=analytical") {
             engine_model = EngineModel::Analytical;
+        } else if (arg == "--engine-model=rtl" || arg == "--engine-model=rtl-style") {
+            engine_model = EngineModel::RtlStyle;
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
                       << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
-                      << " [--engine-model=model] [--no-microblock]\n";
+                      << " [--engine-model=model|rtl] [--no-microblock]\n";
             return 2;
         }
     }
@@ -406,7 +408,7 @@ int sc_main(int argc, char* argv[]) {
             (l1_timing_mode == L1TimingMode::MeshConflict) ? "mesh" :
             (l1_timing_mode == L1TimingMode::PortConflict) ? "conflict" : "fast";
         std::cout << "  L1 timing: " << timing_name << "\n";
-        std::cout << "  engine model: model\n";
+        std::cout << "  engine model: " << engine_model_name(engine_model) << "\n";
     }
 
     // v8.22: size the DRAM model to fit this program's highest-used address.
@@ -11151,7 +11153,7 @@ int sc_main(int argc, char* argv[]) {
         pf << "    \"layers\": " << N << ",\n";
         pf << "    \"pass\": " << pass << ", \"fail\": " << fail << ",\n";
         pf << "    \"total_cycles\": " << total_cycles << ",\n";
-        pf << "    \"engine_model\": \"model\",\n";
+        pf << "    \"engine_model\": \"" << engine_model_name(engine_model) << "\",\n";
         pf << "    \"dram_read_bytes\": "  << total_dram_r << ",\n";
         pf << "    \"dram_write_bytes\": " << total_dram_w << ",\n";
         pf << "    \"sram_read_bytes\": "  << total_sram_r << ",\n";

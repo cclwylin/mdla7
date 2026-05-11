@@ -67,7 +67,16 @@ enum class L1TimingMode {
 
 enum class EngineModel {
     Analytical,
+    RtlStyle,
 };
+
+inline bool is_rtl_style(EngineModel model) {
+    return model == EngineModel::RtlStyle;
+}
+
+inline const char* engine_model_name(EngineModel model) {
+    return is_rtl_style(model) ? "rtl" : "model";
+}
 
 class L1Mesh : public sc_core::sc_module {
 public:
