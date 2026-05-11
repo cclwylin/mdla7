@@ -88,6 +88,37 @@ struct RtlPhaseTrace {
     std::string stall;
 };
 
+struct L1ManagerReq {
+    EngineId source = EID_HOST;
+    uint8_t tid = 0;
+    uint8_t qos = 0;
+    bool is_write = false;
+    bool is_compressed = false;
+    bool is_instant = false;
+    uint32_t addr = 0;
+    uint32_t bytes = 0;
+    uint32_t raw_bytes = 0;
+    uint32_t compressed_bytes = 0;
+
+    uint32_t charged_bytes() const {
+        if (is_compressed && compressed_bytes)
+            return compressed_bytes;
+        return bytes;
+    }
+    uint32_t payload_bytes() const {
+        return raw_bytes ? raw_bytes : bytes;
+    }
+    PayloadOpcode opcode() const {
+        return is_write ? PL_WRITE_REQ : PL_READ_REQ;
+    }
+};
+
+struct L1ManagerResp {
+    uint8_t tid = 0;
+    uint8_t status = 0;
+    sc_core::sc_time done{sc_core::SC_ZERO_TIME};
+};
+
 class L1Mesh : public sc_core::sc_module {
 public:
     struct Stats {
@@ -828,64 +859,45 @@ public:
       : sc_module(nm), mesh_(mesh), dram_(dram) {}
 
     void read(uint32_t addr, void* dst, uint32_t n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, n);
-        else if (addr_in_dram(addr)) dram_.read(addr, dst, n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
-        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, n, true);
+        execute(make_req(addr, n, false), dst, nullptr);
     }
     void read_compressed(uint32_t addr, void* dst, uint32_t raw_n,
                          uint32_t compressed_n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
-        else if (addr_in_dram(addr)) dram_.read_compressed(addr, dst, raw_n, compressed_n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
-        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, compressed_n, true);
+        L1ManagerReq req = make_req(addr, compressed_n, false);
+        req.is_compressed = true;
+        req.raw_bytes = raw_n;
+        req.compressed_bytes = compressed_n;
+        execute(req, dst, nullptr);
     }
     void read_compressed_instant(uint32_t addr, void* dst, uint32_t raw_n) {
-        if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
-        else if (addr_in_dram(addr)) dram_.read_compressed_instant(addr, dst, raw_n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        L1ManagerReq req = make_req(addr, raw_n, false);
+        req.is_compressed = true;
+        req.is_instant = true;
+        req.raw_bytes = raw_n;
+        req.compressed_bytes = raw_n;
+        execute(req, dst, nullptr);
     }
     void write(uint32_t addr, const void* src, uint32_t n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) mesh_.write(addr, src, n);
-        else if (addr_in_dram(addr)) dram_.write(addr, src, n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
-        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, n, false);
+        execute(make_req(addr, n, true), nullptr, src);
     }
     void write_instant(uint32_t addr, const void* src, uint32_t n) {
-        if (addr_in_l1mesh(addr)) mesh_.write_instant(addr, src, n);
-        else if (addr_in_dram(addr)) dram_.write(addr, src, n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        L1ManagerReq req = make_req(addr, n, true);
+        req.is_instant = true;
+        execute(req, nullptr, src);
     }
     void write_compressed(uint32_t addr, const void* src, uint32_t raw_n,
                           uint32_t compressed_n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) mesh_.write(addr, src, raw_n);
-        else if (addr_in_dram(addr)) dram_.write_compressed(addr, src, raw_n, compressed_n);
-        else SC_REPORT_ERROR("L1Manager", "addr out of range");
-        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, compressed_n, false);
+        L1ManagerReq req = make_req(addr, compressed_n, true);
+        req.is_compressed = true;
+        req.raw_bytes = raw_n;
+        req.compressed_bytes = compressed_n;
+        execute(req, nullptr, src);
     }
     AccessTicket read_async(uint32_t addr, void* dst, uint32_t n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) {
-            AccessTicket ticket = mesh_.read_async(addr, dst, n);
-            record_rtl_access(t_begin, ticket.done, addr, n, true);
-            return ticket;
-        }
-        read(addr, dst, n);
-        return AccessTicket{sc_core::sc_time_stamp()};
+        return execute_async(make_req(addr, n, false), dst, nullptr);
     }
     AccessTicket write_async(uint32_t addr, const void* src, uint32_t n) {
-        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
-        if (addr_in_l1mesh(addr)) {
-            AccessTicket ticket = mesh_.write_async(addr, src, n);
-            record_rtl_access(t_begin, ticket.done, addr, n, false);
-            return ticket;
-        }
-        write(addr, src, n);
-        return AccessTicket{sc_core::sc_time_stamp()};
+        return execute_async(make_req(addr, n, true), nullptr, src);
     }
     AccessTicket write_strided_rows(uint32_t dst, const void* src,
                                     uint32_t rows, uint32_t src_row,
@@ -893,7 +905,8 @@ public:
         const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(dst)) {
             AccessTicket ticket = mesh_.write_strided_rows(dst, src, rows, src_row, dst_row, dst_col);
-            record_rtl_access(t_begin, ticket.done, dst, rows * src_row, false);
+            L1ManagerReq req = make_req(dst, rows * src_row, true);
+            record_rtl_access(t_begin, ticket.done, req);
             return ticket;
         }
         SC_REPORT_ERROR("L1Manager", "write_strided_rows requires L1Mesh dst address");
@@ -906,7 +919,8 @@ public:
         const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(src) && addr_in_l1mesh(dst)) {
             AccessTicket ticket = mesh_.channel_pack(src, dst, rows, src_row, src_stride, dst_row, dst_col);
-            record_rtl_access(t_begin, ticket.done, dst, rows * (src_row + dst_row), false);
+            L1ManagerReq req = make_req(dst, rows * (src_row + dst_row), true);
+            record_rtl_access(t_begin, ticket.done, req);
             return ticket;
         }
         SC_REPORT_ERROR("L1Manager", "channel_pack requires L1Mesh addresses");
@@ -920,9 +934,83 @@ public:
         wait_ticket(AccessTicket{done});
     }
 
+    L1ManagerResp execute(const L1ManagerReq& req, void* dst, const void* src) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        const uint32_t payload_bytes = req.payload_bytes();
+        const uint32_t charged_bytes = req.charged_bytes();
+        if (addr_in_l1mesh(req.addr)) {
+            if (req.is_write) {
+                if (req.is_instant) mesh_.write_instant(req.addr, src, payload_bytes);
+                else                 mesh_.write(req.addr, src, payload_bytes);
+            } else {
+                mesh_.read(req.addr, dst, payload_bytes);
+            }
+        } else if (addr_in_dram(req.addr)) {
+            if (req.is_write) {
+                if (req.is_compressed)
+                    dram_.write_compressed(req.addr, src, payload_bytes, charged_bytes);
+                else
+                    dram_.write(req.addr, src, payload_bytes);
+            } else {
+                if (req.is_instant)
+                    dram_.read_compressed_instant(req.addr, dst, payload_bytes);
+                else if (req.is_compressed)
+                    dram_.read_compressed(req.addr, dst, payload_bytes, charged_bytes);
+                else
+                    dram_.read(req.addr, dst, payload_bytes);
+            }
+        } else {
+            SC_REPORT_ERROR("L1Manager", "addr out of range");
+        }
+        L1ManagerResp resp;
+        resp.tid = req.tid;
+        resp.done = sc_core::sc_time_stamp();
+        record_rtl_access(t_begin, resp.done, req);
+        return resp;
+    }
+
+    AccessTicket execute_async(const L1ManagerReq& req, void* dst, const void* src) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        if (addr_in_l1mesh(req.addr)) {
+            AccessTicket ticket = req.is_write
+                ? mesh_.write_async(req.addr, src, req.payload_bytes())
+                : mesh_.read_async(req.addr, dst, req.payload_bytes());
+            record_rtl_access(t_begin, ticket.done, req);
+            return ticket;
+        }
+        execute(req, dst, src);
+        return AccessTicket{sc_core::sc_time_stamp()};
+    }
+
 private:
     static bool in_process() {
         return sc_core::sc_get_current_process_handle().valid();
+    }
+
+    static EngineId source_from_process() {
+        const auto h = sc_core::sc_get_current_process_handle();
+        if (!h.valid()) return EID_HOST;
+        const char* n = h.name();
+        if (!n) return EID_HOST;
+        if (std::strstr(n, "conv")) return EID_CONV;
+        if (std::strstr(n, "requant")) return EID_REQUANT;
+        if (std::strstr(n, "ewe")) return EID_EWE;
+        if (std::strstr(n, "pool")) return EID_POOL;
+        if (std::strstr(n, "tnps")) return EID_TNPS;
+        if (std::strstr(n, "udma")) return EID_UDMA;
+        if (std::strstr(n, "host")) return EID_HOST;
+        return EID_HOST;
+    }
+
+    static L1ManagerReq make_req(uint32_t addr, uint32_t bytes, bool is_write) {
+        L1ManagerReq req;
+        req.source = source_from_process();
+        req.is_write = is_write;
+        req.addr = addr;
+        req.bytes = bytes;
+        req.raw_bytes = bytes;
+        req.compressed_bytes = bytes;
+        return req;
     }
 
     static uint64_t cycles_between(sc_core::sc_time begin, sc_core::sc_time end) {
@@ -931,7 +1019,7 @@ private:
     }
 
     void record_rtl_access(sc_core::sc_time begin, sc_core::sc_time done,
-                           uint32_t addr, uint32_t bytes, bool is_read) {
+                           const L1ManagerReq& req) {
         if (!is_rtl_style(engine_model) || !in_process())
             return;
         const uint64_t begin_ns = uint64_t(begin.to_seconds() * 1e9);
@@ -939,20 +1027,23 @@ private:
         const uint64_t display = std::max<uint64_t>(1, observed);
         busy_time += done > begin ? (done - begin) : sc_core::SC_ZERO_TIME;
 
-        const bool l1 = addr_in_l1mesh(addr);
+        const bool l1 = addr_in_l1mesh(req.addr);
         const uint64_t route_cycles = display > 1 ? display - 1 : 1;
+        const uint32_t bytes = req.charged_bytes();
         std::vector<RtlPhaseTrace> phases;
         RtlPhaseTrace decode;
         decode.name = "decode";
         decode.cycles = 1;
+        decode.lanes = req.source;
         decode.stall = l1 ? "l1_addr_decode" : "dram_addr_decode";
         phases.push_back(decode);
 
         RtlPhaseTrace route;
-        route.name = l1 ? "l1_route" : (is_read ? "dram_read" : "dram_write");
+        route.name = l1 ? "l1_route" : (!req.is_write ? "dram_read" : "dram_write");
         route.cycles = route_cycles;
-        route.read_bytes = is_read ? bytes : 0;
-        route.write_bytes = is_read ? 0 : bytes;
+        route.read_bytes = !req.is_write ? bytes : 0;
+        route.write_bytes = req.is_write ? bytes : 0;
+        route.lanes = req.tid;
         route.stall = l1 ? "l1mesh_payload" : "dram_axi";
         phases.push_back(route);
         append_rtl_task(begin_ns, begin_ns + display, phases);
