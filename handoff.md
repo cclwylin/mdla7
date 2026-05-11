@@ -163,6 +163,37 @@ make -C systemc -s
 python3 batch/plot_mdla6_pattern_ratio.py
 ```
 
+ETHZ_v6 runner usage：
+
+```bash
+# Pure analytical fast model
+./batch/run_ethz_v6.py --fast-only
+./batch/run_ethz_v6.py --filter mobilebert_quant --fast-only --rerun-all
+
+# RTL-style engine fast model
+./batch/run_ethz_v6.py --rtl-fast
+./batch/run_ethz_v6.py --filter mobilebert_quant --rtl-fast --rerun-all
+
+# Compare pure fast vs RTL fast and emit combined CSV/HTML
+./batch/run_ethz_v6.py --compare-rtl-fast
+./batch/run_ethz_v6.py --filter resnet_quant --limit 1 --compare-rtl-fast --rerun-all
+```
+
+ETHZ_v6 output paths：
+
+```text
+batch/output/ethz_v6_regression.csv
+batch/output/ethz_v6_regression.rtl.csv
+batch/output/ethz_v6_regression.rtl_compare.csv
+batch/profile_ethz_v6.html
+batch/profile_ethz_v6.rtl.html
+batch/profile_ethz_v6.rtl_compare.html
+batch/output/<model>.html
+batch/output/<model>.rtl.html
+batch/output/<model>.rtl_compare.html
+batch/output/<model>.rtl.profile.json
+```
+
 Profile entry：
 
 ```text
