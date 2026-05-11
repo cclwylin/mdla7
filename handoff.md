@@ -50,6 +50,22 @@ Branch：`main`
 後續新增 path 時，先映射到 reusable microblock pattern，不要再往
 Path 15、Path 16 這種 hardcoded special-case 擴張。
 
+## RTL / Synth RTL Next-Step
+
+- `mobilenet_v3_float` 的 `rtl/fast = 1.46` 主要卡在 EWE `h_swsh`：
+  RTL-style timing 目前把 HARD_SWISH 算成 4-pass unary compute，導致
+  `h_swsh` 累計比 fast 多約 `945k cycles`。這是 timing model 太保守，
+  不是 functional datapath 錯；profile 仍 PASS。
+- 設計決策：HARD_SWISH 要視為 EWE 硬體 fused pipeline，
+  throughput 以 lane pipeline 為主，不應拆成 add/clamp/mul/scale 四個
+  full tensor pass。RTL-style model 後續應把 `ES_HARD_SWISH` 獨立成
+  fused pipeline timing（先用 1-pass 或小 pipeline latency 近似），
+  `GELU/LOGISTIC/SOFTMAX` 再保留各自多 pass / LUT / reduction 行為。
+- Synthesizable RTL TODO：實作 EWE HARD_SWISH pipeline datapath：
+  `fp16 input -> fp32 convert -> x+3 -> clamp[0,6] -> multiply x -> scale 1/6
+  -> clip -> fp16 output`。目標是 initiation interval 1 element/lane，
+  latency 用 pipeline depth 表示，不用 full tensor multi-pass 表示。
+
 ### ETHZ_V6 DRAM_W 掃描 Next-Step
 
 重新掃描 `model/ETHZ_v6` 對應 `batch/output/*.fast.html`，門檻
