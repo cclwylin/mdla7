@@ -58,6 +58,7 @@ SC_MODULE(EweEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -84,16 +85,35 @@ SC_MODULE(EweEngine) {
         return ceil_div_u64(bytes, PayloadPortCount::EWE_W * PAYLOAD_BYTES);
     }
 
-    uint64_t rtl_binary_cycles(uint64_t elems, uint64_t lanes) const {
-        const uint64_t bytes = elems * elem_bytes();
-        return 4 + rtl_read_cycles(2 * bytes + 48) +
-               ceil_div_u64(elems, lanes) + rtl_write_cycles(bytes) + 2;
+    void rtl_wait_phase(const char* name, uint64_t cycles) {
+        last_rtl_phases.emplace_back(name, cycles);
+        if (cycles)
+            wait(cycles, sc_core::SC_NS);
     }
 
-    uint64_t rtl_unary_cycles(uint64_t elems, uint64_t lanes, uint64_t op_passes) const {
+    void rtl_run_ewe_transaction(uint64_t read_bytes,
+                                 uint64_t compute_cycles,
+                                 uint64_t write_bytes) {
+        last_rtl_phases.clear();
+        rtl_wait_phase("issue", 4);
+        rtl_wait_phase("read", rtl_read_cycles(read_bytes));
+        rtl_wait_phase("compute", compute_cycles);
+        rtl_wait_phase("write", rtl_write_cycles(write_bytes));
+        rtl_wait_phase("done", 2);
+    }
+
+    void rtl_run_binary(uint64_t elems, uint64_t lanes) {
         const uint64_t bytes = elems * elem_bytes();
-        return 4 + rtl_read_cycles(bytes + 8) +
-               op_passes * ceil_div_u64(elems, lanes) + rtl_write_cycles(bytes) + 2;
+        rtl_run_ewe_transaction(2 * bytes + 48,
+                                ceil_div_u64(elems, lanes),
+                                bytes);
+    }
+
+    void rtl_run_unary(uint64_t elems, uint64_t lanes, uint64_t op_passes) {
+        const uint64_t bytes = elems * elem_bytes();
+        rtl_run_ewe_transaction(bytes + 8,
+                                op_passes * ceil_div_u64(elems, lanes),
+                                bytes);
     }
 
     // v6: TFLite int8 ADD reference. Params blob layout at e.lut_addr:
@@ -432,7 +452,7 @@ SC_MODULE(EweEngine) {
                     }
                 }
                 if (is_rtl_style(engine_model))
-                    wait(rtl_binary_cycles(elems, lanes), sc_core::SC_NS);
+                    rtl_run_binary(elems, lanes);
                 else
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH ||
@@ -448,7 +468,7 @@ SC_MODULE(EweEngine) {
                 }
                 if (is_rtl_style(engine_model)) {
                     const uint64_t passes = (e.subtype == ES_GELU) ? 6 : 4;
-                    wait(rtl_unary_cycles(elems, lanes, passes), sc_core::SC_NS);
+                    rtl_run_unary(elems, lanes, passes);
                 } else {
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
                 }
@@ -507,7 +527,7 @@ SC_MODULE(EweEngine) {
                 const uint64_t per_pass = (softmax_vec + softmax_lanes - 1) / softmax_lanes;
                 const uint64_t compute_cyc = softmax_rows * 3 * per_pass;
                 if (is_rtl_style(engine_model))
-                    wait(rtl_unary_cycles(elems, softmax_lanes, 3), sc_core::SC_NS);
+                    rtl_run_unary(elems, softmax_lanes, 3);
                 else
                     wait(compute_cyc, sc_core::SC_NS);
             }
