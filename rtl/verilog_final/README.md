@@ -30,10 +30,14 @@ Smoke tests:
 Current smoke coverage:
 
 - `conv`: true Verilog INT8 MAC + bias + MBQM + clamp primitive.
+- `requant`: true Verilog MBQM + output zero-point + activation clamp sample.
+- `pool`: true Verilog INT8 max/avg sample reduction.
+- `ewe`: true Verilog INT8 ADD/MUL/SUB vector sample with lane saturation.
 - `tnps`: true Verilog TNPS SPACE_TO_DEPTH / DEPTH_TO_SPACE address mapping.
 - `route`: placement-aware L1Mesh route-cycle estimator.
-- `contention`: L1Manager 2-deep input FIFO backpressure into L1Mesh service.
-- `top`: `mdla7_top_final` integration for UDMA/TNPS byte movers.
+- `contention`: L1Manager 2-deep input FIFO backpressure across UDMA,
+  REQUANT, EWE, POOL, and TNPS requesters into L1Mesh service.
+- `top`: `mdla7_top_final` integration for CONV/REQUANT/POOL/EWE/UDMA/TNPS.
 - `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top_final`.
 
 `host_final.v` is the first program-driven path for `verilog_final`. It uses a
@@ -81,15 +85,23 @@ Current converter behavior:
   takes up to 16 activation bytes and 16 weight bytes from the `.bin`, computes
   the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
   MAC result.
+- FP16/float CONV op kinds `0/1/6`: emitted as CONV FP sample descriptors. The
+  generator takes up to 8 activation half-floats and 8 weight half-floats,
+  computes the expected double-precision sample MAC, and `host_final.v` checks
+  the Verilog FP sample result.
 - INT8 CONV also emits a REQUANT sample descriptor using the same raw accumulator
   so `vf_requant_sample_engine` is exercised through `mdla7_top_final`.
 - INT8 AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL sample descriptors.
   The generator takes up to 16 input bytes from the `.bin`, computes the expected
   max or integer average, and `host_final.v` checks the Verilog pool result.
+- FP16/float AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL FP sample
+  descriptors. The generator takes up to 8 input half-floats, computes the
+  expected double-precision avg/max sample, and `host_final.v` checks the
+  Verilog FP pool result.
 - INT8 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE sample descriptors.
   The generator takes up to 16 bytes from input and weight/parameter payloads,
-  computes the expected clamped first-lane output, and `host_final.v` checks the
-  Verilog EWE result.
+  computes the expected sum of clamped lane outputs, and `host_final.v` checks
+  the Verilog EWE vector result.
 - `RESHAPE` / `CONCAT` / `TRANSPOSE` / `SLICE` / materialized byte movers:
   emitted as UDMA-style byte-moving descriptors for now.
 
@@ -105,6 +117,9 @@ Conv datapath status:
 - `vf_conv_sample_engine` connects that primitive to `mdla7_top_final`, issues
   activation/weight/output L1Mesh tokens, and is now reachable from generated
   `.bin` descriptors.
+- The same sample engine also has an FP16 input / real-valued MAC path for float
+  CONV descriptors. This is a simulator bring-up primitive, not yet a
+  synthesizable IEEE754 pipeline.
 - This is still a sample MAC path, not full-layer tile streaming or CRC.
 
 Requant datapath status:
@@ -119,6 +134,9 @@ Pool datapath status:
 - `vf_pool_sample_engine` runs INT8 max/avg reduction over a small sample window,
   issues L1Manager/L1Mesh read and write tokens, and is reachable from generated
   `.bin` descriptors.
+- The same pool sample engine also has an FP16 input / real-valued avg/max path
+  for float POOL descriptors. This is a simulator bring-up primitive, not yet a
+  synthesizable IEEE754 pipeline.
 - This is still a sample-window path; full H/W/C window traversal comes later.
 
 EWE datapath status:
@@ -126,8 +144,8 @@ EWE datapath status:
 - `vf_ewe_sample_engine` runs INT8 ADD/MUL/SUB on a small vector sample, issues
   L1Manager/L1Mesh read/read/write tokens, and is reachable from generated `.bin`
   descriptors.
-- This is still a first-lane correctness check plus timing token path; full
-  tensor traversal and vector writeback come later.
+- This is still a small vector correctness check plus timing token path; full
+  tensor traversal and writeback buffering come later.
 
 Descriptor word layout:
 
@@ -145,5 +163,8 @@ Descriptor word layout:
 | 15 | CONV `{zp_out, shift}` or TNPS sample input element index |
 | 16 | CONV activation min or expected TNPS sample source byte offset |
 | 17 | CONV activation max or expected TNPS sample destination byte offset |
-| 18 | CONV/REQUANT/POOL/EWE expected output byte or expected TNPS sample-valid bit |
+| 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
 | 19 | source layer index |
+
+For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9) and
+words 16/17 hold the expected double-precision sample result bits `{high, low}`.

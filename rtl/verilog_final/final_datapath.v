@@ -237,6 +237,7 @@ module vf_conv_sample_engine #(
     input      [MAX_ELEMS*8-1:0]  act_vec,
     input      [MAX_ELEMS*8-1:0]  wgt_vec,
     input      [7:0]              elem_count,
+    input                         fp_mode,
     input signed [15:0]           zp_in,
     input signed [31:0]           bias,
     input signed [31:0]           multiplier,
@@ -256,7 +257,8 @@ module vf_conv_sample_engine #(
     output reg [31:0]             remaining_cycles,
     output signed [31:0]          acc_out,
     output signed [31:0]          scaled_out,
-    output signed [7:0]           out_q
+    output signed [7:0]           out_q,
+    output reg [63:0]             fp_sum_bits
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -271,9 +273,13 @@ module vf_conv_sample_engine #(
     localparam [2:0] ST_COMPUTE = 3'd3;
     localparam [2:0] ST_STORE   = 3'd4;
     localparam [2:0] ST_DONE    = 3'd5;
+    localparam [7:0] MAX_INT_COUNT = MAX_ELEMS;
+    localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
     reg [2:0] state;
     reg [31:0] compute_remaining;
+    integer fp_i;
+    real fp_sum;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -283,9 +289,17 @@ module vf_conv_sample_engine #(
         end
     endfunction
 
-    wire [31:0] sample_bytes = (elem_count == 8'd0) ? 32'd1 : {24'd0, elem_count};
+    wire [7:0] safe_int_count = (elem_count == 8'd0) ? 8'd1 :
+                                (elem_count > MAX_INT_COUNT) ? MAX_INT_COUNT :
+                                elem_count;
+    wire [7:0] safe_fp_count = (elem_count == 8'd0) ? 8'd1 :
+                               (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
+                               elem_count;
+    wire [31:0] sample_bytes = fp_mode ? ({24'd0, safe_fp_count} << 1) :
+                                         {24'd0, safe_int_count};
     wire [31:0] payload_cycles = ceil_div(sample_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
-    wire [31:0] mac_cycles = ceil_div({24'd0, elem_count}, 32'd16) + 32'd1;
+    wire [31:0] mac_cycles = ceil_div(fp_mode ? {24'd0, safe_fp_count} :
+                                                 {24'd0, safe_int_count}, 32'd16) + 32'd1;
     wire req_state = (state == ST_ACT) || (state == ST_WGT) || (state == ST_STORE);
 
     assign start_ready = (state == ST_IDLE);
@@ -314,7 +328,55 @@ module vf_conv_sample_engine #(
         .out_q(out_q)
     );
 
+    function real pow2_int;
+        input integer exponent;
+        integer k;
+        real value;
+        begin
+            value = 1.0;
+            if (exponent >= 0) begin
+                for (k = 0; k < exponent; k = k + 1)
+                    value = value * 2.0;
+            end else begin
+                for (k = 0; k < -exponent; k = k + 1)
+                    value = value / 2.0;
+            end
+            pow2_int = value;
+        end
+    endfunction
+
+    function real fp16_to_real;
+        input [15:0] bits;
+        integer exp;
+        integer mant;
+        real value;
+        begin
+            exp = bits[14:10];
+            mant = bits[9:0];
+            if (exp == 0) begin
+                if (mant == 0)
+                    value = 0.0;
+                else
+                    value = (mant / 1024.0) * pow2_int(-14);
+            end else if (exp == 31) begin
+                value = 0.0;
+            end else begin
+                value = (1.0 + (mant / 1024.0)) * pow2_int(exp - 15);
+            end
+            fp16_to_real = bits[15] ? -value : value;
+        end
+    endfunction
+
     always @* begin
+        fp_sum = 0.0;
+        for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
+            if (fp_i < safe_fp_count)
+                fp_sum = fp_sum +
+                         (fp16_to_real(act_vec[fp_i*16 +: 16]) *
+                          fp16_to_real(wgt_vec[fp_i*16 +: 16]));
+        end
+        fp_sum_bits = $realtobits(fp_sum);
+
         case (state)
             ST_ACT: begin
                 phase_id = PH_ACT_READ;
@@ -575,6 +637,7 @@ module vf_pool_sample_engine #(
     input                         start_valid,
     output                        start_ready,
     input                         avg_mode,
+    input                         fp_mode,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
     output                        l1_req_valid,
@@ -588,7 +651,8 @@ module vf_pool_sample_engine #(
     output reg [3:0]              phase_id,
     output reg [31:0]             remaining_cycles,
     output reg signed [31:0]      pool_out,
-    output signed [7:0]           out_q
+    output signed [7:0]           out_q,
+    output reg [63:0]             fp_pool_bits
 );
     localparam [3:0] PH_CFG_DECODE   = 4'd1;
     localparam [3:0] PH_WINDOW_FETCH = 4'd2;
@@ -601,28 +665,85 @@ module vf_pool_sample_engine #(
     localparam [2:0] ST_PIPE  = 3'd2;
     localparam [2:0] ST_STORE = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
+    localparam [7:0] MAX_COUNT = MAX_ELEMS;
+    localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
     reg [2:0] state;
     reg [31:0] pipe_remaining;
     integer i;
+    integer fp_i;
     reg signed [31:0] value;
     reg signed [31:0] sum;
     reg signed [31:0] max_value;
     reg signed [31:0] avg_value;
-    wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 : elem_count;
+    reg signed [31:0] signed_count;
+    real fp_sum;
+    real fp_value;
+    real fp_max_value;
+    real fp_pool_value;
+    wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 :
+                             (elem_count > MAX_COUNT) ? MAX_COUNT :
+                             elem_count;
+    wire [7:0] safe_fp_count = (elem_count == 8'd0) ? 8'd1 :
+                               (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
+                               elem_count;
 
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = (state == ST_FETCH) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_bytes = (state == ST_FETCH) ? {24'd0, safe_count} : 32'd1;
+    assign l1_req_bytes = (state == ST_FETCH) ? (fp_mode ? ({24'd0, safe_fp_count} << 1) :
+                                                           {24'd0, safe_count}) :
+                          (fp_mode ? 32'd8 : 32'd1);
     assign l1_req_payload_cycles = 32'd2;
     assign out_q = pool_out[7:0];
+
+    function real pow2_int;
+        input integer exponent;
+        integer k;
+        real value;
+        begin
+            value = 1.0;
+            if (exponent >= 0) begin
+                for (k = 0; k < exponent; k = k + 1)
+                    value = value * 2.0;
+            end else begin
+                for (k = 0; k < -exponent; k = k + 1)
+                    value = value / 2.0;
+            end
+            pow2_int = value;
+        end
+    endfunction
+
+    function real fp16_to_real;
+        input [15:0] bits;
+        integer exp;
+        integer mant;
+        real value;
+        begin
+            exp = bits[14:10];
+            mant = bits[9:0];
+            if (exp == 0) begin
+                if (mant == 0)
+                    value = 0.0;
+                else
+                    value = (mant / 1024.0) * pow2_int(-14);
+            end else if (exp == 31) begin
+                value = 0.0;
+            end else begin
+                value = (1.0 + (mant / 1024.0)) * pow2_int(exp - 15);
+            end
+            fp16_to_real = bits[15] ? -value : value;
+        end
+    endfunction
 
     always @* begin
         sum = 32'sd0;
         max_value = -32'sd128;
+        signed_count = {24'd0, safe_count};
+        fp_sum = 0.0;
+        fp_max_value = -1.0e300;
         for (i = 0; i < MAX_ELEMS; i = i + 1) begin
             if (i < safe_count) begin
                 value = {{24{sample_vec[i*8 + 7]}}, sample_vec[i*8 +: 8]};
@@ -631,8 +752,18 @@ module vf_pool_sample_engine #(
                     max_value = value;
             end
         end
-        avg_value = sum / {{24{safe_count[7]}}, safe_count};
+        for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
+            if (fp_i < safe_fp_count) begin
+                fp_value = fp16_to_real(sample_vec[fp_i*16 +: 16]);
+                fp_sum = fp_sum + fp_value;
+                if (fp_value > fp_max_value)
+                    fp_max_value = fp_value;
+            end
+        end
+        avg_value = sum / signed_count;
         pool_out = avg_mode ? avg_value : max_value;
+        fp_pool_value = avg_mode ? (fp_sum / safe_fp_count) : fp_max_value;
+        fp_pool_bits = $realtobits(fp_pool_value);
 
         case (state)
             ST_FETCH: begin phase_id = PH_WINDOW_FETCH; remaining_cycles = l1_req_payload_cycles; end
@@ -656,7 +787,7 @@ module vf_pool_sample_engine #(
                 end
                 ST_FETCH: begin
                     if (l1_req_ready) begin
-                        pipe_remaining <= {24'd0, safe_count} + 32'd1;
+                        pipe_remaining <= {24'd0, fp_mode ? safe_fp_count : safe_count} + 32'd1;
                         state <= ST_PIPE;
                     end
                 end
@@ -720,13 +851,19 @@ module vf_ewe_sample_engine #(
     localparam [2:0] ST_PIPE  = 3'd3;
     localparam [2:0] ST_STORE = 3'd4;
     localparam [2:0] ST_DONE  = 3'd5;
+    localparam [7:0] MAX_COUNT = MAX_ELEMS;
 
     reg [2:0] state;
     reg [31:0] pipe_remaining;
     reg signed [31:0] av;
     reg signed [31:0] bv;
     reg signed [31:0] raw;
-    wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 : elem_count;
+    reg signed [31:0] lane_value;
+    reg signed [31:0] first_lane_value;
+    integer lane;
+    wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 :
+                             (elem_count > MAX_COUNT) ? MAX_COUNT :
+                             elem_count;
 
     function signed [31:0] clamp_i8;
         input signed [31:0] value;
@@ -740,24 +877,44 @@ module vf_ewe_sample_engine #(
         end
     endfunction
 
+    task compute_lane;
+        input integer lane_idx;
+        begin
+            av = {{24{a_vec[lane_idx*8 + 7]}}, a_vec[lane_idx*8 +: 8]};
+            bv = {{24{b_vec[lane_idx*8 + 7]}}, b_vec[lane_idx*8 +: 8]};
+            case (op_mode)
+                2'd1: raw = av * bv;
+                2'd2: raw = av - bv;
+                default: raw = av + bv;
+            endcase
+            lane_value = clamp_i8(raw);
+        end
+    endtask
+
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = (state == ST_A) || (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_bytes = (state == ST_STORE) ? 32'd1 : {24'd0, safe_count};
+    assign l1_req_bytes = {24'd0, safe_count};
     assign l1_req_payload_cycles = 32'd2;
-    assign out_q = ewe_out[7:0];
+    assign out_q = first_lane_value[7:0];
 
     always @* begin
-        av = {{24{a_vec[7]}}, a_vec[7:0]};
-        bv = {{24{b_vec[7]}}, b_vec[7:0]};
-        case (op_mode)
-            2'd1: raw = av * bv;
-            2'd2: raw = av - bv;
-            default: raw = av + bv;
-        endcase
-        ewe_out = clamp_i8(raw);
+        av = 32'sd0;
+        bv = 32'sd0;
+        raw = 32'sd0;
+        lane_value = 32'sd0;
+        first_lane_value = 32'sd0;
+        ewe_out = 32'sd0;
+        for (lane = 0; lane < MAX_ELEMS; lane = lane + 1) begin
+            if (lane < safe_count) begin
+                compute_lane(lane);
+                if (lane == 0)
+                    first_lane_value = lane_value;
+                ewe_out = ewe_out + lane_value;
+            end
+        end
 
         case (state)
             ST_A: begin phase_id = PH_A_READ; remaining_cycles = l1_req_payload_cycles; end

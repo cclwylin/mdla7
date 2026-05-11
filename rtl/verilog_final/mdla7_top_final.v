@@ -34,6 +34,7 @@ module mdla7_top_final #(
     input      [127:0]          conv_act_vec,
     input      [127:0]          conv_wgt_vec,
     input      [7:0]            conv_elem_count,
+    input                       conv_fp_mode,
     input signed [15:0]         conv_zp_in,
     input signed [31:0]         conv_bias,
     input signed [31:0]         conv_multiplier,
@@ -43,6 +44,7 @@ module mdla7_top_final #(
     input signed [31:0]         conv_act_max,
     input signed [31:0]         requant_input_value,
     input                       pool_avg_mode,
+    input                       pool_fp_mode,
     input      [127:0]          pool_sample_vec,
     input      [7:0]            pool_elem_count,
     input      [1:0]            ewe_op_mode,
@@ -65,10 +67,12 @@ module mdla7_top_final #(
     output signed [31:0]        conv_acc_out,
     output signed [31:0]        conv_scaled_out,
     output signed [7:0]         conv_out_q,
+    output     [63:0]           conv_fp_sum_bits,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
     output signed [31:0]        pool_out,
     output signed [7:0]         pool_out_q,
+    output     [63:0]           pool_fp_bits,
     output signed [31:0]        ewe_out,
     output signed [7:0]         ewe_out_q
 );
@@ -110,6 +114,7 @@ module mdla7_top_final #(
     reg [127:0] conv_act_vec_q;
     reg [127:0] conv_wgt_vec_q;
     reg [7:0] conv_elem_count_q;
+    reg conv_fp_mode_q;
     reg signed [15:0] conv_zp_in_q;
     reg signed [31:0] conv_bias_q;
     reg signed [31:0] conv_multiplier_q;
@@ -119,6 +124,7 @@ module mdla7_top_final #(
     reg signed [31:0] conv_act_max_q;
     reg signed [31:0] requant_input_value_q;
     reg pool_avg_mode_q;
+    reg pool_fp_mode_q;
     reg [127:0] pool_sample_vec_q;
     reg [7:0] pool_elem_count_q;
     reg [1:0] ewe_op_mode_q;
@@ -309,6 +315,7 @@ module mdla7_top_final #(
         .act_vec(conv_act_vec_q),
         .wgt_vec(conv_wgt_vec_q),
         .elem_count(conv_elem_count_q),
+        .fp_mode(conv_fp_mode_q),
         .zp_in(conv_zp_in_q),
         .bias(conv_bias_q),
         .multiplier(conv_multiplier_q),
@@ -328,7 +335,8 @@ module mdla7_top_final #(
         .remaining_cycles(conv_remaining_cycles),
         .acc_out(conv_acc_out),
         .scaled_out(conv_scaled_out),
-        .out_q(conv_out_q)
+        .out_q(conv_out_q),
+        .fp_sum_bits(conv_fp_sum_bits)
     );
 
     vf_requant_sample_engine u_requant (
@@ -362,6 +370,7 @@ module mdla7_top_final #(
         .start_valid(pool_start),
         .start_ready(pool_start_ready),
         .avg_mode(pool_avg_mode_q),
+        .fp_mode(pool_fp_mode_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
         .l1_req_valid(pool_l1_req_valid),
@@ -375,7 +384,8 @@ module mdla7_top_final #(
         .phase_id(pool_phase_id),
         .remaining_cycles(pool_remaining_cycles),
         .pool_out(pool_out),
-        .out_q(pool_out_q)
+        .out_q(pool_out_q),
+        .fp_pool_bits(pool_fp_bits)
     );
 
     vf_ewe_sample_engine u_ewe (
@@ -574,6 +584,7 @@ module mdla7_top_final #(
             conv_act_vec_q <= 128'd0;
             conv_wgt_vec_q <= 128'd0;
             conv_elem_count_q <= 8'd0;
+            conv_fp_mode_q <= 1'b0;
             conv_zp_in_q <= 16'sd0;
             conv_bias_q <= 32'sd0;
             conv_multiplier_q <= 32'sd1073741824;
@@ -583,6 +594,7 @@ module mdla7_top_final #(
             conv_act_max_q <= 32'sd127;
             requant_input_value_q <= 32'sd0;
             pool_avg_mode_q <= 1'b0;
+            pool_fp_mode_q <= 1'b0;
             pool_sample_vec_q <= 128'd0;
             pool_elem_count_q <= 8'd0;
             ewe_op_mode_q <= 2'd0;
@@ -616,6 +628,7 @@ module mdla7_top_final #(
                         conv_act_vec_q <= conv_act_vec;
                         conv_wgt_vec_q <= conv_wgt_vec;
                         conv_elem_count_q <= conv_elem_count;
+                        conv_fp_mode_q <= conv_fp_mode;
                         conv_zp_in_q <= conv_zp_in;
                         conv_bias_q <= conv_bias;
                         conv_multiplier_q <= conv_multiplier;
@@ -625,6 +638,7 @@ module mdla7_top_final #(
                         conv_act_max_q <= conv_act_max;
                         requant_input_value_q <= requant_input_value;
                         pool_avg_mode_q <= pool_avg_mode;
+                        pool_fp_mode_q <= pool_fp_mode;
                         pool_sample_vec_q <= pool_sample_vec;
                         pool_elem_count_q <= pool_elem_count;
                         ewe_op_mode_q <= ewe_op_mode;

@@ -1,6 +1,10 @@
 `timescale 1ns/1ps
 
 module Testbench_top_byte_movers;
+    localparam [3:0] OP_CONV = 4'd1;
+    localparam [3:0] OP_REQUANT = 4'd2;
+    localparam [3:0] OP_EWE = 4'd3;
+    localparam [3:0] OP_POOL = 4'd4;
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
 
@@ -30,6 +34,7 @@ module Testbench_top_byte_movers;
     reg [127:0] conv_act_vec;
     reg [127:0] conv_wgt_vec;
     reg [7:0] conv_elem_count;
+    reg conv_fp_mode;
     reg signed [15:0] conv_zp_in;
     reg signed [31:0] conv_bias;
     reg signed [31:0] conv_multiplier;
@@ -39,6 +44,7 @@ module Testbench_top_byte_movers;
     reg signed [31:0] conv_act_max;
     reg signed [31:0] requant_input_value;
     reg pool_avg_mode;
+    reg pool_fp_mode;
     reg [127:0] pool_sample_vec;
     reg [7:0] pool_elem_count;
     reg [1:0] ewe_op_mode;
@@ -56,10 +62,12 @@ module Testbench_top_byte_movers;
     wire signed [31:0] conv_acc_out;
     wire signed [31:0] conv_scaled_out;
     wire signed [7:0] conv_out_q;
+    wire [63:0] conv_fp_sum_bits;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
     wire signed [7:0] pool_out_q;
+    wire [63:0] pool_fp_bits;
     wire signed [31:0] ewe_out;
     wire signed [7:0] ewe_out_q;
     wire [31:0] placement_route_cycles;
@@ -97,6 +105,7 @@ module Testbench_top_byte_movers;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_fp_mode(conv_fp_mode),
         .conv_zp_in(conv_zp_in),
         .conv_bias(conv_bias),
         .conv_multiplier(conv_multiplier),
@@ -106,6 +115,7 @@ module Testbench_top_byte_movers;
         .conv_act_max(conv_act_max),
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
+        .pool_fp_mode(pool_fp_mode),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -127,10 +137,12 @@ module Testbench_top_byte_movers;
         .conv_acc_out(conv_acc_out),
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
+        .conv_fp_sum_bits(conv_fp_sum_bits),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
+        .pool_fp_bits(pool_fp_bits),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q)
     );
@@ -192,6 +204,7 @@ module Testbench_top_byte_movers;
         conv_act_vec = 128'd0;
         conv_wgt_vec = 128'd0;
         conv_elem_count = 8'd0;
+        conv_fp_mode = 1'b0;
         conv_zp_in = 16'sd0;
         conv_bias = 32'sd0;
         conv_multiplier = 32'sd1073741824;
@@ -201,6 +214,7 @@ module Testbench_top_byte_movers;
         conv_act_max = 32'sd127;
         requant_input_value = 32'sd0;
         pool_avg_mode = 1'b0;
+        pool_fp_mode = 1'b0;
         pool_sample_vec = 128'd0;
         pool_elem_count = 8'd0;
         ewe_op_mode = 2'd0;
@@ -212,6 +226,128 @@ module Testbench_top_byte_movers;
         repeat (4) @(posedge clk);
         rst_n = 1'b1;
 
+        bytes = 32'd16;
+        l1mesh_addr = 22'h0002a0;
+        conv_act_vec = 128'd0;
+        conv_wgt_vec = 128'd0;
+        conv_act_vec[7:0] = 8'd4;
+        conv_act_vec[15:8] = 8'd3;
+        conv_act_vec[23:16] = 8'd2;
+        conv_act_vec[31:24] = 8'd1;
+        conv_act_vec[39:32] = -8'sd4;
+        conv_act_vec[47:40] = 8'd7;
+        conv_wgt_vec[7:0] = 8'd3;
+        conv_wgt_vec[15:8] = -8'sd1;
+        conv_wgt_vec[23:16] = 8'd1;
+        conv_wgt_vec[31:24] = 8'd2;
+        conv_wgt_vec[39:32] = 8'd5;
+        conv_wgt_vec[47:40] = 8'd6;
+        conv_elem_count = 8'd6;
+        conv_fp_mode = 1'b0;
+        conv_zp_in = 16'sd0;
+        conv_bias = 32'sd5;
+        conv_multiplier = 32'sd1073741824;
+        conv_shift = 8'sd1;
+        conv_zp_out = 32'sd0;
+        conv_act_min = -32'sd128;
+        conv_act_max = 32'sd127;
+        issue_desc(OP_CONV);
+        wait_done("conv");
+        if ((conv_acc_out != 32'sd40) || (conv_out_q != 8'sd40)) begin
+            $display("FAIL: CONV top sample acc=%0d out=%0d", conv_acc_out, conv_out_q);
+            failures = failures + 1;
+        end
+
+        bytes = 32'd4;
+        l1mesh_addr = 22'h0002a8;
+        conv_act_vec = 128'd0;
+        conv_wgt_vec = 128'd0;
+        conv_act_vec[15:0] = 16'h3c00;  // 1.0
+        conv_act_vec[31:16] = 16'hc000; // -2.0
+        conv_wgt_vec[15:0] = 16'h4000;  // 2.0
+        conv_wgt_vec[31:16] = 16'h3800; // 0.5
+        conv_elem_count = 8'd2;
+        conv_fp_mode = 1'b1;
+        issue_desc(OP_CONV);
+        wait_done("conv_fp");
+        if (conv_fp_sum_bits != 64'h3ff0000000000000) begin
+            $display("FAIL: CONV FP top sample sum_bits=%016x", conv_fp_sum_bits);
+            failures = failures + 1;
+        end
+        conv_fp_mode = 1'b0;
+
+        bytes = 32'd1;
+        l1mesh_addr = 22'h0002b0;
+        requant_input_value = 32'sd40;
+        issue_desc(OP_REQUANT);
+        wait_done("requant");
+        if (requant_out_q != 8'sd40) begin
+            $display("FAIL: REQUANT top sample scaled=%0d out=%0d",
+                     requant_scaled_out, requant_out_q);
+            failures = failures + 1;
+        end
+
+        bytes = 32'd7;
+        l1mesh_addr = 22'h0002c0;
+        pool_avg_mode = 1'b0;
+        pool_fp_mode = 1'b0;
+        pool_sample_vec = 128'd0;
+        pool_sample_vec[7:0] = 8'd4;
+        pool_sample_vec[15:8] = 8'd3;
+        pool_sample_vec[23:16] = 8'd2;
+        pool_sample_vec[31:24] = 8'd1;
+        pool_sample_vec[39:32] = -8'sd4;
+        pool_sample_vec[47:40] = 8'd7;
+        pool_sample_vec[55:48] = 8'd0;
+        pool_elem_count = 8'd7;
+        issue_desc(OP_POOL);
+        wait_done("pool");
+        if (pool_out_q != 8'sd7) begin
+            $display("FAIL: POOL top sample out=%0d", pool_out);
+            failures = failures + 1;
+        end
+
+        bytes = 32'd8;
+        l1mesh_addr = 22'h0002c8;
+        pool_avg_mode = 1'b1;
+        pool_fp_mode = 1'b1;
+        pool_sample_vec = 128'd0;
+        pool_sample_vec[15:0] = 16'h3c00;  // 1.0
+        pool_sample_vec[31:16] = 16'h4000; // 2.0
+        pool_sample_vec[47:32] = 16'h4200; // 3.0
+        pool_sample_vec[63:48] = 16'h4400; // 4.0
+        pool_elem_count = 8'd4;
+        issue_desc(OP_POOL);
+        wait_done("pool_fp");
+        if (pool_fp_bits != 64'h4004000000000000) begin
+            $display("FAIL: POOL FP top sample bits=%016x", pool_fp_bits);
+            failures = failures + 1;
+        end
+        pool_fp_mode = 1'b0;
+
+        bytes = 32'd4;
+        l1mesh_addr = 22'h0002d0;
+        ewe_op_mode = 2'd0;
+        ewe_a_vec = 128'd0;
+        ewe_b_vec = 128'd0;
+        ewe_a_vec[7:0] = 8'd4;
+        ewe_a_vec[15:8] = 8'd3;
+        ewe_a_vec[23:16] = 8'd2;
+        ewe_a_vec[31:24] = 8'd1;
+        ewe_b_vec[7:0] = 8'd3;
+        ewe_b_vec[15:8] = -8'sd1;
+        ewe_b_vec[23:16] = 8'd1;
+        ewe_b_vec[31:24] = 8'd2;
+        ewe_elem_count = 8'd4;
+        issue_desc(OP_EWE);
+        wait_done("ewe");
+        if ((ewe_out != 32'sd15) || (ewe_out_q != 8'sd7)) begin
+            $display("FAIL: EWE top sample sum=%0d first=%0d", ewe_out, ewe_out_q);
+            failures = failures + 1;
+        end
+
+        bytes = 32'd256;
+        l1mesh_addr = 22'h0002e0;
         issue_desc(OP_UDMA);
         wait_done("udma");
         if (placement_route_cycles == 32'd0) begin
@@ -234,9 +370,9 @@ module Testbench_top_byte_movers;
         end
 
         if (failures == 0)
-            $display("PASS: verilog_final top byte movers UDMA/TNPS");
+            $display("PASS: verilog_final top integration CONV/REQUANT/POOL/EWE/UDMA/TNPS");
         else
-            $display("FAIL: verilog_final top byte movers failures=%0d", failures);
+            $display("FAIL: verilog_final top integration failures=%0d", failures);
         $finish;
     end
 endmodule

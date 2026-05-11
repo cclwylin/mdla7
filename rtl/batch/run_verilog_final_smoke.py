@@ -13,6 +13,9 @@ from pathlib import Path
 
 TESTS = (
     ("conv", "Testbench_conv_datapath"),
+    ("requant", "Testbench_requant_datapath"),
+    ("pool", "Testbench_pool_datapath"),
+    ("ewe", "Testbench_ewe_datapath"),
     ("tnps", "Testbench_tnps_datapath"),
     ("route", "Testbench_route_timing"),
     ("contention", "Testbench_l1mesh_contention"),

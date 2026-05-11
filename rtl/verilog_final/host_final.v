@@ -31,6 +31,7 @@ module host_final #(
     output reg [127:0] conv_act_vec,
     output reg [127:0] conv_wgt_vec,
     output reg [7:0]   conv_elem_count,
+    output reg         conv_fp_mode,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -40,6 +41,7 @@ module host_final #(
     output reg signed [31:0] conv_act_max,
     output reg signed [31:0] requant_input_value,
     output reg         pool_avg_mode,
+    output reg         pool_fp_mode,
     output reg [127:0] pool_sample_vec,
     output reg [7:0]   pool_elem_count,
     output reg [1:0]   ewe_op_mode,
@@ -60,10 +62,12 @@ module host_final #(
     input signed [31:0] conv_acc_out,
     input signed [31:0] conv_scaled_out,
     input signed [7:0]  conv_out_q,
+    input      [63:0]   conv_fp_sum_bits,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
     input signed [7:0]  pool_out_q,
+    input      [63:0]   pool_fp_bits,
     input signed [31:0] ewe_out,
     input signed [7:0]  ewe_out_q,
     input      [8:0]   block_busy,
@@ -126,6 +130,7 @@ module host_final #(
             conv_wgt_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
                              cmd_mem[base + 9], cmd_mem[base + 8]};
             conv_elem_count <= cmd_mem[base + 12][7:0];
+            conv_fp_mode <= cmd_mem[base + 12][8];
             conv_zp_in <= cmd_mem[base + 12][31:16];
             conv_bias <= cmd_mem[base + 13];
             conv_multiplier <= cmd_mem[base + 14];
@@ -138,6 +143,7 @@ module host_final #(
                                 cmd_mem[base + 5], cmd_mem[base + 4]};
             pool_elem_count <= cmd_mem[base + 12][7:0];
             pool_avg_mode <= cmd_mem[base + 12][8];
+            pool_fp_mode <= cmd_mem[base + 12][9];
             ewe_a_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                           cmd_mem[base + 5], cmd_mem[base + 4]};
             ewe_b_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
@@ -197,7 +203,7 @@ module host_final #(
         cmd_mem[64] = 32'h0102_0304;
         cmd_mem[68] = 32'h0201_ff03;
         cmd_mem[72] = 32'd4;
-        cmd_mem[78] = 32'd7;
+        cmd_mem[78] = 32'd15;
 
         // Command 4: UDMA read path.
         cmd_mem[80] = {28'd0, OP_UDMA};
@@ -262,6 +268,7 @@ module host_final #(
             conv_act_vec <= 128'd0;
             conv_wgt_vec <= 128'd0;
             conv_elem_count <= 8'd0;
+            conv_fp_mode <= 1'b0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;
@@ -271,6 +278,7 @@ module host_final #(
             conv_act_max <= 32'sd127;
             requant_input_value <= 32'sd0;
             pool_avg_mode <= 1'b0;
+            pool_fp_mode <= 1'b0;
             pool_sample_vec <= 128'd0;
             pool_elem_count <= 8'd0;
             ewe_op_mode <= 2'd0;
@@ -319,7 +327,14 @@ module host_final #(
                                      command_index, desc_op_class);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) &&
+                        if ((desc_op_class == OP_CONV) && conv_fp_mode &&
+                            (conv_fp_sum_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
+                            $display("HOST_FINAL_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
+                                     command_index, conv_fp_sum_bits,
+                                     {cmd_mem[base + 17], cmd_mem[base + 16]});
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode &&
                             (conv_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, conv_acc_out, conv_scaled_out,
@@ -333,7 +348,15 @@ module host_final #(
                                      requant_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) &&
+                        if ((desc_op_class == OP_POOL) && pool_fp_mode &&
+                            (pool_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
+                            $display("HOST_FINAL_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
+                                     command_index, pool_fp_bits,
+                                     {cmd_mem[base + 17], cmd_mem[base + 16]},
+                                     pool_avg_mode);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_POOL) && !pool_fp_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -342,10 +365,10 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_EWE) &&
-                            (ewe_out_q !== cmd_mem[base + 18][7:0])) begin
-                            $display("HOST_FINAL_FAIL: EWE sample cmd=%0d out=%0d expected=%0d mode=%0d",
-                                     command_index, ewe_out,
-                                     $signed(cmd_mem[base + 18][7:0]),
+                            (ewe_out !== $signed(cmd_mem[base + 18]))) begin
+                            $display("HOST_FINAL_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
+                                     command_index, ewe_out, ewe_out_q,
+                                     $signed(cmd_mem[base + 18]),
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end

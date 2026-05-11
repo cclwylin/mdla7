@@ -28,6 +28,7 @@ module Testbench_host_program;
     wire [127:0] conv_act_vec;
     wire [127:0] conv_wgt_vec;
     wire [7:0] conv_elem_count;
+    wire conv_fp_mode;
     wire signed [15:0] conv_zp_in;
     wire signed [31:0] conv_bias;
     wire signed [31:0] conv_multiplier;
@@ -37,6 +38,7 @@ module Testbench_host_program;
     wire signed [31:0] conv_act_max;
     wire signed [31:0] requant_input_value;
     wire pool_avg_mode;
+    wire pool_fp_mode;
     wire [127:0] pool_sample_vec;
     wire [7:0] pool_elem_count;
     wire [1:0] ewe_op_mode;
@@ -54,10 +56,12 @@ module Testbench_host_program;
     wire signed [31:0] conv_acc_out;
     wire signed [31:0] conv_scaled_out;
     wire signed [7:0] conv_out_q;
+    wire [63:0] conv_fp_sum_bits;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
     wire signed [7:0] pool_out_q;
+    wire [63:0] pool_fp_bits;
     wire signed [31:0] ewe_out;
     wire signed [7:0] ewe_out_q;
     wire [31:0] placement_route_cycles;
@@ -99,6 +103,7 @@ module Testbench_host_program;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_fp_mode(conv_fp_mode),
         .conv_zp_in(conv_zp_in),
         .conv_bias(conv_bias),
         .conv_multiplier(conv_multiplier),
@@ -108,6 +113,7 @@ module Testbench_host_program;
         .conv_act_max(conv_act_max),
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
+        .pool_fp_mode(pool_fp_mode),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -127,10 +133,12 @@ module Testbench_host_program;
         .conv_acc_out(conv_acc_out),
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
+        .conv_fp_sum_bits(conv_fp_sum_bits),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
+        .pool_fp_bits(pool_fp_bits),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
         .block_busy(block_busy),
@@ -168,6 +176,7 @@ module Testbench_host_program;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_fp_mode(conv_fp_mode),
         .conv_zp_in(conv_zp_in),
         .conv_bias(conv_bias),
         .conv_multiplier(conv_multiplier),
@@ -177,6 +186,7 @@ module Testbench_host_program;
         .conv_act_max(conv_act_max),
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
+        .pool_fp_mode(pool_fp_mode),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -198,10 +208,12 @@ module Testbench_host_program;
         .conv_acc_out(conv_acc_out),
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
+        .conv_fp_sum_bits(conv_fp_sum_bits),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
+        .pool_fp_bits(pool_fp_bits),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q)
     );
