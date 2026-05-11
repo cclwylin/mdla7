@@ -414,58 +414,6 @@ def compile_and_run(model: Path, l1_timing: str = "fast",
     return r.returncode == 0
 
 
-def compile_and_compare_engines(model: Path, l1_timing: str = "fast") -> bool:
-    import json
-    import shutil
-
-    global _keep_intermediate
-    old_keep = _keep_intermediate
-    _keep_intermediate = True
-    paths = _artefact_paths(model)
-    results: dict[str, dict] = {}
-    ok_all = True
-    try:
-        for engine_model in ("model", "synth"):
-            ok = compile_and_run(model, l1_timing=l1_timing,
-                                 engine_model=engine_model)
-            ok_all = ok_all and ok
-            if paths["prof"].exists():
-                dst = paths["prof"].with_name(
-                    f"{model.stem}.{engine_model}.profile.json")
-                shutil.copyfile(paths["prof"], dst)
-                with open(dst) as f:
-                    results[engine_model] = json.load(f)
-                print(f"  compare profile[{engine_model}]: {dst}")
-            if not ok:
-                break
-    finally:
-        _keep_intermediate = old_keep
-
-    if {"model", "synth"} <= results.keys():
-        m = results["model"]
-        s = results["synth"]
-        ms = (m.get("summary") or {})
-        ss = (s.get("summary") or {})
-        mc = int(ms.get("total_cycles", 0) or 0)
-        sc = int(ss.get("total_cycles", 0) or 0)
-        delta = sc - mc
-        pct = (100.0 * delta / mc) if mc else 0.0
-        print("\n=== engine-model compare ===")
-        print(f"  total: model={mc} cyc  synth={sc} cyc  "
-              f"delta={delta:+d} ({pct:+.2f}%)")
-        print("  engine busy delta:")
-        me = m.get("engines", {}) or {}
-        se = s.get("engines", {}) or {}
-        for name in ("conv", "requant", "ewe", "pool", "tnps", "udma_r", "udma_w"):
-            mb = int((me.get(name) or {}).get("busy_cycles", 0) or 0)
-            sb = int((se.get(name) or {}).get("busy_cycles", 0) or 0)
-            bd = sb - mb
-            bp = (100.0 * bd / mb) if mb else 0.0
-            print(f"    {name:7s}: model={mb:8d}  synth={sb:8d}  "
-                  f"delta={bd:+8d} ({bp:+.2f}%)")
-    return ok_all
-
-
 _COMPILE_FULL_RE = re.compile(
     r'^\s*layer\s+(\d+)\s+(\S+)\s+'
     r'in=(\d+)x(\d+)x(\d+)\s+'
@@ -2178,11 +2126,6 @@ def main():
     ap.add_argument("--l1-timing", choices=("fast", "conflict", "mesh"), default="fast",
                     help="L1Mesh timing mode: fast aggregate estimate (default) "
                          "or per-bank SRAM port conflict model, or 4x4 mesh router/link conflict model")
-    ap.add_argument("--engine-model", choices=("model", "synth"), default="model",
-                    help="Engine timing model for EWE/POOL/TNPS: current analytical model "
-                         "or synth-like payload/FSM model")
-    ap.add_argument("--compare-engine-models", action="store_true",
-                    help="Run both --engine-model=model and synth, then print cycle deltas")
     ap.add_argument("--fast-only", action="store_true",
                     help="alias for --l1-timing fast, matching sweep runners")
     args = ap.parse_args()
@@ -2227,11 +2170,8 @@ def main():
         ok = run_one(target, layer=args.layer, l1_timing=args.l1_timing)
     elif args.all_layers:
         ok = run_all_layers(target, l1_timing=args.l1_timing)  # legacy: N independent sims
-    elif args.compare_engine_models:
-        ok = compile_and_compare_engines(target, l1_timing=args.l1_timing)
     else:
-        ok = compile_and_run(target, l1_timing=args.l1_timing,
-                             engine_model=args.engine_model)
+        ok = compile_and_run(target, l1_timing=args.l1_timing)
     sys.exit(0 if ok else 1)
 
 

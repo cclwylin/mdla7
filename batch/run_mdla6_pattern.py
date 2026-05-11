@@ -129,11 +129,9 @@ def _normalise_pattern(pat: str) -> str:
     return pat
 
 
-def _report_exists_for(pattern: str, model_dir: Path, engine_model: str = "model") -> bool:
+def _report_exists_for(pattern: str, model_dir: Path) -> bool:
     canonical = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
-    if engine_model == "synth":
-        return _mode_paths(model_path, "synth")["html"].exists()
     return _artefact_paths(model_path)["html"].exists()
 
 
@@ -264,13 +262,12 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
     return paths["html"]
 
 
-def _simulate_one(bin_path: Path, l1_timing: str,
-                  engine_model: str = "model") -> tuple[float | None, str, str]:
+def _simulate_one(bin_path: Path, l1_timing: str) -> tuple[float | None, str, str]:
     """Run mdla7_model_runner once. Returns (ms, status, stdout)."""
     try:
         sr = subprocess.run(
             [str(MODEL_RUNNER), str(bin_path), "--quiet",
-             f"--l1-timing={l1_timing}", f"--engine-model={engine_model}"],
+             f"--l1-timing={l1_timing}", "--engine-model=model"],
             capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
@@ -296,18 +293,16 @@ def _simulate_one(bin_path: Path, l1_timing: str,
 
 def run_one(pattern: str, model_dir: Path, progress=None,
             fast_only: bool = False,
-            skip_html: bool = False,
-            engine_model: str = "model") -> tuple[str, float | None, float | None, float | None, str, str, str]:
+            skip_html: bool = False) -> tuple[str, float | None, float | None, float | None, str, str, str]:
     """Compile + simulate one model; optionally skip conflict/mesh."""
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
     if not model_path.exists():
         return pattern, None, None, None, f"missing-tflite: {model_path.name}", "", ""
-    fast_mode = "fast" if engine_model == "model" else "synth"
-    paths = _artefact_paths(model_path) if fast_mode == "fast" else _mode_paths(model_path, fast_mode)
+    paths = _artefact_paths(model_path)
     bin_path = paths["prog"]
-    conflict_paths = _mode_paths(model_path, "conflict" if engine_model == "model" else "synth.conflict")
-    mesh_paths = _mode_paths(model_path, "mesh" if engine_model == "model" else "synth.mesh")
+    conflict_paths = _mode_paths(model_path, "conflict")
+    mesh_paths = _mode_paths(model_path, "mesh")
 
     # ---- compile ----
     if progress:
@@ -327,16 +322,16 @@ def run_one(pattern: str, model_dir: Path, progress=None,
 
     # ---- simulate: fast report path ----
     if progress:
-        progress("simulate fast" if engine_model == "model" else "simulate synth-fast")
-    ms, status, fast_stdout = _simulate_one(bin_path, "fast", engine_model=engine_model)
+        progress("simulate fast")
+    ms, status, fast_stdout = _simulate_one(bin_path, "fast")
 
-    fast_html = OUT_DIR / f"{canonical}.{fast_mode}.html"
+    fast_html = OUT_DIR / f"{canonical}.fast.html"
     if not skip_html:
         if progress:
             progress("html fast")
         try:
             _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
-            if paths["html"].exists() and paths["html"] != fast_html:
+            if paths["html"].exists():
                 fast_html.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(paths["html"], fast_html)
         except Exception as e:
@@ -356,7 +351,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
     except OSError:
         pass
     conflict_ms, conflict_status, conflict_stdout = _simulate_one(
-        conflict_paths["prog"], "conflict", engine_model=engine_model)
+        conflict_paths["prog"], "conflict")
 
     conflict_html = conflict_paths["html"]
     if not skip_html:
@@ -378,7 +373,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
     except OSError:
         pass
     mesh_ms, mesh_status, mesh_stdout = _simulate_one(
-        mesh_paths["prog"], "mesh", engine_model=engine_model)
+        mesh_paths["prog"], "mesh")
 
     mesh_html = mesh_paths["html"]
     if not skip_html:

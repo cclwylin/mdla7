@@ -67,7 +67,6 @@ enum class L1TimingMode {
 
 enum class EngineModel {
     Analytical,
-    SynthLike,
 };
 
 class L1Mesh : public sc_core::sc_module {

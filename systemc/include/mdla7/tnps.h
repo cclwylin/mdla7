@@ -64,21 +64,7 @@ SC_MODULE(TnpsEngine) {
     void wait_bytes(uint64_t bytes) {
         // 8 R + 8 W payload lanes = 128 B/cyc in each direction.
         const uint64_t model_cycles = (bytes + 127) / 128 + 8;
-        if (engine_model == EngineModel::Analytical) {
-            wait(double(model_cycles), sc_core::SC_NS);
-            return;
-        }
-        const uint64_t read_cyc =
-            (bytes + PayloadPortCount::TNPS_R * PAYLOAD_BYTES - 1) /
-            (PayloadPortCount::TNPS_R * PAYLOAD_BYTES);
-        const uint64_t write_cyc =
-            (bytes + PayloadPortCount::TNPS_W * PAYLOAD_BYTES - 1) /
-            (PayloadPortCount::TNPS_W * PAYLOAD_BYTES);
-        const uint64_t synth_cycles = std::max(read_cyc, write_cyc) + 10;
-        const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - task_begin;
-        const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
-        if (synth_cycles > elapsed_cyc)
-            wait(synth_cycles - elapsed_cyc, sc_core::SC_NS);
+        wait(double(model_cycles), sc_core::SC_NS);
     }
 
     void do_linear(const TnpsBody& t) {

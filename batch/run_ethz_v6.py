@@ -11,9 +11,6 @@ Usage:
     ./batch/run_ethz_v6.py --offset 3 --limit 3
     ./batch/run_ethz_v6.py --rerun-all
     ./batch/run_ethz_v6.py --fast-only
-    ./batch/run_ethz_v6.py --synth-fast
-    ./batch/run_ethz_v6.py --compare-synth-fast
-    ./batch/run_ethz_v6.py --fast-only --engine-model synth
     ./batch/run_ethz_v6.py --pattern-order-csv other_order.csv
 """
 
