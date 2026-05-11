@@ -23,6 +23,7 @@ SC_MODULE(TnpsEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
     EngineModel engine_model = EngineModel::Analytical;
     sc_core::sc_time task_begin{sc_core::SC_ZERO_TIME};
 
@@ -68,13 +69,27 @@ SC_MODULE(TnpsEngine) {
             wait(double(model_cycles), sc_core::SC_NS);
             return;
         }
-        const uint64_t read_cyc =
-            (bytes + PayloadPortCount::TNPS_R * PAYLOAD_BYTES - 1) /
-            (PayloadPortCount::TNPS_R * PAYLOAD_BYTES);
-        const uint64_t write_cyc =
-            (bytes + PayloadPortCount::TNPS_W * PAYLOAD_BYTES - 1) /
-            (PayloadPortCount::TNPS_W * PAYLOAD_BYTES);
-        wait(4 + read_cyc + write_cyc + 4, sc_core::SC_NS);
+        rtl_run_copy_transaction(bytes);
+    }
+
+    static uint64_t ceil_div_u64(uint64_t a, uint64_t b) {
+        return b ? ((a + b - 1) / b) : 0;
+    }
+
+    void rtl_wait_phase(const char* name, uint64_t cycles) {
+        last_rtl_phases.emplace_back(name, cycles);
+        if (cycles)
+            wait(cycles, sc_core::SC_NS);
+    }
+
+    void rtl_run_copy_transaction(uint64_t bytes) {
+        last_rtl_phases.clear();
+        rtl_wait_phase("issue", 4);
+        rtl_wait_phase("read", ceil_div_u64(
+            bytes, PayloadPortCount::TNPS_R * PAYLOAD_BYTES));
+        rtl_wait_phase("write", ceil_div_u64(
+            bytes, PayloadPortCount::TNPS_W * PAYLOAD_BYTES));
+        rtl_wait_phase("done", 4);
     }
 
     void do_linear(const TnpsBody& t) {

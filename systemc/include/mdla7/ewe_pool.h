@@ -555,6 +555,7 @@ SC_MODULE(PoolEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -573,17 +574,25 @@ SC_MODULE(PoolEngine) {
                 last_dtype == DT_INT16x16) ? 2u : 1u;
     }
 
-    uint64_t rtl_pool_cycles(uint64_t in_elems, uint64_t out_elems,
-                             uint64_t lanes, uint32_t window) const {
+    void rtl_wait_phase(const char* name, uint64_t cycles) {
+        last_rtl_phases.emplace_back(name, cycles);
+        if (cycles)
+            wait(cycles, sc_core::SC_NS);
+    }
+
+    void rtl_run_pool_transaction(uint64_t in_elems, uint64_t out_elems,
+                                  uint64_t lanes, uint32_t window) {
         const uint64_t bytes_in = in_elems * elem_bytes();
         const uint64_t bytes_out = out_elems * elem_bytes();
-        const uint64_t read_cyc =
-            ceil_div_u64(bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES);
-        const uint64_t compute_cyc =
-            ceil_div_u64(out_elems, lanes) * std::max<uint32_t>(window, 1);
-        const uint64_t write_cyc =
-            ceil_div_u64(bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES);
-        return 5 + read_cyc + compute_cyc + write_cyc + 3;
+        last_rtl_phases.clear();
+        rtl_wait_phase("issue", 5);
+        rtl_wait_phase("read", ceil_div_u64(
+            bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES));
+        rtl_wait_phase("compute", ceil_div_u64(out_elems, lanes) *
+                       std::max<uint32_t>(window, 1));
+        rtl_wait_phase("write", ceil_div_u64(
+            bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES));
+        rtl_wait_phase("done", 3);
     }
 
     // v8.17: FP avg/max pool. Storage FP16 in L1; compute FP32 internally.
@@ -733,8 +742,8 @@ SC_MODULE(PoolEngine) {
                 const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
                 const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
                 if (is_rtl_style(engine_model))
-                    wait(rtl_pool_cycles(in_elems, out_elems, lanes,
-                                         std::max<uint32_t>(k_h * k_w, 1)), sc_core::SC_NS);
+                    rtl_run_pool_transaction(in_elems, out_elems, lanes,
+                                             std::max<uint32_t>(k_h * k_w, 1));
                 else
                     wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
                 const sc_core::sc_time t_end = sc_core::sc_time_stamp();
@@ -753,8 +762,8 @@ SC_MODULE(PoolEngine) {
             const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
             const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
             if (is_rtl_style(engine_model))
-                wait(rtl_pool_cycles(in_elems, out_elems, lanes,
-                                     std::max<uint32_t>(k_h * k_w, 1)), sc_core::SC_NS);
+                rtl_run_pool_transaction(in_elems, out_elems, lanes,
+                                         std::max<uint32_t>(k_h * k_w, 1));
             else
                 wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
