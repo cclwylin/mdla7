@@ -11062,7 +11062,7 @@ int sc_main(int argc, char* argv[]) {
         const std::vector<std::pair<uint64_t, uint64_t>>* tasks;
         const std::vector<std::vector<RtlPhaseTrace>>* rtl_phases = nullptr;
     };
-    EngStat engines[] = {
+    std::vector<EngStat> engines = {
         {"cmd",     cyc(sys.cmd    .busy_time),       &sys.cmd    .tasks, &sys.cmd.rtl_phase_tasks},
         {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read, &sys.udma.rtl_phase_tasks_read},
         {"udma_w",  cyc(sys.udma   .busy_time_write), &sys.udma   .tasks_write, &sys.udma.rtl_phase_tasks_write},
@@ -11072,11 +11072,15 @@ int sc_main(int argc, char* argv[]) {
         {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks, &sys.pool.rtl_phase_tasks},
         {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks, &sys.tnps.rtl_phase_tasks},
     };
+    if (is_rtl_style(engine_model)) {
+        engines.push_back({"l1mgr",  cyc(sys.l1mgr .busy_time), &sys.l1mgr .tasks, &sys.l1mgr .rtl_phase_tasks});
+        engines.push_back({"l1mesh", cyc(sys.l1mesh.busy_time), &sys.l1mesh.tasks, &sys.l1mesh.rtl_phase_tasks});
+    }
     // v7.1: aggregate engine utilization (sum-busy / (N_lanes * total_cycles)).
     // v8.4: 6 lanes now (udma_r/udma_w split).
     uint64_t total_busy = 0;
     for (auto& e : engines) total_busy += e.busy;
-    const size_t NE_engines = sizeof(engines)/sizeof(engines[0]);
+    const size_t NE_engines = engines.size();
     double overall_util = total_cycles
         ? 100.0 * double(total_busy) / (double(NE_engines) * double(total_cycles)) : 0.0;
     // Peak utilisation = busiest single engine's % of sim time (= max parallelism floor).
@@ -11225,7 +11229,7 @@ int sc_main(int argc, char* argv[]) {
         pf.unsetf(std::ios::floatfield);
         pf << "  },\n";
         pf << "  \"engines\": {\n";
-        const size_t NE = sizeof(engines)/sizeof(engines[0]);
+        const size_t NE = engines.size();
         for (size_t i = 0; i < NE; ++i) {
             pf << "    \"" << engines[i].name << "\": {"
                << "\"busy_cycles\": " << engines[i].busy

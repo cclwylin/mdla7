@@ -133,6 +133,8 @@ public:
         cmd.ewe_dtype_latch  = &ewe    .last_dtype;
         cmd.pool_dtype_latch = &pool   .last_dtype;
 
+        l1mesh.engine_model = engine_model;
+        l1mgr.engine_model = engine_model;
         udma.engine_model = engine_model;
         conv.engine_model = engine_model;
         requant.engine_model = engine_model;

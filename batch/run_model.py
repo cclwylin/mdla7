@@ -797,7 +797,8 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
     def _rtl_phase_summary_rows() -> str:
         rows = []
-        for engine in ("cmd", "udma_r", "udma_w", "conv", "requant", "ewe", "pool", "tnps"):
+        for engine in ("cmd", "udma_r", "udma_w", "conv", "requant", "ewe",
+                       "pool", "tnps", "l1mgr", "l1mesh"):
             phase_totals: dict[str, int] = {}
             task_count = 0
             for task in eng_payload.get(engine, {}).get("tasks", []):
@@ -820,10 +821,10 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             if not task_count or total <= 0:
                 continue
             ordered = [
-                "issue", "act_read", "wgt_read", "read", "param_read",
+                "issue", "decode", "act_read", "wgt_read", "read", "param_read",
                 "dram_read", "l1_read", "l1_write", "dram_write", "codec",
-                "dispatch", "chain_read", "mac", "compute", "pack", "chain",
-                "write", "fill", "done",
+                "dispatch", "l1_route", "mesh", "sram", "chain_read", "mac",
+                "compute", "pack", "chain", "write", "fill", "done",
             ]
             parts = []
             for name in ordered:
@@ -1375,14 +1376,20 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     ewe:     '#3ec56e',
     pool:    '#a945e8',
     tnps:    '#00a6a6',
+    l1mgr:   '#607d8b',
+    l1mesh:  '#795548',
   }};
   const PHASE_COLORS = {{
     issue:   '#202020',
+    decode:  '#455a64',
     dispatch:'#6b6b6b',
     dram_read:'#1f6fd1',
     dram_write:'#6f42c1',
     l1_read: '#4f9df8',
     l1_write:'#38a169',
+    l1_route:'#607d8b',
+    mesh:    '#795548',
+    sram:    '#8d6e63',
     codec:   '#b7791f',
     act_read:'#2f80ed',
     wgt_read:'#56ccf2',

@@ -119,6 +119,11 @@ public:
         sc_core::sc_time done{sc_core::SC_ZERO_TIME};
     };
 
+    sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
+    std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
+    EngineModel engine_model = EngineModel::Analytical;
+
     SC_HAS_PROCESS(L1Mesh);
     L1Mesh(sc_core::sc_module_name nm,
            std::size_t bytes = L1MESH_BYTES,
@@ -144,18 +149,25 @@ public:
         std::memcpy(&mem[offset], src, n);
     }
     AccessTicket read_async(uint32_t offset, void* dst, uint32_t n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         std::memcpy(dst, &mem[offset], n);
-        return in_process() ? AccessTicket{schedule_latency(offset, n, true)}
-                            : AccessTicket{sc_core::sc_time_stamp()};
+        AccessTicket ticket = in_process() ? AccessTicket{schedule_latency(offset, n, true)}
+                                           : AccessTicket{sc_core::sc_time_stamp()};
+        record_rtl_access(t_begin, ticket.done, n, true);
+        return ticket;
     }
     AccessTicket write_async(uint32_t offset, const void* src, uint32_t n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         std::memcpy(&mem[offset], src, n);
-        return in_process() ? AccessTicket{schedule_latency(offset, n, false)}
-                            : AccessTicket{sc_core::sc_time_stamp()};
+        AccessTicket ticket = in_process() ? AccessTicket{schedule_latency(offset, n, false)}
+                                           : AccessTicket{sc_core::sc_time_stamp()};
+        record_rtl_access(t_begin, ticket.done, n, false);
+        return ticket;
     }
     AccessTicket write_strided_rows(uint32_t dst, const void* src,
                                     uint32_t rows, uint32_t src_row,
                                     uint32_t dst_row, uint32_t dst_col) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (!rows || !src_row || !dst_row || dst_col + src_row > dst_row)
             return AccessTicket{sc_core::sc_time_stamp()};
         const auto* s = static_cast<const uint8_t*>(src);
@@ -164,13 +176,17 @@ public:
                         s + uint64_t(r) * src_row,
                         src_row);
         }
-        return in_process() ? AccessTicket{schedule_latency(dst + dst_col, rows * src_row, false)}
-                            : AccessTicket{sc_core::sc_time_stamp()};
+        AccessTicket ticket = in_process()
+            ? AccessTicket{schedule_latency(dst + dst_col, rows * src_row, false)}
+            : AccessTicket{sc_core::sc_time_stamp()};
+        record_rtl_access(t_begin, ticket.done, rows * src_row, false);
+        return ticket;
     }
     AccessTicket channel_pack(uint32_t src, uint32_t dst,
                               uint32_t rows, uint32_t src_row,
                               uint32_t src_stride, uint32_t dst_row,
                               uint32_t dst_col) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (!rows || !src_row || !dst_row || dst_col + src_row > dst_row)
             return AccessTicket{sc_core::sc_time_stamp()};
         if (!src_stride) src_stride = src_row;
@@ -186,7 +202,9 @@ public:
                 : schedule_latency(src, rows * src_stride, true);
         const sc_core::sc_time dst_done =
             schedule_latency(dst, rows * dst_row, false);
-        return AccessTicket{std::max(src_done, dst_done)};
+        AccessTicket ticket{std::max(src_done, dst_done)};
+        record_rtl_access(t_begin, ticket.done, rows * (src_stride + dst_row), true);
+        return ticket;
     }
     static void wait_ticket(const AccessTicket& t) {
         const sc_core::sc_time now = sc_core::sc_time_stamp();
@@ -226,6 +244,89 @@ private:
         else if (timing_mode_ == L1TimingMode::PortConflict)
             return schedule_bank_latency(offset, bytes, is_read);
         return schedule_fast_latency(bytes);
+    }
+
+    static uint64_t cycles_between(sc_core::sc_time begin, sc_core::sc_time end) {
+        if (end <= begin) return 0;
+        return uint64_t((end - begin).to_seconds() * 1e9);
+    }
+
+    void record_rtl_access(sc_core::sc_time begin, sc_core::sc_time done,
+                           uint32_t bytes, bool is_read) {
+        if (!is_rtl_style(engine_model) || !in_process())
+            return;
+        const uint64_t begin_ns = uint64_t(begin.to_seconds() * 1e9);
+        const uint64_t observed = cycles_between(begin, done);
+        const uint64_t display = std::max<uint64_t>(1, observed);
+        busy_time += done > begin ? (done - begin) : sc_core::SC_ZERO_TIME;
+
+        std::vector<RtlPhaseTrace> phases;
+        RtlPhaseTrace issue;
+        issue.name = "issue";
+        issue.cycles = 1;
+        issue.stall = is_read ? "payload_r_req" : "payload_w_req";
+        phases.push_back(issue);
+
+        const uint64_t sram_cycles = std::max<uint64_t>(
+            1, uint64_t((bytes + PAYLOAD_FAST_WINDOW_BYTES - 1) /
+                        PAYLOAD_FAST_WINDOW_BYTES));
+        if (timing_mode_ == L1TimingMode::MeshConflict ||
+            timing_mode_ == L1TimingMode::MeshOptimistic) {
+            const uint64_t noc_cycles =
+                (display > sram_cycles + 1) ? (display - sram_cycles - 1) : 1;
+            RtlPhaseTrace mesh;
+            mesh.name = "mesh";
+            mesh.cycles = noc_cycles;
+            mesh.read_bytes = is_read ? bytes : 0;
+            mesh.write_bytes = is_read ? 0 : bytes;
+            mesh.stall = timing_mode_ == L1TimingMode::MeshOptimistic
+                       ? "mesh_optimistic"
+                       : "mesh_route";
+            phases.push_back(mesh);
+        }
+
+        RtlPhaseTrace sram;
+        sram.name = "sram";
+        sram.cycles = sram_cycles;
+        sram.read_bytes = is_read ? bytes : 0;
+        sram.write_bytes = is_read ? 0 : bytes;
+        sram.lanes = N_BANKS;
+        sram.stall = is_read ? "sram_read_bank" : "sram_write_bank";
+        phases.push_back(sram);
+        append_rtl_task(begin_ns, begin_ns + display, phases);
+    }
+
+    static bool same_phase_shape(const std::vector<RtlPhaseTrace>& a,
+                                 const std::vector<RtlPhaseTrace>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].name != b[i].name || a[i].stall != b[i].stall)
+                return false;
+        }
+        return true;
+    }
+
+    void append_rtl_task(uint64_t begin_ns, uint64_t end_ns,
+                         const std::vector<RtlPhaseTrace>& phases) {
+        const size_t lookback = std::min<size_t>(rtl_phase_tasks.size(), 16);
+        for (size_t n = 0; n < lookback; ++n) {
+            const size_t idx = rtl_phase_tasks.size() - 1 - n;
+            if (begin_ns > tasks[idx].second + 1024 ||
+                !same_phase_shape(rtl_phase_tasks[idx], phases))
+                continue;
+            tasks[idx].second = std::max(tasks[idx].second, end_ns);
+            auto& dst = rtl_phase_tasks[idx];
+            for (size_t i = 0; i < dst.size(); ++i) {
+                dst[i].cycles += phases[i].cycles;
+                dst[i].read_bytes += phases[i].read_bytes;
+                dst[i].write_bytes += phases[i].write_bytes;
+                dst[i].elems += phases[i].elems;
+                dst[i].lanes = std::max(dst[i].lanes, phases[i].lanes);
+            }
+            return;
+        }
+        tasks.emplace_back(begin_ns, end_ns);
+        rtl_phase_tasks.push_back(phases);
     }
 
     // Fast mode: aggregate-bandwidth estimate. It preserves the 16-bank
@@ -717,20 +818,29 @@ class L1Manager : public sc_core::sc_module {
 public:
     using AccessTicket = L1Mesh::AccessTicket;
 
+    sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
+    std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
+    EngineModel engine_model = EngineModel::Analytical;
+
     SC_HAS_PROCESS(L1Manager);
     L1Manager(sc_core::sc_module_name nm, L1Mesh& mesh, Dram& dram)
       : sc_module(nm), mesh_(mesh), dram_(dram) {}
 
     void read(uint32_t addr, void* dst, uint32_t n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, n);
         else if (addr_in_dram(addr)) dram_.read(addr, dst, n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, n, true);
     }
     void read_compressed(uint32_t addr, void* dst, uint32_t raw_n,
                          uint32_t compressed_n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
         else if (addr_in_dram(addr)) dram_.read_compressed(addr, dst, raw_n, compressed_n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, compressed_n, true);
     }
     void read_compressed_instant(uint32_t addr, void* dst, uint32_t raw_n) {
         if (addr_in_l1mesh(addr)) mesh_.read(addr, dst, raw_n);
@@ -738,9 +848,11 @@ public:
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
     }
     void write(uint32_t addr, const void* src, uint32_t n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(addr)) mesh_.write(addr, src, n);
         else if (addr_in_dram(addr)) dram_.write(addr, src, n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, n, false);
     }
     void write_instant(uint32_t addr, const void* src, uint32_t n) {
         if (addr_in_l1mesh(addr)) mesh_.write_instant(addr, src, n);
@@ -749,25 +861,41 @@ public:
     }
     void write_compressed(uint32_t addr, const void* src, uint32_t raw_n,
                           uint32_t compressed_n) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         if (addr_in_l1mesh(addr)) mesh_.write(addr, src, raw_n);
         else if (addr_in_dram(addr)) dram_.write_compressed(addr, src, raw_n, compressed_n);
         else SC_REPORT_ERROR("L1Manager", "addr out of range");
+        record_rtl_access(t_begin, sc_core::sc_time_stamp(), addr, compressed_n, false);
     }
     AccessTicket read_async(uint32_t addr, void* dst, uint32_t n) {
-        if (addr_in_l1mesh(addr)) return mesh_.read_async(addr, dst, n);
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        if (addr_in_l1mesh(addr)) {
+            AccessTicket ticket = mesh_.read_async(addr, dst, n);
+            record_rtl_access(t_begin, ticket.done, addr, n, true);
+            return ticket;
+        }
         read(addr, dst, n);
         return AccessTicket{sc_core::sc_time_stamp()};
     }
     AccessTicket write_async(uint32_t addr, const void* src, uint32_t n) {
-        if (addr_in_l1mesh(addr)) return mesh_.write_async(addr, src, n);
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        if (addr_in_l1mesh(addr)) {
+            AccessTicket ticket = mesh_.write_async(addr, src, n);
+            record_rtl_access(t_begin, ticket.done, addr, n, false);
+            return ticket;
+        }
         write(addr, src, n);
         return AccessTicket{sc_core::sc_time_stamp()};
     }
     AccessTicket write_strided_rows(uint32_t dst, const void* src,
                                     uint32_t rows, uint32_t src_row,
                                     uint32_t dst_row, uint32_t dst_col) {
-        if (addr_in_l1mesh(dst))
-            return mesh_.write_strided_rows(dst, src, rows, src_row, dst_row, dst_col);
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        if (addr_in_l1mesh(dst)) {
+            AccessTicket ticket = mesh_.write_strided_rows(dst, src, rows, src_row, dst_row, dst_col);
+            record_rtl_access(t_begin, ticket.done, dst, rows * src_row, false);
+            return ticket;
+        }
         SC_REPORT_ERROR("L1Manager", "write_strided_rows requires L1Mesh dst address");
         return AccessTicket{sc_core::sc_time_stamp()};
     }
@@ -775,8 +903,12 @@ public:
                               uint32_t rows, uint32_t src_row,
                               uint32_t src_stride, uint32_t dst_row,
                               uint32_t dst_col) {
-        if (addr_in_l1mesh(src) && addr_in_l1mesh(dst))
-            return mesh_.channel_pack(src, dst, rows, src_row, src_stride, dst_row, dst_col);
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+        if (addr_in_l1mesh(src) && addr_in_l1mesh(dst)) {
+            AccessTicket ticket = mesh_.channel_pack(src, dst, rows, src_row, src_stride, dst_row, dst_col);
+            record_rtl_access(t_begin, ticket.done, dst, rows * (src_row + dst_row), false);
+            return ticket;
+        }
         SC_REPORT_ERROR("L1Manager", "channel_pack requires L1Mesh addresses");
         return AccessTicket{sc_core::sc_time_stamp()};
     }
@@ -789,6 +921,73 @@ public:
     }
 
 private:
+    static bool in_process() {
+        return sc_core::sc_get_current_process_handle().valid();
+    }
+
+    static uint64_t cycles_between(sc_core::sc_time begin, sc_core::sc_time end) {
+        if (end <= begin) return 0;
+        return uint64_t((end - begin).to_seconds() * 1e9);
+    }
+
+    void record_rtl_access(sc_core::sc_time begin, sc_core::sc_time done,
+                           uint32_t addr, uint32_t bytes, bool is_read) {
+        if (!is_rtl_style(engine_model) || !in_process())
+            return;
+        const uint64_t begin_ns = uint64_t(begin.to_seconds() * 1e9);
+        const uint64_t observed = cycles_between(begin, done);
+        const uint64_t display = std::max<uint64_t>(1, observed);
+        busy_time += done > begin ? (done - begin) : sc_core::SC_ZERO_TIME;
+
+        const bool l1 = addr_in_l1mesh(addr);
+        const uint64_t route_cycles = display > 1 ? display - 1 : 1;
+        std::vector<RtlPhaseTrace> phases;
+        RtlPhaseTrace decode;
+        decode.name = "decode";
+        decode.cycles = 1;
+        decode.stall = l1 ? "l1_addr_decode" : "dram_addr_decode";
+        phases.push_back(decode);
+
+        RtlPhaseTrace route;
+        route.name = l1 ? "l1_route" : (is_read ? "dram_read" : "dram_write");
+        route.cycles = route_cycles;
+        route.read_bytes = is_read ? bytes : 0;
+        route.write_bytes = is_read ? 0 : bytes;
+        route.stall = l1 ? "l1mesh_payload" : "dram_axi";
+        phases.push_back(route);
+        append_rtl_task(begin_ns, begin_ns + display, phases);
+    }
+
+    static bool same_phase_shape(const std::vector<RtlPhaseTrace>& a,
+                                 const std::vector<RtlPhaseTrace>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].name != b[i].name || a[i].stall != b[i].stall)
+                return false;
+        }
+        return true;
+    }
+
+    void append_rtl_task(uint64_t begin_ns, uint64_t end_ns,
+                         const std::vector<RtlPhaseTrace>& phases) {
+        if (!tasks.empty() && !rtl_phase_tasks.empty() &&
+            begin_ns <= tasks.back().second + 8 &&
+            same_phase_shape(rtl_phase_tasks.back(), phases)) {
+            tasks.back().second = std::max(tasks.back().second, end_ns);
+            auto& dst = rtl_phase_tasks.back();
+            for (size_t i = 0; i < dst.size(); ++i) {
+                dst[i].cycles += phases[i].cycles;
+                dst[i].read_bytes += phases[i].read_bytes;
+                dst[i].write_bytes += phases[i].write_bytes;
+                dst[i].elems += phases[i].elems;
+                dst[i].lanes = std::max(dst[i].lanes, phases[i].lanes);
+            }
+            return;
+        }
+        tasks.emplace_back(begin_ns, end_ns);
+        rtl_phase_tasks.push_back(phases);
+    }
+
     L1Mesh& mesh_;
     Dram& dram_;
 };
