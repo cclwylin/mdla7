@@ -11060,7 +11060,7 @@ int sc_main(int argc, char* argv[]) {
         const char* name;
         uint64_t busy;
         const std::vector<std::pair<uint64_t, uint64_t>>* tasks;
-        const std::vector<std::vector<std::pair<std::string, uint64_t>>>* rtl_phases = nullptr;
+        const std::vector<std::vector<RtlPhaseTrace>>* rtl_phases = nullptr;
     };
     EngStat engines[] = {
         {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read},
@@ -11242,7 +11242,20 @@ int sc_main(int argc, char* argv[]) {
                     if (j < phase_tasks.size()) {
                         const auto& phases = phase_tasks[j];
                         for (size_t k = 0; k < phases.size(); ++k) {
-                            pf << "[\"" << phases[k].first << "\"," << phases[k].second << "]";
+                            const auto& p = phases[k];
+                            pf << "{\"name\":\"" << p.name << "\""
+                               << ",\"cycles\":" << p.cycles;
+                            if (p.read_bytes)
+                                pf << ",\"read_bytes\":" << p.read_bytes;
+                            if (p.write_bytes)
+                                pf << ",\"write_bytes\":" << p.write_bytes;
+                            if (p.elems)
+                                pf << ",\"elems\":" << p.elems;
+                            if (p.lanes)
+                                pf << ",\"lanes\":" << p.lanes;
+                            if (!p.stall.empty())
+                                pf << ",\"stall\":\"" << p.stall << "\"";
+                            pf << "}";
                             if (k + 1 < phases.size()) pf << ",";
                         }
                     }

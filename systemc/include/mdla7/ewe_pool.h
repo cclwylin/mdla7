@@ -58,8 +58,8 @@ SC_MODULE(EweEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
-    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
-    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
+    std::vector<RtlPhaseTrace> last_rtl_phases;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -86,20 +86,37 @@ SC_MODULE(EweEngine) {
         return ceil_div_u64(bytes, PayloadPortCount::EWE_W * PAYLOAD_BYTES);
     }
 
-    void rtl_wait_phase(const char* name, uint64_t cycles) {
-        last_rtl_phases.emplace_back(name, cycles);
+    void rtl_wait_phase(const char* name, uint64_t cycles,
+                        uint64_t read_bytes = 0, uint64_t write_bytes = 0,
+                        uint64_t elems = 0, uint64_t lanes = 0,
+                        const char* stall = "") {
+        RtlPhaseTrace phase;
+        phase.name = name;
+        phase.cycles = cycles;
+        phase.read_bytes = read_bytes;
+        phase.write_bytes = write_bytes;
+        phase.elems = elems;
+        phase.lanes = lanes;
+        phase.stall = stall ? stall : "";
+        last_rtl_phases.push_back(phase);
         if (cycles)
             wait(cycles, sc_core::SC_NS);
     }
 
     void rtl_run_ewe_transaction(uint64_t read_bytes,
                                  uint64_t compute_cycles,
-                                 uint64_t write_bytes) {
+                                 uint64_t write_bytes,
+                                 uint64_t elems,
+                                 uint64_t lanes,
+                                 const char* compute_kind) {
         last_rtl_phases.clear();
         rtl_wait_phase("issue", 4);
-        rtl_wait_phase("read", rtl_read_cycles(read_bytes));
-        rtl_wait_phase("compute", compute_cycles);
-        rtl_wait_phase("write", rtl_write_cycles(write_bytes));
+        rtl_wait_phase("read", rtl_read_cycles(read_bytes),
+                       read_bytes, 0, elems, lanes, "payload_read");
+        rtl_wait_phase("compute", compute_cycles,
+                       0, 0, elems, lanes, compute_kind);
+        rtl_wait_phase("write", rtl_write_cycles(write_bytes),
+                       0, write_bytes, elems, lanes, "payload_write");
         rtl_wait_phase("done", 2);
     }
 
@@ -107,14 +124,14 @@ SC_MODULE(EweEngine) {
         const uint64_t bytes = elems * elem_bytes();
         rtl_run_ewe_transaction(2 * bytes + 48,
                                 ceil_div_u64(elems, lanes),
-                                bytes);
+                                bytes, elems, lanes, "binary_lane");
     }
 
     void rtl_run_unary(uint64_t elems, uint64_t lanes, uint64_t op_passes) {
         const uint64_t bytes = elems * elem_bytes();
         rtl_run_ewe_transaction(bytes + 8,
                                 op_passes * ceil_div_u64(elems, lanes),
-                                bytes);
+                                bytes, elems, lanes, "unary_lane");
     }
 
     // v6: TFLite int8 ADD reference. Params blob layout at e.lut_addr:
@@ -538,7 +555,7 @@ SC_MODULE(EweEngine) {
                                uint64_t(t_end  .to_seconds() * 1e9));
             rtl_phase_tasks.push_back(is_rtl_style(engine_model)
                                       ? last_rtl_phases
-                                      : std::vector<std::pair<std::string, uint64_t>>{});
+                                      : std::vector<RtlPhaseTrace>{});
             done_tag_out.write(0);
         }
     }
@@ -559,8 +576,8 @@ SC_MODULE(PoolEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
-    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
-    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
+    std::vector<RtlPhaseTrace> last_rtl_phases;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
     EngineModel engine_model = EngineModel::Analytical;
 
@@ -579,8 +596,19 @@ SC_MODULE(PoolEngine) {
                 last_dtype == DT_INT16x16) ? 2u : 1u;
     }
 
-    void rtl_wait_phase(const char* name, uint64_t cycles) {
-        last_rtl_phases.emplace_back(name, cycles);
+    void rtl_wait_phase(const char* name, uint64_t cycles,
+                        uint64_t read_bytes = 0, uint64_t write_bytes = 0,
+                        uint64_t elems = 0, uint64_t lanes = 0,
+                        const char* stall = "") {
+        RtlPhaseTrace phase;
+        phase.name = name;
+        phase.cycles = cycles;
+        phase.read_bytes = read_bytes;
+        phase.write_bytes = write_bytes;
+        phase.elems = elems;
+        phase.lanes = lanes;
+        phase.stall = stall ? stall : "";
+        last_rtl_phases.push_back(phase);
         if (cycles)
             wait(cycles, sc_core::SC_NS);
     }
@@ -592,11 +620,14 @@ SC_MODULE(PoolEngine) {
         last_rtl_phases.clear();
         rtl_wait_phase("issue", 5);
         rtl_wait_phase("read", ceil_div_u64(
-            bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES));
+            bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES),
+            bytes_in, 0, in_elems, lanes, "window_read");
         rtl_wait_phase("compute", ceil_div_u64(out_elems, lanes) *
-                       std::max<uint32_t>(window, 1));
+                       std::max<uint32_t>(window, 1),
+                       0, 0, out_elems, lanes, "window_reduce");
         rtl_wait_phase("write", ceil_div_u64(
-            bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES));
+            bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES),
+            0, bytes_out, out_elems, lanes, "payload_write");
         rtl_wait_phase("done", 3);
     }
 
@@ -757,7 +788,7 @@ SC_MODULE(PoolEngine) {
                                    uint64_t(t_end  .to_seconds() * 1e9));
                 rtl_phase_tasks.push_back(is_rtl_style(engine_model)
                                           ? last_rtl_phases
-                                          : std::vector<std::pair<std::string, uint64_t>>{});
+                                          : std::vector<RtlPhaseTrace>{});
                 done_tag_out.write(0);
                 continue;
             }
@@ -780,7 +811,7 @@ SC_MODULE(PoolEngine) {
                                uint64_t(t_end  .to_seconds() * 1e9));
             rtl_phase_tasks.push_back(is_rtl_style(engine_model)
                                       ? last_rtl_phases
-                                      : std::vector<std::pair<std::string, uint64_t>>{});
+                                      : std::vector<RtlPhaseTrace>{});
             done_tag_out.write(0);
         }
     }

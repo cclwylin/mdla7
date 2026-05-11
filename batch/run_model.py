@@ -807,10 +807,14 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                     continue
                 task_count += 1
                 for phase in phases:
-                    if not isinstance(phase, list) or len(phase) < 2:
+                    if isinstance(phase, dict):
+                        name = str(phase.get("name", ""))
+                        cycles = int(phase.get("cycles", 0) or 0)
+                    elif isinstance(phase, list) and len(phase) >= 2:
+                        name = str(phase[0])
+                        cycles = int(phase[1] or 0)
+                    else:
                         continue
-                    name = str(phase[0])
-                    cycles = int(phase[1] or 0)
                     phase_totals[name] = phase_totals.get(name, 0) + cycles
             total = sum(phase_totals.values())
             if not task_count or total <= 0:
@@ -1425,7 +1429,22 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     const m = taskMeta(task);
     const phases = m && Array.isArray(m.rtl_phases) ? m.rtl_phases : null;
     if (!phases || !phases.length) return '';
-    return phases.map(p => `${{p[0]}}:${{fmt(+p[1] || 0)}}`).join('  ');
+    return phases.map(p => {{
+      const name = Array.isArray(p) ? p[0] : p.name;
+      const cyc = +(Array.isArray(p) ? p[1] : p.cycles) || 0;
+      const rb = +(Array.isArray(p) ? 0 : p.read_bytes) || 0;
+      const wb = +(Array.isArray(p) ? 0 : p.write_bytes) || 0;
+      const elems = +(Array.isArray(p) ? 0 : p.elems) || 0;
+      const lanes = +(Array.isArray(p) ? 0 : p.lanes) || 0;
+      const stall = Array.isArray(p) ? '' : (p.stall || '');
+      let text = `${{name}}:${{fmt(cyc)}}`;
+      if (rb) text += `/r${{fmt(rb)}}B`;
+      if (wb) text += `/w${{fmt(wb)}}B`;
+      if (elems) text += `/e${{fmt(elems)}}`;
+      if (lanes) text += `/l${{fmt(lanes)}}`;
+      if (stall) text += `/${{stall}}`;
+      return text;
+    }}).join('  ');
   }}
   function rtlPhases(task) {{
     const m = taskMeta(task);
@@ -1444,8 +1463,8 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     const yy = y + Math.max(1, h - 7);
     const hh = Math.min(5, Math.max(2, h - 2));
     for (const p of phases) {{
-      const name = String(p[0] || '');
-      const cyc = Math.max(0, +p[1] || 0);
+      const name = String((Array.isArray(p) ? p[0] : p.name) || '');
+      const cyc = Math.max(0, +(Array.isArray(p) ? p[1] : p.cycles) || 0);
       if (!cyc) continue;
       const ps = s + dur * acc / totalPhase;
       acc += cyc;

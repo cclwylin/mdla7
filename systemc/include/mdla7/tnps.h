@@ -23,8 +23,8 @@ SC_MODULE(TnpsEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
-    std::vector<std::pair<std::string, uint64_t>> last_rtl_phases;
-    std::vector<std::vector<std::pair<std::string, uint64_t>>> rtl_phase_tasks;
+    std::vector<RtlPhaseTrace> last_rtl_phases;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     EngineModel engine_model = EngineModel::Analytical;
     sc_core::sc_time task_begin{sc_core::SC_ZERO_TIME};
 
@@ -61,7 +61,7 @@ SC_MODULE(TnpsEngine) {
                                uint64_t(t_end.to_seconds() * 1e9));
             rtl_phase_tasks.push_back(is_rtl_style(engine_model)
                                       ? last_rtl_phases
-                                      : std::vector<std::pair<std::string, uint64_t>>{});
+                                      : std::vector<RtlPhaseTrace>{});
             done_tag_out.write(0);
         }
     }
@@ -80,8 +80,16 @@ SC_MODULE(TnpsEngine) {
         return b ? ((a + b - 1) / b) : 0;
     }
 
-    void rtl_wait_phase(const char* name, uint64_t cycles) {
-        last_rtl_phases.emplace_back(name, cycles);
+    void rtl_wait_phase(const char* name, uint64_t cycles,
+                        uint64_t read_bytes = 0, uint64_t write_bytes = 0,
+                        const char* stall = "") {
+        RtlPhaseTrace phase;
+        phase.name = name;
+        phase.cycles = cycles;
+        phase.read_bytes = read_bytes;
+        phase.write_bytes = write_bytes;
+        phase.stall = stall ? stall : "";
+        last_rtl_phases.push_back(phase);
         if (cycles)
             wait(cycles, sc_core::SC_NS);
     }
@@ -90,9 +98,11 @@ SC_MODULE(TnpsEngine) {
         last_rtl_phases.clear();
         rtl_wait_phase("issue", 4);
         rtl_wait_phase("read", ceil_div_u64(
-            bytes, PayloadPortCount::TNPS_R * PAYLOAD_BYTES));
+            bytes, PayloadPortCount::TNPS_R * PAYLOAD_BYTES),
+            bytes, 0, "payload_read");
         rtl_wait_phase("write", ceil_div_u64(
-            bytes, PayloadPortCount::TNPS_W * PAYLOAD_BYTES));
+            bytes, PayloadPortCount::TNPS_W * PAYLOAD_BYTES),
+            0, bytes, "payload_write");
         rtl_wait_phase("done", 4);
     }
 

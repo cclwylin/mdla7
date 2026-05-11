@@ -78,6 +78,16 @@ inline const char* engine_model_name(EngineModel model) {
     return is_rtl_style(model) ? "rtl" : "model";
 }
 
+struct RtlPhaseTrace {
+    std::string name;
+    uint64_t cycles = 0;
+    uint64_t read_bytes = 0;
+    uint64_t write_bytes = 0;
+    uint64_t elems = 0;
+    uint64_t lanes = 0;
+    std::string stall;
+};
+
 class L1Mesh : public sc_core::sc_module {
 public:
     struct Stats {
