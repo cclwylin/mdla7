@@ -16,6 +16,7 @@ from run_mdla6_pattern import (  # noqa: E402
     REPO_ROOT,
     MODEL_RUNNER,
     _artefact_paths,
+    _normalise_pattern,
     _report_exists_for,
     run_one,
 )
@@ -62,6 +63,40 @@ def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False)
             continue
         patterns.append(pattern)
     return patterns
+
+
+def _load_pattern_order(csv_path: Path) -> dict[str, tuple[float, int]]:
+    if not csv_path.exists():
+        raise SystemExit(f"pattern order CSV not found: {csv_path}")
+    out: dict[str, tuple[float, int]] = {}
+    with csv_path.open(newline="") as f:
+        for idx, row in enumerate(csv.DictReader(f)):
+            pattern = row.get("Pattern") or row.get("pattern") or ""
+            pattern = _normalise_pattern(pattern.strip())
+            if not pattern or pattern in out:
+                continue
+            try:
+                cx = float(row.get("CX") or row.get("cx") or "inf")
+            except ValueError:
+                cx = float("inf")
+            out[pattern] = (cx, idx)
+    return out
+
+
+def _apply_pattern_order(patterns: list[str], order_csv: Path | None) -> list[str]:
+    if not order_csv:
+        return patterns
+    order = _load_pattern_order(order_csv)
+
+    def key(item: tuple[int, str]) -> tuple[int, float, int, str]:
+        original_idx, pattern = item
+        mdla6_order = order.get(_normalise_pattern(pattern))
+        if mdla6_order:
+            cx, csv_idx = mdla6_order
+            return (0, cx, csv_idx, pattern)
+        return (1, float("inf"), original_idx, pattern)
+
+    return [pattern for _, pattern in sorted(enumerate(patterns), key=key)]
 
 
 def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
@@ -190,6 +225,7 @@ def run_corpus(*,
                default_csv_out: Path,
                profile_html: str,
                profile_title: str,
+               pattern_order_csv: Path | None = None,
                recursive: bool = False,
                microblock_metrics: bool = False) -> None:
     ap = argparse.ArgumentParser()
@@ -200,6 +236,8 @@ def run_corpus(*,
                     help="output regression CSV")
     ap.add_argument("--filter", default="",
                     help="substring filter on model name")
+    ap.add_argument("--pattern-order-csv", default=str(pattern_order_csv or ""),
+                    help="optional CSV with Pattern,CX columns used to order selected models")
     ap.add_argument("--limit", type=int, default=0,
                     help="only run the first N selected models (0 = no limit)")
     ap.add_argument("--offset", type=int, default=0,
@@ -233,6 +271,8 @@ def run_corpus(*,
         profile_html = f"{profile_path.stem}.{args.engine_model}{profile_path.suffix}"
     model_dir = Path(args.model_dir)
     patterns = _discover_models(model_dir, args.filter, recursive=recursive)
+    order_csv = Path(args.pattern_order_csv) if args.pattern_order_csv else None
+    patterns = _apply_pattern_order(patterns, order_csv)
     if args.offset:
         patterns = patterns[args.offset:]
     if args.limit:

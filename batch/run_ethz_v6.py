@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Regression sweep over model/ETHZ_v6/*.tflite.
 
+Models run in the same small-CX-first order as run_mdla6_pattern.py's
+mdla6_ethz_v6_sorted.csv by default.
+
 Usage:
     ./batch/run_ethz_v6.py
     ./batch/run_ethz_v6.py --filter mobilenet
@@ -10,6 +13,7 @@ Usage:
     ./batch/run_ethz_v6.py --fast-only
     ./batch/run_ethz_v6.py --synth-fast
     ./batch/run_ethz_v6.py --fast-only --engine-model synth
+    ./batch/run_ethz_v6.py --pattern-order-csv other_order.csv
 """
 
 from __future__ import annotations
@@ -35,4 +39,5 @@ if __name__ == "__main__":
         default_csv_out=OUT_DIR / "ethz_v6_regression.csv",
         profile_html="profile_ethz_v6.html",
         profile_title="MDLA7 ETHZ_v6 Profiles",
+        pattern_order_csv=REPO_ROOT / "batch" / "mdla6_ethz_v6_sorted.csv",
     )
