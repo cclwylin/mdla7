@@ -1348,13 +1348,19 @@ int sc_main(int argc, char* argv[]) {
         for (uint32_t k = 0; k + 1 < N; ++k) {
             const auto& P = metas[k];
             const auto& S = metas[k + 1];
+            const bool exact_mul_to_add_tail =
+                P.op_kind == OK_MUL &&
+                (S.op_kind == OK_ADD || S.op_kind == OK_SUB) &&
+                P.dtype == S.dtype &&
+                P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
+                graph_has_exact_single_consumer(k, k + 1, false);
             const bool large_same_shape_add_boundary =
                 is_conv_class_meta(P) &&
                 (S.op_kind == OK_ADD || S.op_kind == OK_SUB) &&
                 P.dtype == S.dtype &&
                 P.out_h == S.in_h && P.out_w == S.in_w && P.out_c == S.in_c &&
                 P.out_h >= 256 && P.out_w >= 256;
-            if (large_same_shape_add_boundary) {
+            if (exact_mul_to_add_tail || large_same_shape_add_boundary) {
                 producer_no_store[k] = true;
             }
         }
@@ -4923,6 +4929,16 @@ int sc_main(int argc, char* argv[]) {
             if (!graph_input0_is_exact_producer(i, i + 1))
                 return false;
 
+            const bool input_a_preloaded =
+                i > 0 &&
+                fuse_prev_is_conv_class && fuse_prev_single_tile &&
+                graph_input0_is_exact_producer(i - 1, i) &&
+                fuse_prev_dtype == B.dtype &&
+                fuse_prev_out_h == B.in_h &&
+                fuse_prev_out_w == B.in_w &&
+                fuse_prev_out_c == B.in_c &&
+                fuse_prev_l1_out_size >= B.in_size &&
+                !ranges_overlap(0u, 48u, fuse_prev_l1_out_addr, fuse_prev_l1_out_size);
             const uint32_t elem = 1;
             const uint32_t vec_elems = S.in_c;
             const uint32_t vec_bytes = vec_elems * elem;
@@ -4936,13 +4952,30 @@ int sc_main(int argc, char* argv[]) {
             if (tile_vecs == 0)
                 return false;
             const uint32_t params_l1 = 0;
-            const uint32_t slot0 = align64(64u);
-            auto slot_top_for = [&](uint32_t vectors) -> uint64_t {
+            uint32_t slot0 = align64(64u);
+            auto choose_slot0_for = [&](uint32_t vectors, uint32_t& chosen) -> bool {
                 const uint32_t bytes = vectors * vec_bytes;
                 const uint32_t seg = align64(bytes);
-                return uint64_t(slot0) + 2ull * 4ull * seg;
+                const uint64_t span = 2ull * 4ull * seg;
+                std::array<uint32_t, 2> candidates = {
+                    align64(64u),
+                    input_a_preloaded
+                        ? align64(fuse_prev_l1_out_addr + fuse_prev_l1_out_size)
+                        : align64(64u),
+                };
+                for (uint32_t cand : candidates) {
+                    if (uint64_t(cand) + span + safety > L1_BUDGET)
+                        continue;
+                    if (input_a_preloaded &&
+                        ranges_overlap(cand, uint32_t(span),
+                                       fuse_prev_l1_out_addr, fuse_prev_l1_out_size))
+                        continue;
+                    chosen = cand;
+                    return true;
+                }
+                return false;
             };
-            while (tile_vecs > 0 && slot_top_for(tile_vecs) + safety > L1_BUDGET)
+            while (tile_vecs > 0 && !choose_slot0_for(tile_vecs, slot0))
                 --tile_vecs;
             if (tile_vecs == 0)
                 return false;
@@ -4998,22 +5031,27 @@ int sc_main(int argc, char* argv[]) {
                 mb.elems = elems;
                 mb.bytes = bytes;
 
-                const uint8_t a_tag = alloc_tag();
+                const uint8_t a_tag = input_a_preloaded ? fuse_prev_done_tag : alloc_tag();
                 const uint8_t b_tag = alloc_tag();
                 const uint8_t e_tag = alloc_tag();
                 const uint8_t sm_tag = alloc_tag();
                 const uint8_t st_tag = suppress_softmax_store ? 0 : alloc_tag();
                 const uint8_t wait_slot = slot_free[slot] ? slot_free[slot] : params_tag;
 
-                auto [ad, a_charged] = make_act_load(B, uint32_t(B.dram_in + off),
-                                                     slot_a(slot), bytes,
-                                                     a_tag, wait_slot);
-                mark_stream(ad, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
-                program.push_back(ad);
-                acc[i].dram_r += a_charged;
-                acc[i].sram_w += bytes;
-                ++udma_count_so_far;
-                last_udma_i = udma_count_so_far;
+                const uint32_t a_l1 = input_a_preloaded
+                    ? uint32_t(fuse_prev_l1_out_addr + off)
+                    : slot_a(slot);
+                if (!input_a_preloaded) {
+                    auto [ad, a_charged] = make_act_load(B, uint32_t(B.dram_in + off),
+                                                         a_l1, bytes,
+                                                         a_tag, wait_slot);
+                    mark_stream(ad, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(ad);
+                    acc[i].dram_r += a_charged;
+                    acc[i].sram_w += bytes;
+                    ++udma_count_so_far;
+                    last_udma_i = udma_count_so_far;
+                }
 
                 auto [bd, b_charged] = make_binary_b_load(B, uint32_t(B.dram_wgt + off),
                                                            slot_b(slot), bytes,
@@ -5032,7 +5070,7 @@ int sc_main(int argc, char* argv[]) {
                 tile_B.out_h = 1;
                 tile_B.out_w = 1;
                 tile_B.out_c = uint16_t(elems);
-                Descriptor ed = make_ewe_add(tile_B, slot_a(slot), slot_b(slot),
+                Descriptor ed = make_ewe_add(tile_B, a_l1, slot_b(slot),
                                              slot_e(slot), params_l1,
                                              b_tag, a_tag, e_tag);
                 mark_stream(ed, i, mb, SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
@@ -5083,6 +5121,8 @@ int sc_main(int argc, char* argv[]) {
                 udma_w_skipped[i + 1] = true;
                 udma_w_streamed[i + 1] = true;
             }
+            if (input_a_preloaded)
+                mark_flow_edge(i - 1, i);
             mark_flow_edge(i, i + 1);
             udma_count_at_layer_end[i] = last_udma_i;
             ewe_count_at_layer_end[i] = last_ewe_i;
