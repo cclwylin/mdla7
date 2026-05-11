@@ -795,6 +795,51 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             "tasks": tasks,
         }
 
+    def _rtl_phase_summary_rows() -> str:
+        rows = []
+        for engine in ("ewe", "pool", "tnps"):
+            phase_totals: dict[str, int] = {}
+            task_count = 0
+            for task in eng_payload.get(engine, {}).get("tasks", []):
+                meta = task[-1] if task and isinstance(task[-1], dict) else {}
+                phases = meta.get("rtl_phases") if isinstance(meta, dict) else None
+                if not isinstance(phases, list) or not phases:
+                    continue
+                task_count += 1
+                for phase in phases:
+                    if not isinstance(phase, list) or len(phase) < 2:
+                        continue
+                    name = str(phase[0])
+                    cycles = int(phase[1] or 0)
+                    phase_totals[name] = phase_totals.get(name, 0) + cycles
+            total = sum(phase_totals.values())
+            if not task_count or total <= 0:
+                continue
+            ordered = ["issue", "read", "compute", "write", "done"]
+            parts = []
+            for name in ordered:
+                if name not in phase_totals:
+                    continue
+                cycles = phase_totals[name]
+                parts.append(f"{html.escape(name)} {cycles:,} ({cycles * 100.0 / total:.1f}%)")
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(engine)}</td>"
+                f"<td style='text-align:right'>{task_count:,}</td>"
+                f"<td style='text-align:right'>{total:,}</td>"
+                f"<td>{' · '.join(parts)}</td>"
+                "</tr>"
+            )
+        if not rows:
+            return ""
+        return (
+            "<h2>RTL phase summary</h2>\n"
+            "<table><thead><tr><th>engine</th><th>tasks</th><th>phase cycles</th><th>breakdown</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>\n"
+        )
+
+    rtl_phase_summary_table = _rtl_phase_summary_rows()
+
     def _layer_task_spans() -> list[tuple[int | None, int | None]]:
         spans: list[list[int | None]] = [[None, None] for _ in layers]
 
@@ -1250,6 +1295,8 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 
 {l1mesh_lane_tables}
 
+{rtl_phase_summary_table}
+
 <h2>Gantt timeline (interactive)</h2>
 <div id="gantt-controls" style="font-size:12px; margin:6px 0;">
   <button id="gantt-zoomin">+</button>
@@ -1319,6 +1366,13 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     pool:    '#a945e8',
     tnps:    '#00a6a6',
   }};
+  const PHASE_COLORS = {{
+    issue:   '#202020',
+    read:    '#2f80ed',
+    compute: '#f2994a',
+    write:   '#27ae60',
+    done:    '#8a8a8a',
+  }};
   const svg     = document.getElementById('gantt-svg');
   const gGrid   = document.getElementById('gantt-grid');
   const gOps    = document.getElementById('gantt-ops');
@@ -1372,6 +1426,39 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     const phases = m && Array.isArray(m.rtl_phases) ? m.rtl_phases : null;
     if (!phases || !phases.length) return '';
     return phases.map(p => `${{p[0]}}:${{fmt(+p[1] || 0)}}`).join('  ');
+  }}
+  function rtlPhases(task) {{
+    const m = taskMeta(task);
+    const phases = m && Array.isArray(m.rtl_phases) ? m.rtl_phases : null;
+    return phases && phases.length ? phases : null;
+  }}
+  function renderPhaseSegments(task, y, h, x, left, right) {{
+    const phases = rtlPhases(task);
+    if (!phases) return '';
+    const s = +task[0], e = +task[1];
+    const dur = Math.max(1, e - s);
+    const totalPhase = phases.reduce((acc, p) => acc + Math.max(0, +p[1] || 0), 0);
+    if (totalPhase <= 0) return '';
+    let out = '';
+    let acc = 0;
+    const yy = y + Math.max(1, h - 7);
+    const hh = Math.min(5, Math.max(2, h - 2));
+    for (const p of phases) {{
+      const name = String(p[0] || '');
+      const cyc = Math.max(0, +p[1] || 0);
+      if (!cyc) continue;
+      const ps = s + dur * acc / totalPhase;
+      acc += cyc;
+      const pe = s + dur * acc / totalPhase;
+      const x0 = Math.max(x(ps), left);
+      const x1 = Math.min(x(pe), right);
+      const w = x1 - x0;
+      if (w < 0.8) continue;
+      const color = PHASE_COLORS[name] || '#555';
+      out += `<rect class="rtl-phase" x="${{x0}}" y="${{yy}}" width="${{Math.max(1, w)}}" height="${{hh}}" `
+          + `fill="${{color}}" opacity="0.9" pointer-events="none"/>`;
+    }}
+    return out;
   }}
   function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
   function esc(s) {{
@@ -1427,6 +1514,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         bars += `<rect class="gantt-task micro-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
               + `fill="${{color}}" data-eng="micro ${{name}} / ${{eng}}" data-s="${{s}}" data-e="${{e}}" `
               + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}" data-phases="${{esc(phases)}}"/>`;
+        bars += renderPhaseSegments(task, yy, hh, x, LEFT2, W - RIGHT2);
         if (w >= Math.min(160, label.length * 6 + 8)) {{
           bars += `<text x="${{x0 + 4}}" y="${{yy + hh/2 + 4}}" font-size="10" fill="#111" pointer-events="none">${{esc(label)}}</text>`;
         }}
@@ -1545,6 +1633,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
         bars += `<rect class="gantt-task" x="${{x0}}" y="${{yy}}" width="${{w}}" height="${{hh}}" `
               + `fill="${{color}}" data-eng="${{name}}" data-s="${{s}}" data-e="${{e}}" `
               + `data-label="${{esc(label)}}" data-bytes="${{esc(bytes)}}" data-phases="${{esc(phases)}}"/>`;
+        bars += renderPhaseSegments(task, yy, hh, x, LEFT, W - RIGHT);
       }}
     }});
     const convLaneIdx = eng_names.indexOf('conv');
