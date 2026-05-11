@@ -7,6 +7,7 @@ module Testbench_pool_datapath;
     wire start_ready;
     reg avg_mode;
     reg fp_mode;
+    reg int16_mode;
     reg [16*8-1:0] sample_vec;
     reg [7:0] elem_count;
     wire l1_req_valid;
@@ -34,6 +35,7 @@ module Testbench_pool_datapath;
         .start_ready(start_ready),
         .avg_mode(avg_mode),
         .fp_mode(fp_mode),
+        .int16_mode(int16_mode),
         .sample_vec(sample_vec),
         .elem_count(elem_count),
         .l1_req_valid(l1_req_valid),
@@ -87,15 +89,21 @@ module Testbench_pool_datapath;
                          name, busy, phase_id, remaining_cycles);
                 failures = failures + 1;
             end else begin
-                if (!fp_mode && ((pool_out !== exp_out) || (out_q !== exp_out[7:0]))) begin
+                if (!fp_mode && !int16_mode && ((pool_out !== exp_out) || (out_q !== exp_out[7:0]))) begin
                     $display("FAIL: %0s out=%0d exp=%0d q=%0d",
                              name, pool_out, exp_out, out_q);
                     failures = failures + 1;
                 end
-                if ((!fp_mode && (l1_req_bytes !== 32'd1)) ||
+                if (int16_mode && (pool_out !== exp_out)) begin
+                    $display("FAIL: %0s int16_out=%0d exp=%0d",
+                             name, pool_out, exp_out);
+                    failures = failures + 1;
+                end
+                if ((!fp_mode && !int16_mode && (l1_req_bytes !== 32'd1)) ||
+                    (int16_mode && (l1_req_bytes !== 32'd4)) ||
                     (fp_mode && (l1_req_bytes !== 32'd8))) begin
                     $display("FAIL: %0s store bytes=%0d exp=%0d",
-                             name, l1_req_bytes, fp_mode ? 32'd8 : 32'd1);
+                             name, l1_req_bytes, fp_mode ? 32'd8 : (int16_mode ? 32'd4 : 32'd1));
                     failures = failures + 1;
                 end
                 if (l1_req_payload_cycles !== 32'd2) begin
@@ -114,6 +122,7 @@ module Testbench_pool_datapath;
         start_valid = 1'b0;
         avg_mode = 1'b0;
         fp_mode = 1'b0;
+        int16_mode = 1'b0;
         elem_count = 8'd0;
         clear_vec();
         failures = 0;
@@ -183,6 +192,27 @@ module Testbench_pool_datapath;
             failures = failures + 1;
         end
         fp_mode = 1'b0;
+
+        clear_vec();
+        avg_mode = 1'b0;
+        int16_mode = 1'b1;
+        elem_count = 8'd4;
+        sample_vec[15:0] = -16'sd9;
+        sample_vec[31:16] = -16'sd1;
+        sample_vec[47:32] = 16'sd1;
+        sample_vec[63:48] = 16'sd5;
+        run_case("int16 max pool", 32'sd5);
+
+        clear_vec();
+        avg_mode = 1'b1;
+        int16_mode = 1'b1;
+        elem_count = 8'd4;
+        sample_vec[15:0] = -16'sd9;
+        sample_vec[31:16] = -16'sd1;
+        sample_vec[47:32] = 16'sd1;
+        sample_vec[63:48] = 16'sd5;
+        run_case("int16 avg pool", -32'sd1);
+        int16_mode = 1'b0;
 
         if (failures == 0)
             $display("PASS: verilog_final pool datapath");

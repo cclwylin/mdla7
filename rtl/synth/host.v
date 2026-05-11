@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 
 module host #(
-    parameter MAX_PROGRAM_BYTES = 65536,
-    parameter MAX_LAYERS = 1024
+    parameter MAX_PROGRAM_BYTES = 262144,
+    parameter MAX_LAYERS = 4096
 ) (
     input             clk,
     input             rst_n,

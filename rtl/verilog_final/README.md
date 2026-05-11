@@ -29,10 +29,12 @@ Smoke tests:
 
 Current smoke coverage:
 
-- `conv`: true Verilog INT8 MAC + bias + MBQM + clamp primitive.
+- `conv`: true Verilog INT8 MAC + bias + MBQM + clamp primitive, plus INT16
+  sample MAC.
 - `requant`: true Verilog MBQM + output zero-point + activation clamp sample.
 - `pool`: true Verilog INT8 max/avg sample reduction.
-- `ewe`: true Verilog INT8 ADD/MUL/SUB vector sample with lane saturation.
+- `ewe`: true Verilog INT8 ADD/MUL/SUB vector sample with lane saturation, plus
+  INT16 ADD/MUL/SUB sample vectors.
 - `tnps`: true Verilog TNPS SPACE_TO_DEPTH / DEPTH_TO_SPACE address mapping.
 - `route`: placement-aware L1Mesh route-cycle estimator.
 - `contention`: L1Manager 2-deep input FIFO backpressure across UDMA,
@@ -89,6 +91,10 @@ Current converter behavior:
   generator takes up to 8 activation half-floats and 8 weight half-floats,
   computes the expected double-precision sample MAC, and `host_final.v` checks
   the Verilog FP sample result.
+- INT16/hybrid CONV op kinds `0/1/6`: emitted as CONV INT16 sample descriptors.
+  The generator takes up to 8 signed 16-bit activation values and 8 signed
+  16-bit weight values, computes the expected sample MAC accumulator, and
+  `host_final.v` checks the Verilog INT16 sample result.
 - INT8 CONV also emits a REQUANT sample descriptor using the same raw accumulator
   so `vf_requant_sample_engine` is exercised through `mdla7_top_final`.
 - INT8 AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL sample descriptors.
@@ -98,10 +104,23 @@ Current converter behavior:
   descriptors. The generator takes up to 8 input half-floats, computes the
   expected double-precision avg/max sample, and `host_final.v` checks the
   Verilog FP pool result.
+- INT16/hybrid AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL INT16 sample
+  descriptors. The generator takes up to 8 signed 16-bit input values, computes
+  the expected avg/max sample, and `host_final.v` checks the Verilog INT16 pool
+  result.
 - INT8 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE sample descriptors.
   The generator takes up to 16 bytes from input and weight/parameter payloads,
   computes the expected sum of clamped lane outputs, and `host_final.v` checks
   the Verilog EWE vector result.
+- FP16/float EWE ADD/MUL/SUB/LOGISTIC op kinds `7/10/11/27`: emitted as EWE FP sample
+  descriptors. The generator takes up to 8 input half-floats and 8
+  weight/parameter half-floats for binary ops, computes the expected
+  double-precision lane-sum, and `host_final.v` checks the Verilog FP EWE
+  result. LOGISTIC is unary and uses input A only.
+- INT16 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE INT16 sample
+  descriptors. The generator takes up to 8 signed 16-bit values from input and
+  weight/parameter payloads, computes the expected lane-sum, and `host_final.v`
+  checks the Verilog INT16 EWE result.
 - `RESHAPE` / `CONCAT` / `TRANSPOSE` / `SLICE` / materialized byte movers:
   emitted as UDMA-style byte-moving descriptors for now.
 
@@ -120,6 +139,8 @@ Conv datapath status:
 - The same sample engine also has an FP16 input / real-valued MAC path for float
   CONV descriptors. This is a simulator bring-up primitive, not yet a
   synthesizable IEEE754 pipeline.
+- It also has a signed INT16 sample MAC path for hybrid/int16 bring-up
+  descriptors.
 - This is still a sample MAC path, not full-layer tile streaming or CRC.
 
 Requant datapath status:
@@ -137,12 +158,19 @@ Pool datapath status:
 - The same pool sample engine also has an FP16 input / real-valued avg/max path
   for float POOL descriptors. This is a simulator bring-up primitive, not yet a
   synthesizable IEEE754 pipeline.
+- It also has a signed INT16 avg/max sample path for hybrid/int16 bring-up
+  descriptors.
 - This is still a sample-window path; full H/W/C window traversal comes later.
 
 EWE datapath status:
 
 - `vf_ewe_sample_engine` runs INT8 ADD/MUL/SUB on a small vector sample, issues
   L1Manager/L1Mesh read/read/write tokens, and is reachable from generated `.bin`
+  descriptors.
+- The same EWE sample engine also has an FP16 input / real-valued ADD/MUL/SUB/LOGISTIC
+  path for float EWE descriptors. This is a simulator bring-up primitive, not
+  yet a synthesizable IEEE754 pipeline.
+- It also has a signed INT16 ADD/MUL/SUB sample lane path for int16 bring-up
   descriptors.
 - This is still a small vector correctness check plus timing token path; full
   tensor traversal and writeback buffering come later.
@@ -166,5 +194,7 @@ Descriptor word layout:
 | 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
 | 19 | source layer index |
 
-For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9) and
+For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9,
+`EWE`: bit 10). For INT16 descriptors, word 12 bit 11 marks INT16 mode for
+`CONV`, `POOL`, and `EWE`.
 words 16/17 hold the expected double-precision sample result bits `{high, low}`.

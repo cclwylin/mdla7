@@ -6,6 +6,8 @@ module Testbench_ewe_datapath;
     reg start_valid;
     wire start_ready;
     reg [1:0] op_mode;
+    reg fp_mode;
+    reg int16_mode;
     reg [16*8-1:0] a_vec;
     reg [16*8-1:0] b_vec;
     reg [7:0] elem_count;
@@ -19,6 +21,7 @@ module Testbench_ewe_datapath;
     wire [31:0] remaining_cycles;
     wire signed [31:0] ewe_out;
     wire signed [7:0] out_q;
+    wire [63:0] fp_ewe_bits;
     integer failures;
     integer watchdog;
 
@@ -32,6 +35,8 @@ module Testbench_ewe_datapath;
         .start_valid(start_valid),
         .start_ready(start_ready),
         .op_mode(op_mode),
+        .fp_mode(fp_mode),
+        .int16_mode(int16_mode),
         .a_vec(a_vec),
         .b_vec(b_vec),
         .elem_count(elem_count),
@@ -46,7 +51,8 @@ module Testbench_ewe_datapath;
         .phase_id(phase_id),
         .remaining_cycles(remaining_cycles),
         .ewe_out(ewe_out),
-        .out_q(out_q)
+        .out_q(out_q),
+        .fp_ewe_bits(fp_ewe_bits)
     );
 
     task clear_vecs;
@@ -90,9 +96,14 @@ module Testbench_ewe_datapath;
                          name, busy, phase_id, remaining_cycles);
                 failures = failures + 1;
             end else begin
-                if ((ewe_out !== exp_sum) || (out_q !== exp_first)) begin
+                if (!fp_mode && !int16_mode && ((ewe_out !== exp_sum) || (out_q !== exp_first))) begin
                     $display("FAIL: %0s sum=%0d exp=%0d first=%0d exp=%0d",
                              name, ewe_out, exp_sum, out_q, exp_first);
+                    failures = failures + 1;
+                end
+                if (int16_mode && (ewe_out !== exp_sum)) begin
+                    $display("FAIL: %0s int16_sum=%0d exp=%0d",
+                             name, ewe_out, exp_sum);
                     failures = failures + 1;
                 end
                 if (l1_req_bytes !== exp_bytes) begin
@@ -110,6 +121,8 @@ module Testbench_ewe_datapath;
         rst_n = 1'b0;
         start_valid = 1'b0;
         op_mode = 2'd0;
+        fp_mode = 1'b0;
+        int16_mode = 1'b0;
         elem_count = 8'd0;
         clear_vecs();
         failures = 0;
@@ -163,6 +176,49 @@ module Testbench_ewe_datapath;
         set_pair(14, 8'sd1, 8'sd0);
         set_pair(15, 8'sd1, 8'sd0);
         run_case("count cap", 32'sd16, 8'sd1, 32'd16);
+
+        clear_vecs();
+        op_mode = 2'd1;
+        fp_mode = 1'b1;
+        elem_count = 8'd2;
+        a_vec[15:0] = 16'h3c00;
+        a_vec[31:16] = 16'h4000;
+        b_vec[15:0] = 16'h4000;
+        b_vec[31:16] = 16'h4200;
+        run_case("fp mul vector", 32'sd0, 8'sd0, 32'd4);
+        if (fp_ewe_bits != 64'h4020000000000000) begin
+            $display("FAIL: fp mul vector bits=%016x exp=4020000000000000", fp_ewe_bits);
+            failures = failures + 1;
+        end
+        fp_mode = 1'b0;
+
+        clear_vecs();
+        op_mode = 2'd3;
+        fp_mode = 1'b1;
+        elem_count = 8'd2;
+        a_vec[15:0] = 16'h3c00;
+        a_vec[31:16] = 16'h0000;
+        run_case("fp logistic vector", 32'sd0, 8'sd0, 32'd4);
+        if (fp_ewe_bits != 64'h3ff3b26a7aead15e) begin
+            $display("FAIL: fp logistic vector bits=%016x exp=3ff3b26a7aead15e", fp_ewe_bits);
+            failures = failures + 1;
+        end
+        fp_mode = 1'b0;
+
+        clear_vecs();
+        op_mode = 2'd0;
+        int16_mode = 1'b1;
+        elem_count = 8'd4;
+        a_vec[15:0] = 16'sd4;
+        a_vec[31:16] = 16'sd3;
+        a_vec[47:32] = -16'sd2;
+        a_vec[63:48] = 16'sd1;
+        b_vec[15:0] = 16'sd3;
+        b_vec[31:16] = -16'sd1;
+        b_vec[47:32] = 16'sd5;
+        b_vec[63:48] = 16'sd2;
+        run_case("int16 add vector", 32'sd15, 8'sd0, 32'd8);
+        int16_mode = 1'b0;
 
         if (failures == 0)
             $display("PASS: verilog_final EWE vector datapath");

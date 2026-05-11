@@ -32,6 +32,7 @@ module host_final #(
     output reg [127:0] conv_wgt_vec,
     output reg [7:0]   conv_elem_count,
     output reg         conv_fp_mode,
+    output reg         conv_int16_mode,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -42,9 +43,12 @@ module host_final #(
     output reg signed [31:0] requant_input_value,
     output reg         pool_avg_mode,
     output reg         pool_fp_mode,
+    output reg         pool_int16_mode,
     output reg [127:0] pool_sample_vec,
     output reg [7:0]   pool_elem_count,
     output reg [1:0]   ewe_op_mode,
+    output reg         ewe_fp_mode,
+    output reg         ewe_int16_mode,
     output reg [127:0] ewe_a_vec,
     output reg [127:0] ewe_b_vec,
     output reg [7:0]   ewe_elem_count,
@@ -63,6 +67,7 @@ module host_final #(
     input signed [31:0] conv_scaled_out,
     input signed [7:0]  conv_out_q,
     input      [63:0]   conv_fp_sum_bits,
+    input signed [31:0] conv_int16_acc_out,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -70,6 +75,7 @@ module host_final #(
     input      [63:0]   pool_fp_bits,
     input signed [31:0] ewe_out,
     input signed [7:0]  ewe_out_q,
+    input      [63:0]   ewe_fp_bits,
     input      [8:0]   block_busy,
     input      [8:0]   block_done_valid,
 
@@ -131,6 +137,7 @@ module host_final #(
                              cmd_mem[base + 9], cmd_mem[base + 8]};
             conv_elem_count <= cmd_mem[base + 12][7:0];
             conv_fp_mode <= cmd_mem[base + 12][8];
+            conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
             conv_bias <= cmd_mem[base + 13];
             conv_multiplier <= cmd_mem[base + 14];
@@ -144,12 +151,15 @@ module host_final #(
             pool_elem_count <= cmd_mem[base + 12][7:0];
             pool_avg_mode <= cmd_mem[base + 12][8];
             pool_fp_mode <= cmd_mem[base + 12][9];
+            pool_int16_mode <= cmd_mem[base + 12][11];
             ewe_a_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                           cmd_mem[base + 5], cmd_mem[base + 4]};
             ewe_b_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
                           cmd_mem[base + 9], cmd_mem[base + 8]};
             ewe_elem_count <= cmd_mem[base + 12][7:0];
             ewe_op_mode <= cmd_mem[base + 12][9:8];
+            ewe_fp_mode <= cmd_mem[base + 12][10];
+            ewe_int16_mode <= cmd_mem[base + 12][11];
             l1mesh_wdata <= {cmd_mem[base + 2], cmd_mem[base + 1],
                              cmd_mem[base + 14], cmd_mem[base + 15]};
             l1mesh_wstrb <= 16'hffff;
@@ -269,6 +279,7 @@ module host_final #(
             conv_wgt_vec <= 128'd0;
             conv_elem_count <= 8'd0;
             conv_fp_mode <= 1'b0;
+            conv_int16_mode <= 1'b0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;
@@ -279,9 +290,12 @@ module host_final #(
             requant_input_value <= 32'sd0;
             pool_avg_mode <= 1'b0;
             pool_fp_mode <= 1'b0;
+            pool_int16_mode <= 1'b0;
             pool_sample_vec <= 128'd0;
             pool_elem_count <= 8'd0;
             ewe_op_mode <= 2'd0;
+            ewe_fp_mode <= 1'b0;
+            ewe_int16_mode <= 1'b0;
             ewe_a_vec <= 128'd0;
             ewe_b_vec <= 128'd0;
             ewe_elem_count <= 8'd0;
@@ -334,7 +348,14 @@ module host_final #(
                                      {cmd_mem[base + 17], cmd_mem[base + 16]});
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode &&
+                        if ((desc_op_class == OP_CONV) && conv_int16_mode &&
+                            (conv_int16_acc_out !== $signed(cmd_mem[base + 18]))) begin
+                            $display("HOST_FINAL_FAIL: CONV INT16 sample cmd=%0d acc=%0d expected=%0d",
+                                     command_index, conv_int16_acc_out,
+                                     $signed(cmd_mem[base + 18]));
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             (conv_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, conv_acc_out, conv_scaled_out,
@@ -356,7 +377,15 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_fp_mode &&
+                        if ((desc_op_class == OP_POOL) && pool_int16_mode &&
+                            (pool_out !== $signed(cmd_mem[base + 18]))) begin
+                            $display("HOST_FINAL_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
+                                     command_index, pool_out,
+                                     $signed(cmd_mem[base + 18]),
+                                     pool_avg_mode);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_POOL) && !pool_fp_mode && !pool_int16_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -364,7 +393,15 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) &&
+                        if ((desc_op_class == OP_EWE) && ewe_fp_mode &&
+                            (ewe_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
+                            $display("HOST_FINAL_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
+                                     command_index, ewe_fp_bits,
+                                     {cmd_mem[base + 17], cmd_mem[base + 16]},
+                                     ewe_op_mode);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_EWE) && !ewe_fp_mode &&
                             (ewe_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
                                      command_index, ewe_out, ewe_out_q,

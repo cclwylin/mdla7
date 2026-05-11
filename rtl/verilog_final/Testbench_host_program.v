@@ -29,6 +29,7 @@ module Testbench_host_program;
     wire [127:0] conv_wgt_vec;
     wire [7:0] conv_elem_count;
     wire conv_fp_mode;
+    wire conv_int16_mode;
     wire signed [15:0] conv_zp_in;
     wire signed [31:0] conv_bias;
     wire signed [31:0] conv_multiplier;
@@ -39,9 +40,12 @@ module Testbench_host_program;
     wire signed [31:0] requant_input_value;
     wire pool_avg_mode;
     wire pool_fp_mode;
+    wire pool_int16_mode;
     wire [127:0] pool_sample_vec;
     wire [7:0] pool_elem_count;
     wire [1:0] ewe_op_mode;
+    wire ewe_fp_mode;
+    wire ewe_int16_mode;
     wire [127:0] ewe_a_vec;
     wire [127:0] ewe_b_vec;
     wire [7:0] ewe_elem_count;
@@ -57,6 +61,7 @@ module Testbench_host_program;
     wire signed [31:0] conv_scaled_out;
     wire signed [7:0] conv_out_q;
     wire [63:0] conv_fp_sum_bits;
+    wire signed [31:0] conv_int16_acc_out;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -64,6 +69,7 @@ module Testbench_host_program;
     wire [63:0] pool_fp_bits;
     wire signed [31:0] ewe_out;
     wire signed [7:0] ewe_out_q;
+    wire [63:0] ewe_fp_bits;
     wire [31:0] placement_route_cycles;
     wire [8:0] block_busy;
     wire [8:0] block_done_valid;
@@ -104,6 +110,7 @@ module Testbench_host_program;
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
         .conv_fp_mode(conv_fp_mode),
+        .conv_int16_mode(conv_int16_mode),
         .conv_zp_in(conv_zp_in),
         .conv_bias(conv_bias),
         .conv_multiplier(conv_multiplier),
@@ -114,9 +121,12 @@ module Testbench_host_program;
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
+        .pool_int16_mode(pool_int16_mode),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
+        .ewe_fp_mode(ewe_fp_mode),
+        .ewe_int16_mode(ewe_int16_mode),
         .ewe_a_vec(ewe_a_vec),
         .ewe_b_vec(ewe_b_vec),
         .ewe_elem_count(ewe_elem_count),
@@ -134,6 +144,7 @@ module Testbench_host_program;
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
         .conv_fp_sum_bits(conv_fp_sum_bits),
+        .conv_int16_acc_out(conv_int16_acc_out),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -141,6 +152,7 @@ module Testbench_host_program;
         .pool_fp_bits(pool_fp_bits),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
+        .ewe_fp_bits(ewe_fp_bits),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),
         .test_done(test_done),
@@ -177,6 +189,7 @@ module Testbench_host_program;
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
         .conv_fp_mode(conv_fp_mode),
+        .conv_int16_mode(conv_int16_mode),
         .conv_zp_in(conv_zp_in),
         .conv_bias(conv_bias),
         .conv_multiplier(conv_multiplier),
@@ -187,9 +200,12 @@ module Testbench_host_program;
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
+        .pool_int16_mode(pool_int16_mode),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
+        .ewe_fp_mode(ewe_fp_mode),
+        .ewe_int16_mode(ewe_int16_mode),
         .ewe_a_vec(ewe_a_vec),
         .ewe_b_vec(ewe_b_vec),
         .ewe_elem_count(ewe_elem_count),
@@ -209,13 +225,15 @@ module Testbench_host_program;
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
         .conv_fp_sum_bits(conv_fp_sum_bits),
+        .conv_int16_acc_out(conv_int16_acc_out),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
         .ewe_out(ewe_out),
-        .ewe_out_q(ewe_out_q)
+        .ewe_out_q(ewe_out_q),
+        .ewe_fp_bits(ewe_fp_bits)
     );
 
     initial begin

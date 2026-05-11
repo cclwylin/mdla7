@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ OK_POOL = {2, 3}
 OK_ADD = 7
 OK_MUL = 10
 OK_SUB = 11
+OK_LOGISTIC = 27
 OK_RESHAPE = 5
 OK_CONCAT = 8
 OK_GATHER = 9
@@ -41,6 +43,7 @@ OK_TILE = 25
 OK_SPLIT = 26
 
 OK_EWE = {OK_ADD, OK_MUL, OK_SUB}
+OK_FP_EWE = {OK_ADD, OK_MUL, OK_SUB, OK_LOGISTIC}
 
 META_TNPS_OPS = {OK_TRANSPOSE, OK_SLICE, OK_STRIDED_SLICE, OK_SPLIT}
 TNPS_OPS = {
@@ -96,6 +99,10 @@ def elem_bytes(dtype: int) -> int:
 def i8(value: int) -> int:
     value &= 0xFF
     return value - 256 if value >= 128 else value
+
+
+def i16_at(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<h", data, offset)[0]
 
 
 def pack_word(chunk: bytes) -> int:
@@ -326,6 +333,27 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[19] = layer.index
         return words
 
+    if layer.op_kind in OK_CONV and elem == 2 and layer.in_size >= 2 and layer.wgt_size >= 2:
+        data = descriptor_for_layer.program_bytes
+        elem_count = min(layer.in_size // 2, layer.wgt_size // 2, 8)
+        if elem_count == 0:
+            return None
+        act = data[layer.in_off:layer.in_off + elem_count * 2].ljust(16, b"\x00")
+        wgt = data[layer.wgt_off:layer.wgt_off + elem_count * 2].ljust(16, b"\x00")
+        acc = 0
+        for idx in range(elem_count):
+            acc += i16_at(act, idx * 2) * i16_at(wgt, idx * 2)
+        words[0] = OP_CONV
+        words[1] = elem_count * 2
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(act[idx * 4:(idx + 1) * 4])
+            words[8 + idx] = pack_word(wgt[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (1 << 11)
+        words[18] = acc & 0xFFFF_FFFF
+        words[19] = layer.index
+        return words
+
     if layer.op_kind in OK_CONV and elem == 1 and layer.in_size > 0 and layer.wgt_size > 0:
         # Emit a real Verilog MAC sample from the layer payload. This is intentionally
         # small while the final datapath grows from sample MAC to full tile streaming.
@@ -384,6 +412,25 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[19] = layer.index
         return words
 
+    if layer.op_kind in OK_POOL and elem == 2 and layer.in_size >= 2:
+        data = descriptor_for_layer.program_bytes
+        elem_count = min(layer.in_size // 2, 8)
+        if elem_count == 0:
+            return None
+        sample = data[layer.in_off:layer.in_off + elem_count * 2].ljust(16, b"\x00")
+        vals = [i16_at(sample, idx * 2) for idx in range(elem_count)]
+        avg_mode = 1 if layer.op_kind == 2 else 0
+        expected = int(sum(vals) / len(vals)) if avg_mode else max(vals)
+        words[0] = OP_POOL
+        words[1] = elem_count * 2
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(sample[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (avg_mode << 8) | (1 << 11)
+        words[18] = expected & 0xFFFF_FFFF
+        words[19] = layer.index
+        return words
+
     if layer.op_kind in OK_POOL and layer.dtype in DT_FP and layer.in_size >= 2:
         data = descriptor_for_layer.program_bytes
         elem_count = min(layer.in_size // 2, 8)
@@ -433,6 +480,77 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
             words[8 + idx] = pack_word(b_sample[idx * 4:(idx + 1) * 4])
         words[12] = elem_count | (op_mode << 8)
         words[18] = expected & 0xFFFF_FFFF
+        words[19] = layer.index
+        return words
+
+    if layer.op_kind in OK_EWE and elem == 2 and layer.in_size >= 2 and layer.wgt_size >= 2:
+        data = descriptor_for_layer.program_bytes
+        a_sample = data[layer.in_off:layer.in_off + min(layer.in_size, 16)].ljust(16, b"\x00")
+        b_sample = data[layer.wgt_off:layer.wgt_off + min(layer.wgt_size, 16)].ljust(16, b"\x00")
+        elem_count = min(layer.in_size // 2, layer.wgt_size // 2, 8)
+        if elem_count == 0:
+            return None
+        expected = 0
+        for lane in range(elem_count):
+            av = i16_at(a_sample, lane * 2)
+            bv = i16_at(b_sample, lane * 2)
+            if layer.op_kind == OK_MUL:
+                op_mode = 1
+                expected += av * bv
+            elif layer.op_kind == OK_SUB:
+                op_mode = 2
+                expected += av - bv
+            else:
+                op_mode = 0
+                expected += av + bv
+        words[0] = OP_EWE
+        words[1] = elem_count * 2
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(a_sample[idx * 4:(idx + 1) * 4])
+            words[8 + idx] = pack_word(b_sample[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (op_mode << 8) | (1 << 11)
+        words[18] = expected & 0xFFFF_FFFF
+        words[19] = layer.index
+        return words
+
+    if layer.op_kind in OK_FP_EWE and layer.dtype in DT_FP and layer.in_size >= 2:
+        data = descriptor_for_layer.program_bytes
+        a_sample = data[layer.in_off:layer.in_off + min(layer.in_size, 16)].ljust(16, b"\x00")
+        need_b = layer.op_kind in OK_EWE
+        b_sample = (
+            data[layer.wgt_off:layer.wgt_off + min(layer.wgt_size, 16)].ljust(16, b"\x00")
+            if need_b else b"\x00" * 16
+        )
+        elem_count = min(layer.in_size // 2, (layer.wgt_size // 2 if need_b else 8), 8)
+        if elem_count == 0:
+            return None
+        expected = 0.0
+        op_mode = 3 if layer.op_kind == OK_LOGISTIC else 0
+        for lane in range(elem_count):
+            av = fp16_at(a_sample, lane * 2)
+            bv = fp16_at(b_sample, lane * 2) if need_b else 0.0
+            if layer.op_kind == OK_LOGISTIC:
+                expected += 1.0 / (1.0 + math.exp(-av))
+            elif layer.op_kind == OK_MUL:
+                op_mode = 1
+                expected += av * bv
+            elif layer.op_kind == OK_SUB:
+                op_mode = 2
+                expected += av - bv
+            else:
+                op_mode = 0
+                expected += av + bv
+        expected_bits = struct.unpack("<Q", struct.pack("<d", expected))[0]
+        words[0] = OP_EWE
+        words[1] = elem_count * 2
+        words[2] = addr
+        for idx in range(4):
+            words[4 + idx] = pack_word(a_sample[idx * 4:(idx + 1) * 4])
+            words[8 + idx] = pack_word(b_sample[idx * 4:(idx + 1) * 4])
+        words[12] = elem_count | (op_mode << 8) | (1 << 10)
+        words[16] = expected_bits & 0xFFFF_FFFF
+        words[17] = (expected_bits >> 32) & 0xFFFF_FFFF
         words[19] = layer.index
         return words
 
