@@ -797,7 +797,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
     def _rtl_phase_summary_rows() -> str:
         rows = []
-        for engine in ("ewe", "pool", "tnps"):
+        for engine in ("conv", "requant", "ewe", "pool", "tnps"):
             phase_totals: dict[str, int] = {}
             task_count = 0
             for task in eng_payload.get(engine, {}).get("tasks", []):
@@ -819,7 +819,11 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             total = sum(phase_totals.values())
             if not task_count or total <= 0:
                 continue
-            ordered = ["issue", "read", "compute", "write", "done"]
+            ordered = [
+                "issue", "act_read", "wgt_read", "read", "param_read",
+                "chain_read", "mac", "compute", "pack", "chain", "write",
+                "fill", "done",
+            ]
             parts = []
             for name in ordered:
                 if name not in phase_totals:

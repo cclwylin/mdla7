@@ -67,12 +67,96 @@ SC_MODULE(ConvEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};   // v4.3 profiler
     std::vector<std::pair<uint64_t, uint64_t>> tasks;     // (start_ns, end_ns)
+    std::vector<RtlPhaseTrace> last_rtl_phases;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
+    EngineModel engine_model = EngineModel::Analytical;
 
     SC_HAS_PROCESS(ConvEngine);
     ConvEngine(sc_core::sc_module_name nm, L1Manager& mgr)
       : sc_module(nm), l1mgr(mgr) {
         for (auto& p : chain_out) p = nullptr;
         SC_THREAD(run);
+    }
+
+    static uint64_t ceil_div_u64(uint64_t a, uint64_t b) {
+        return b ? ((a + b - 1) / b) : 0;
+    }
+
+    static uint64_t dtype_bytes(DType dtype, bool weight = false) {
+        switch (dtype) {
+            case DT_INT16x4:
+            case DT_INT16x8:
+                return weight ? 1u : 2u;
+            case DT_INT16x16:
+            case DT_FP16:
+            case DT_BFP16:
+                return 2u;
+            case DT_FP8:
+            case DT_INT8x4:
+            case DT_INT8x8:
+            default:
+                return 1u;
+        }
+    }
+
+    static uint64_t conv_mac_cycles(const ConvBody& c, DType dtype, uint64_t out_count) {
+        const uint32_t group = c.group ? c.group : 1;
+        const uint32_t in_per_group = c.in_c / group;
+        const uint64_t mac_total = uint64_t(c.k_h) * c.k_w * in_per_group * out_count;
+        uint64_t a, b;
+        switch (dtype) {
+            case DT_INT8x4:   a = 8;  b = 4;  break;
+            case DT_INT8x8:   a = 8;  b = 8;  break;
+            case DT_INT16x4:  a = 16; b = 4;  break;
+            case DT_INT16x8:  a = 16; b = 8;  break;
+            case DT_INT16x16: a = 16; b = 16; break;
+            case DT_FP8:      a = 8;  b = 8;  break;
+            case DT_FP16:
+            case DT_BFP16:    a = 16; b = 16; break;
+            default:          a = 8;  b = 8;  break;
+        }
+        return ceil_div_u64(mac_total * a * b, 1048576);
+    }
+
+    void rtl_record_phase(const char* name, uint64_t cycles,
+                          uint64_t read_bytes = 0, uint64_t write_bytes = 0,
+                          uint64_t elems = 0, uint64_t lanes = 0,
+                          const char* stall = "") {
+        RtlPhaseTrace phase;
+        phase.name = name;
+        phase.cycles = cycles;
+        phase.read_bytes = read_bytes;
+        phase.write_bytes = write_bytes;
+        phase.elems = elems;
+        phase.lanes = lanes;
+        phase.stall = stall ? stall : "";
+        last_rtl_phases.push_back(phase);
+    }
+
+    void rtl_record_conv_transaction(const ConvBody& c, DType dtype,
+                                     uint64_t out_count, uint64_t target_cycles) {
+        const uint32_t group = c.group ? c.group : 1;
+        const uint32_t in_per_group = c.in_c / group;
+        const uint64_t in_elems = uint64_t(c.in_h) * c.in_w * c.in_c;
+        const uint64_t wgt_elems = uint64_t(c.out_c) * c.k_h * c.k_w * in_per_group;
+        const uint64_t act_bytes = in_elems * dtype_bytes(dtype, false);
+        const uint64_t wgt_bytes = wgt_elems * dtype_bytes(dtype, true);
+        const uint64_t act_read = ceil_div_u64(act_bytes, PayloadPortCount::CONV_ACT_R * PAYLOAD_BYTES);
+        const uint64_t wgt_read = ceil_div_u64(wgt_bytes, PayloadPortCount::CONV_WGT_R * PAYLOAD_BYTES);
+        const uint64_t mac = conv_mac_cycles(c, dtype, out_count);
+        const uint64_t chain = ceil_div_u64(out_count, CONV_REQUANT_CHAIN_LANES);
+        const uint64_t fill = (c._r0 == CONV_DF_WS) ? 48 : 64;
+        last_rtl_phases.clear();
+        rtl_record_phase("issue", 6);
+        rtl_record_phase("act_read", act_read, act_bytes, 0, in_elems,
+                         PayloadPortCount::CONV_ACT_R, "payload_read");
+        rtl_record_phase("wgt_read", wgt_read, wgt_bytes, 0, wgt_elems,
+                         PayloadPortCount::CONV_WGT_R, "payload_read");
+        rtl_record_phase("mac", mac, 0, 0, out_count, 0, "cluster_mac");
+        rtl_record_phase("chain", chain, 0, out_count * sizeof(int32_t),
+                         out_count, CONV_REQUANT_CHAIN_LANES, "requant_chain");
+        rtl_record_phase("fill", fill);
+        rtl_record_phase("done", target_cycles ? std::min<uint64_t>(2, target_cycles) : 2);
     }
 
     void run() {
@@ -119,6 +203,8 @@ SC_MODULE(ConvEngine) {
 
             uint64_t out_count = uint64_t(out_h) * out_w * c.out_c;
             uint64_t cyc = conv_cycles(c, dt, out_count);
+            if (is_rtl_style(engine_model))
+                rtl_record_conv_transaction(c, dt, out_count, cyc);
             std::cout << "[CONV] estimated " << cyc << " cycles\n";
             // v8.6: don't double-count L1 input/weight reads on top of the
             // compute pipeline.  In real HW the cluster pipeline runs WHILE
@@ -134,6 +220,9 @@ SC_MODULE(ConvEngine) {
             busy_time += t_end - t_begin;
             tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
                                uint64_t(t_end  .to_seconds() * 1e9));
+            rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                      ? last_rtl_phases
+                                      : std::vector<RtlPhaseTrace>{});
             done_tag_out.write(0);
         }
     }

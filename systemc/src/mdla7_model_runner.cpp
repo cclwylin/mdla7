@@ -11065,8 +11065,8 @@ int sc_main(int argc, char* argv[]) {
     EngStat engines[] = {
         {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read},
         {"udma_w",  cyc(sys.udma   .busy_time_write), &sys.udma   .tasks_write},
-        {"conv",    cyc(sys.conv   .busy_time),       &sys.conv   .tasks},
-        {"requant", cyc(sys.requant.busy_time),       &sys.requant.tasks},
+        {"conv",    cyc(sys.conv   .busy_time),       &sys.conv   .tasks, &sys.conv.rtl_phase_tasks},
+        {"requant", cyc(sys.requant.busy_time),       &sys.requant.tasks, &sys.requant.rtl_phase_tasks},
         {"ewe",     cyc(sys.ewe    .busy_time),       &sys.ewe    .tasks, &sys.ewe .rtl_phase_tasks},
         {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks, &sys.pool.rtl_phase_tasks},
         {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks, &sys.tnps.rtl_phase_tasks},
