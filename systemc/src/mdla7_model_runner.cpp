@@ -346,12 +346,14 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt] [--no-microblock]\n";
+                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
+                  << " [--engine-model=model|synth] [--no-microblock]\n";
         return 2;
     }
     bool quiet = false;
     bool enable_microblocks = true;
     L1TimingMode l1_timing_mode = L1TimingMode::FastEstimate;
+    EngineModel engine_model = EngineModel::Analytical;
     for (int ai = 2; ai < argc; ++ai) {
         const std::string arg = argv[ai];
         if (arg == "--quiet") {
@@ -366,10 +368,15 @@ int sc_main(int argc, char* argv[]) {
             l1_timing_mode = L1TimingMode::MeshOptimistic;
         } else if (arg == "--no-microblock" || arg == "--disable-microblock") {
             enable_microblocks = false;
+        } else if (arg == "--engine-model=model" || arg == "--engine-model=analytical") {
+            engine_model = EngineModel::Analytical;
+        } else if (arg == "--engine-model=synth" || arg == "--engine-model=synth-like") {
+            engine_model = EngineModel::SynthLike;
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt] [--no-microblock]\n";
+                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
+                      << " [--engine-model=model|synth] [--no-microblock]\n";
             return 2;
         }
     }
@@ -401,6 +408,9 @@ int sc_main(int argc, char* argv[]) {
             (l1_timing_mode == L1TimingMode::MeshConflict) ? "mesh" :
             (l1_timing_mode == L1TimingMode::PortConflict) ? "conflict" : "fast";
         std::cout << "  L1 timing: " << timing_name << "\n";
+        std::cout << "  engine model: "
+                  << ((engine_model == EngineModel::SynthLike) ? "synth" : "model")
+                  << "\n";
     }
 
     // v8.22: size the DRAM model to fit this program's highest-used address.
@@ -426,7 +436,8 @@ int sc_main(int argc, char* argv[]) {
               << (max_addr / (1024 * 1024)) << " MB)\n";
 
     // --- Build sim, populate DRAM, build descriptor program ----
-    Mdla7System sys("mdla7", static_cast<std::size_t>(dram_bytes), l1_timing_mode);
+    Mdla7System sys("mdla7", static_cast<std::size_t>(dram_bytes),
+                    l1_timing_mode, engine_model);
 
     for (uint32_t i = 0; i < N; ++i) {
         const auto& L = metas[i];
@@ -11144,6 +11155,9 @@ int sc_main(int argc, char* argv[]) {
         pf << "    \"layers\": " << N << ",\n";
         pf << "    \"pass\": " << pass << ", \"fail\": " << fail << ",\n";
         pf << "    \"total_cycles\": " << total_cycles << ",\n";
+        pf << "    \"engine_model\": \""
+           << ((engine_model == EngineModel::SynthLike) ? "synth" : "model")
+           << "\",\n";
         pf << "    \"dram_read_bytes\": "  << total_dram_r << ",\n";
         pf << "    \"dram_write_bytes\": " << total_dram_w << ",\n";
         pf << "    \"sram_read_bytes\": "  << total_sram_r << ",\n";

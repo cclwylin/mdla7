@@ -65,6 +65,11 @@ enum class L1TimingMode {
     MeshOptimistic,
 };
 
+enum class EngineModel {
+    Analytical,
+    SynthLike,
+};
+
 class L1Mesh : public sc_core::sc_module {
 public:
     struct Stats {

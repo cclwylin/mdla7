@@ -15,6 +15,7 @@
 
 #include <systemc>
 #include <cstdlib>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -58,10 +59,45 @@ SC_MODULE(EweEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
+    EngineModel engine_model = EngineModel::Analytical;
 
     SC_HAS_PROCESS(EweEngine);
     EweEngine(sc_core::sc_module_name nm, L1Manager& mgr)
       : sc_module(nm), l1mgr(mgr) { SC_THREAD(run); }
+
+    static uint64_t ceil_div_u64(uint64_t a, uint64_t b) {
+        return b ? ((a + b - 1) / b) : 0;
+    }
+
+    uint64_t elem_bytes() const {
+        return (is_fp_dtype(last_dtype) ||
+                last_dtype == DT_INT16x4 ||
+                last_dtype == DT_INT16x8 ||
+                last_dtype == DT_INT16x16) ? 2u : 1u;
+    }
+
+    uint64_t synth_binary_cycles(uint64_t elems, uint64_t lanes) const {
+        const uint64_t bytes = elems * elem_bytes();
+        const uint64_t read_cyc = ceil_div_u64(2 * bytes + 48, PayloadPortCount::EWE_R * PAYLOAD_BYTES);
+        const uint64_t write_cyc = ceil_div_u64(bytes, PayloadPortCount::EWE_W * PAYLOAD_BYTES);
+        const uint64_t compute_cyc = ceil_div_u64(elems, lanes);
+        return std::max({read_cyc, write_cyc, compute_cyc}) + 6;
+    }
+
+    uint64_t synth_unary_cycles(uint64_t elems, uint64_t lanes, uint64_t op_passes) const {
+        const uint64_t bytes = elems * elem_bytes();
+        const uint64_t read_cyc = ceil_div_u64(bytes + 8, PayloadPortCount::EWE_R * PAYLOAD_BYTES);
+        const uint64_t write_cyc = ceil_div_u64(bytes, PayloadPortCount::EWE_W * PAYLOAD_BYTES);
+        const uint64_t compute_cyc = op_passes * ceil_div_u64(elems, lanes);
+        return std::max({read_cyc, write_cyc, compute_cyc}) + 6;
+    }
+
+    void wait_remaining_since(sc_core::sc_time begin, uint64_t target_cycles) {
+        const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - begin;
+        const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
+        if (target_cycles > elapsed_cyc)
+            wait(target_cycles - elapsed_cyc, sc_core::SC_NS);
+    }
 
     // v6: TFLite int8 ADD reference. Params blob layout at e.lut_addr:
     //   [ i32 zp_a | i32 zp_b | i32 zp_out
@@ -398,7 +434,10 @@ SC_MODULE(EweEngine) {
                         else                          run_add(e, elems);
                     }
                 }
-                wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+                if (engine_model == EngineModel::SynthLike)
+                    wait_remaining_since(t_begin, synth_binary_cycles(elems, lanes));
+                else
+                    wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH ||
                        e.subtype == ES_GELU ||
                        e.subtype == ES_LOGISTIC) {
@@ -412,7 +451,12 @@ SC_MODULE(EweEngine) {
                 }
                 // GELU = exp + tanh + arith (~6 ops); HARD_SWISH ~ 4 ops.
                 // Lump under 1 cycle/elem/lane (matches softmax exp pass).
-                wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+                if (engine_model == EngineModel::SynthLike) {
+                    const uint64_t passes = (e.subtype == ES_GELU) ? 6 : 4;
+                    wait_remaining_since(t_begin, synth_unary_cycles(elems, lanes, passes));
+                } else {
+                    wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+                }
             } else {
                 std::cout << "[EWE] softmax " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
@@ -466,7 +510,11 @@ SC_MODULE(EweEngine) {
                 const uint64_t softmax_rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
                 const uint64_t softmax_vec = e.c;
                 const uint64_t per_pass = (softmax_vec + softmax_lanes - 1) / softmax_lanes;
-                wait(softmax_rows * 3 * per_pass, sc_core::SC_NS);
+                const uint64_t compute_cyc = softmax_rows * 3 * per_pass;
+                if (engine_model == EngineModel::SynthLike)
+                    wait_remaining_since(t_begin, synth_unary_cycles(elems, softmax_lanes, 3));
+                else
+                    wait(compute_cyc, sc_core::SC_NS);
             }
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             busy_time += t_end - t_begin;
@@ -493,10 +541,39 @@ SC_MODULE(PoolEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
+    EngineModel engine_model = EngineModel::Analytical;
 
     SC_HAS_PROCESS(PoolEngine);
     PoolEngine(sc_core::sc_module_name nm, L1Manager& mgr)
       : sc_module(nm), l1mgr(mgr) { SC_THREAD(run); }
+
+    static uint64_t ceil_div_u64(uint64_t a, uint64_t b) {
+        return b ? ((a + b - 1) / b) : 0;
+    }
+
+    uint64_t elem_bytes() const {
+        return (is_fp_dtype(last_dtype) ||
+                last_dtype == DT_INT16x4 ||
+                last_dtype == DT_INT16x8 ||
+                last_dtype == DT_INT16x16) ? 2u : 1u;
+    }
+
+    uint64_t synth_pool_cycles(uint64_t in_elems, uint64_t out_elems,
+                               uint64_t lanes, uint32_t window) const {
+        const uint64_t bytes_in = in_elems * elem_bytes();
+        const uint64_t bytes_out = out_elems * elem_bytes();
+        const uint64_t read_cyc = ceil_div_u64(bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES);
+        const uint64_t write_cyc = ceil_div_u64(bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES);
+        const uint64_t compute_cyc = ceil_div_u64(out_elems, lanes) * std::max<uint32_t>(window, 1);
+        return std::max({read_cyc, write_cyc, compute_cyc}) + 8;
+    }
+
+    void wait_remaining_since(sc_core::sc_time begin, uint64_t target_cycles) {
+        const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - begin;
+        const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
+        if (target_cycles > elapsed_cyc)
+            wait(target_cycles - elapsed_cyc, sc_core::SC_NS);
+    }
 
     // v8.17: FP avg/max pool. Storage FP16 in L1; compute FP32 internally.
     // AVG sums in (kh, kw) order with running-FP32 add and divides by the
@@ -643,7 +720,13 @@ SC_MODULE(PoolEngine) {
                 // Cycle model: same per-output K_h*K_w lane occupancy as INT.
                 const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
                 const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
-                wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
+                if (engine_model == EngineModel::SynthLike) {
+                    const uint64_t in_elems = uint64_t(p.in_h) * p.in_w * p.in_c;
+                    wait_remaining_since(t_begin, synth_pool_cycles(
+                        in_elems, out_elems, lanes, std::max<uint32_t>(k_h * k_w, 1)));
+                } else {
+                    wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
+                }
                 const sc_core::sc_time t_end = sc_core::sc_time_stamp();
                 busy_time += t_end - t_begin;
                 tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
@@ -658,7 +741,13 @@ SC_MODULE(PoolEngine) {
             // per-output-element work = K_h × K_w compares pipelined / lanes.
             const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
             const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
-            wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
+            if (engine_model == EngineModel::SynthLike) {
+                const uint64_t in_elems = uint64_t(p.in_h) * p.in_w * p.in_c;
+                wait_remaining_since(t_begin, synth_pool_cycles(
+                    in_elems, out_elems, lanes, std::max<uint32_t>(k_h * k_w, 1)));
+            } else {
+                wait(per_lane * std::max<uint32_t>(k_h * k_w, 1), sc_core::SC_NS);
+            }
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             busy_time += t_end - t_begin;
             tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),

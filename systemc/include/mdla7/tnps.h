@@ -6,6 +6,7 @@
 // overlap with DRAM traffic in the schedule.
 
 #include <systemc>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <numeric>
@@ -22,6 +23,8 @@ SC_MODULE(TnpsEngine) {
     L1Manager& l1mgr;
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    EngineModel engine_model = EngineModel::Analytical;
+    sc_core::sc_time task_begin{sc_core::SC_ZERO_TIME};
 
     SC_HAS_PROCESS(TnpsEngine);
     TnpsEngine(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -33,6 +36,7 @@ SC_MODULE(TnpsEngine) {
         while (true) {
             DescriptorBody body = cfg_in.read();
             const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
+            task_begin = t_begin;
             const TnpsBody& t = body.tnps;
             switch (t.mode) {
             case TM_LINEAR_COPY:    do_linear(t); break;
@@ -59,7 +63,22 @@ SC_MODULE(TnpsEngine) {
 
     void wait_bytes(uint64_t bytes) {
         // 8 R + 8 W payload lanes = 128 B/cyc in each direction.
-        wait(double((bytes + 127) / 128 + 8), sc_core::SC_NS);
+        const uint64_t model_cycles = (bytes + 127) / 128 + 8;
+        if (engine_model == EngineModel::Analytical) {
+            wait(double(model_cycles), sc_core::SC_NS);
+            return;
+        }
+        const uint64_t read_cyc =
+            (bytes + PayloadPortCount::TNPS_R * PAYLOAD_BYTES - 1) /
+            (PayloadPortCount::TNPS_R * PAYLOAD_BYTES);
+        const uint64_t write_cyc =
+            (bytes + PayloadPortCount::TNPS_W * PAYLOAD_BYTES - 1) /
+            (PayloadPortCount::TNPS_W * PAYLOAD_BYTES);
+        const uint64_t synth_cycles = std::max(read_cyc, write_cyc) + 10;
+        const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - task_begin;
+        const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
+        if (synth_cycles > elapsed_cyc)
+            wait(synth_cycles - elapsed_cyc, sc_core::SC_NS);
     }
 
     void do_linear(const TnpsBody& t) {
