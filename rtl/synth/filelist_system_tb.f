@@ -1,0 +1,13 @@
+rtl/synth/command.v
+rtl/synth/conv.v
+rtl/synth/requant.v
+rtl/synth/ewe.v
+rtl/synth/pool.v
+rtl/synth/tnps.v
+rtl/synth/udma.v
+rtl/synth/l1manager.v
+rtl/synth/l1mesh.v
+rtl/synth/mdla7_top.v
+rtl/synth/host.v
+rtl/synth/dram.v
+rtl/synth/Testbench.v

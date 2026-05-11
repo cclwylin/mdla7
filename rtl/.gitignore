@@ -1,0 +1,6 @@
+obj_dir/
+verilator/
+bin/
+._*
+**/._*
+**/__pycache__/
