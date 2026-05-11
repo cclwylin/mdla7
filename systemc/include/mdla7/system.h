@@ -133,11 +133,13 @@ public:
         cmd.ewe_dtype_latch  = &ewe    .last_dtype;
         cmd.pool_dtype_latch = &pool   .last_dtype;
 
+        udma.engine_model = engine_model;
         conv.engine_model = engine_model;
         requant.engine_model = engine_model;
         ewe.engine_model = engine_model;
         pool.engine_model = engine_model;
         tnps.engine_model = engine_model;
+        cmd.engine_model = engine_model;
     }
 
 private:

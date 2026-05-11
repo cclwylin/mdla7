@@ -11063,8 +11063,9 @@ int sc_main(int argc, char* argv[]) {
         const std::vector<std::vector<RtlPhaseTrace>>* rtl_phases = nullptr;
     };
     EngStat engines[] = {
-        {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read},
-        {"udma_w",  cyc(sys.udma   .busy_time_write), &sys.udma   .tasks_write},
+        {"cmd",     cyc(sys.cmd    .busy_time),       &sys.cmd    .tasks, &sys.cmd.rtl_phase_tasks},
+        {"udma_r",  cyc(sys.udma   .busy_time_read),  &sys.udma   .tasks_read, &sys.udma.rtl_phase_tasks_read},
+        {"udma_w",  cyc(sys.udma   .busy_time_write), &sys.udma   .tasks_write, &sys.udma.rtl_phase_tasks_write},
         {"conv",    cyc(sys.conv   .busy_time),       &sys.conv   .tasks, &sys.conv.rtl_phase_tasks},
         {"requant", cyc(sys.requant.busy_time),       &sys.requant.tasks, &sys.requant.rtl_phase_tasks},
         {"ewe",     cyc(sys.ewe    .busy_time),       &sys.ewe    .tasks, &sys.ewe .rtl_phase_tasks},

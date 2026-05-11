@@ -797,7 +797,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
 
     def _rtl_phase_summary_rows() -> str:
         rows = []
-        for engine in ("conv", "requant", "ewe", "pool", "tnps"):
+        for engine in ("cmd", "udma_r", "udma_w", "conv", "requant", "ewe", "pool", "tnps"):
             phase_totals: dict[str, int] = {}
             task_count = 0
             for task in eng_payload.get(engine, {}).get("tasks", []):
@@ -821,8 +821,9 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                 continue
             ordered = [
                 "issue", "act_read", "wgt_read", "read", "param_read",
-                "chain_read", "mac", "compute", "pack", "chain", "write",
-                "fill", "done",
+                "dram_read", "l1_read", "l1_write", "dram_write", "codec",
+                "dispatch", "chain_read", "mac", "compute", "pack", "chain",
+                "write", "fill", "done",
             ]
             parts = []
             for name in ordered:
@@ -1365,6 +1366,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   }});
 
   const ENG_COLORS = {{
+    cmd:     '#555555',
     udma:    '#4287f5',           // legacy (kept for older bins)
     udma_r:  '#4287f5',           // DRAM → L1 (load): blue
     udma_w:  '#7c4dff',           // L1  → DRAM (store): purple-blue
@@ -1376,6 +1378,20 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   }};
   const PHASE_COLORS = {{
     issue:   '#202020',
+    dispatch:'#6b6b6b',
+    dram_read:'#1f6fd1',
+    dram_write:'#6f42c1',
+    l1_read: '#4f9df8',
+    l1_write:'#38a169',
+    codec:   '#b7791f',
+    act_read:'#2f80ed',
+    wgt_read:'#56ccf2',
+    param_read:'#7b61ff',
+    chain_read:'#00a6a6',
+    mac:     '#eb5757',
+    pack:    '#f2994a',
+    chain:   '#00a6a6',
+    fill:    '#bdbdbd',
     read:    '#2f80ed',
     compute: '#f2994a',
     write:   '#27ae60',

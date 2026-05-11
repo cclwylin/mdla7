@@ -5,6 +5,7 @@
 // v0: in-order dispatch with optional wait_tags AND-check; signal_tag set on done.
 
 #include <systemc>
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <limits>
@@ -12,6 +13,7 @@
 #include <queue>
 #include <vector>
 #include "mdla7/descriptor.h"
+#include "mdla7/memory.h"
 
 namespace mdla7 {
 
@@ -51,6 +53,10 @@ SC_MODULE(CommandEngine) {
     };
     std::vector<TaskMeta> trace_udma_r, trace_udma_w;
     std::vector<TaskMeta> trace_conv, trace_requant, trace_ewe, trace_pool, trace_tnps;
+    sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
+    std::vector<std::pair<uint64_t, uint64_t>> tasks;
+    std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
+    EngineModel engine_model = EngineModel::Analytical;
 
     SC_HAS_PROCESS(CommandEngine);
     CommandEngine(sc_core::sc_module_name nm) : sc_module(nm) {
@@ -170,6 +176,7 @@ SC_MODULE(CommandEngine) {
     }
 
     void issue(const Descriptor& d) {
+        const sc_core::sc_time t_begin = sc_core::sc_time_stamp();
         std::cout << "[CmdEng] dispatch op_class=" << int(d.hdr.op_class())
                   << " layer_id=" << d.hdr.layer_id
                   << " signal_tag=" << int(d.hdr.signal_tag)
@@ -215,6 +222,25 @@ SC_MODULE(CommandEngine) {
             udma_cfg_out.write(d.body); break;
         default:
             std::cout << "[CmdEng] unknown op_class\n"; break;
+        }
+        const sc_core::sc_time t_end = sc_core::sc_time_stamp();
+        const uint64_t dispatch_cycles = uint64_t((t_end - t_begin).to_seconds() * 1e9);
+        const uint64_t display_cycles = is_rtl_style(engine_model)
+                                      ? std::max<uint64_t>(1, dispatch_cycles)
+                                      : dispatch_cycles;
+        const uint64_t t_begin_ns = uint64_t(t_begin.to_seconds() * 1e9);
+        busy_time += t_end - t_begin;
+        tasks.emplace_back(t_begin_ns, t_begin_ns + display_cycles);
+        if (is_rtl_style(engine_model)) {
+            RtlPhaseTrace phase;
+            phase.name = "dispatch";
+            phase.cycles = display_cycles;
+            phase.elems = d.hdr.wait_count;
+            phase.lanes = d.hdr.op_class();
+            phase.stall = "cfg_fifo_write";
+            rtl_phase_tasks.push_back({phase});
+        } else {
+            rtl_phase_tasks.push_back({});
         }
     }
 
