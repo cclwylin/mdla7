@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -69,11 +70,21 @@ def run(cmd: list[str], cwd: Path, quiet: bool) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
+def find_default_verilator(rtl_dir: Path) -> Path:
+    bundled = rtl_dir / "verilator" / "bin" / "verilator"
+    bundled_bin = rtl_dir / "verilator" / "bin" / "verilator_bin"
+    if bundled.exists() and bundled_bin.exists():
+        return bundled
+    for name in ("/opt/homebrew/bin/verilator", "/usr/local/bin/verilator", "verilator"):
+        found = shutil.which(name) if name == "verilator" else name
+        if found and Path(found).exists():
+            return Path(found)
+    return bundled if bundled.exists() else Path("verilator")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     repo_root, rtl_dir = repo_paths()
-    default_verilator = rtl_dir / "verilator" / "bin" / "verilator"
-    if not default_verilator.exists():
-        default_verilator = Path("verilator")
+    default_verilator = find_default_verilator(rtl_dir)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--verilator", type=Path, default=default_verilator)

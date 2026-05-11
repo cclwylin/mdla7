@@ -134,6 +134,79 @@ module vf_conv_int8_mac #(
     end
 endmodule
 
+module vf_conv2d_addrgen (
+    input      [15:0] in_h,
+    input      [15:0] in_w,
+    input      [15:0] in_c,
+    input      [15:0] out_h,
+    input      [15:0] out_w,
+    input      [15:0] out_c,
+    input      [7:0]  k_h,
+    input      [7:0]  k_w,
+    input      [7:0]  stride_h,
+    input      [7:0]  stride_w,
+    input      [7:0]  dilation_h,
+    input      [7:0]  dilation_w,
+    input signed [15:0] pad_top,
+    input signed [15:0] pad_left,
+    input      [1:0]  elem_bytes,
+    input      [31:0] out_elem_index,
+    input      [15:0] sample_kh,
+    input      [15:0] sample_kw,
+    input      [15:0] sample_ic,
+    output reg [31:0] input_byte_offset,
+    output reg [31:0] weight_byte_offset,
+    output reg [31:0] output_byte_offset,
+    output reg        input_valid
+);
+    reg [31:0] elem_b;
+    reg [31:0] out_area;
+    reg [31:0] oh;
+    reg [31:0] ow;
+    reg [31:0] oc;
+    reg signed [31:0] ih;
+    reg signed [31:0] iw;
+
+    always @* begin
+        elem_b = (elem_bytes == 2'd0) ? 32'd1 : {30'd0, elem_bytes};
+        out_area = ({16'd0, out_w} * {16'd0, out_c});
+        oh = (out_area == 32'd0) ? 32'd0 : out_elem_index / out_area;
+        ow = (({16'd0, out_c}) == 32'd0) ? 32'd0 :
+             ((out_elem_index % out_area) / {16'd0, out_c});
+        oc = (({16'd0, out_c}) == 32'd0) ? 32'd0 :
+             (out_elem_index % {16'd0, out_c});
+
+        ih = $signed({16'd0, oh[15:0]}) * $signed({24'd0, stride_h}) +
+             $signed({16'd0, sample_kh}) * $signed({24'd0, dilation_h}) -
+             $signed({{16{pad_top[15]}}, pad_top});
+        iw = $signed({16'd0, ow[15:0]}) * $signed({24'd0, stride_w}) +
+             $signed({16'd0, sample_kw}) * $signed({24'd0, dilation_w}) -
+             $signed({{16{pad_left[15]}}, pad_left});
+
+        input_valid = (oh < {16'd0, out_h}) &&
+                      (ow < {16'd0, out_w}) &&
+                      (oc < {16'd0, out_c}) &&
+                      (sample_kh < {8'd0, k_h}) &&
+                      (sample_kw < {8'd0, k_w}) &&
+                      (sample_ic < in_c) &&
+                      (ih >= 32'sd0) && (iw >= 32'sd0) &&
+                      (ih < $signed({16'd0, in_h})) &&
+                      (iw < $signed({16'd0, in_w}));
+
+        input_byte_offset = input_valid
+            ? (((ih[31:0] * {16'd0, in_w} * {16'd0, in_c}) +
+                (iw[31:0] * {16'd0, in_c}) +
+                {16'd0, sample_ic}) * elem_b)
+            : 32'd0;
+        weight_byte_offset = (((({24'd0, k_h} == 32'd0) ? 32'd0 : {16'd0, sample_kh}) *
+                               {8'd0, k_w} * {16'd0, in_c} * {16'd0, out_c}) +
+                              ({16'd0, sample_kw} * {16'd0, in_c} * {16'd0, out_c}) +
+                              ({16'd0, sample_ic} * {16'd0, out_c}) +
+                              oc) * elem_b;
+        output_byte_offset = out_elem_index * elem_b;
+    end
+endmodule
+
 module vf_tnps_addrgen (
     input             mode_space_to_depth,
     input      [15:0] in_h,
@@ -246,6 +319,25 @@ module vf_conv_sample_engine #(
     input signed [31:0]           zp_out,
     input signed [31:0]           act_min,
     input signed [31:0]           act_max,
+    input      [15:0]             conv_in_h,
+    input      [15:0]             conv_in_w,
+    input      [15:0]             conv_in_c,
+    input      [15:0]             conv_out_h,
+    input      [15:0]             conv_out_w,
+    input      [15:0]             conv_out_c,
+    input      [7:0]              conv_k_h,
+    input      [7:0]              conv_k_w,
+    input      [7:0]              conv_stride_h,
+    input      [7:0]              conv_stride_w,
+    input      [7:0]              conv_dilation_h,
+    input      [7:0]              conv_dilation_w,
+    input signed [15:0]           conv_pad_top,
+    input signed [15:0]           conv_pad_left,
+    input      [1:0]              conv_elem_bytes,
+    input      [31:0]             conv_out_elem_index,
+    input      [15:0]             conv_sample_kh,
+    input      [15:0]             conv_sample_kw,
+    input      [15:0]             conv_sample_ic,
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
@@ -260,7 +352,11 @@ module vf_conv_sample_engine #(
     output signed [31:0]          scaled_out,
     output signed [7:0]           out_q,
     output reg [63:0]             fp_sum_bits,
-    output signed [31:0]          int16_acc_out
+    output signed [31:0]          int16_acc_out,
+    output     [31:0]             conv_sample_input_byte_offset,
+    output     [31:0]             conv_sample_weight_byte_offset,
+    output     [31:0]             conv_sample_output_byte_offset,
+    output                        conv_sample_input_valid
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -346,6 +442,32 @@ module vf_conv_sample_engine #(
         .acc_out(acc_out),
         .scaled_out(scaled_out),
         .out_q(out_q)
+    );
+
+    vf_conv2d_addrgen u_conv_sample_addrgen (
+        .in_h(conv_in_h),
+        .in_w(conv_in_w),
+        .in_c(conv_in_c),
+        .out_h(conv_out_h),
+        .out_w(conv_out_w),
+        .out_c(conv_out_c),
+        .k_h(conv_k_h),
+        .k_w(conv_k_w),
+        .stride_h(conv_stride_h),
+        .stride_w(conv_stride_w),
+        .dilation_h(conv_dilation_h),
+        .dilation_w(conv_dilation_w),
+        .pad_top(conv_pad_top),
+        .pad_left(conv_pad_left),
+        .elem_bytes(conv_elem_bytes),
+        .out_elem_index(conv_out_elem_index),
+        .sample_kh(conv_sample_kh),
+        .sample_kw(conv_sample_kw),
+        .sample_ic(conv_sample_ic),
+        .input_byte_offset(conv_sample_input_byte_offset),
+        .weight_byte_offset(conv_sample_weight_byte_offset),
+        .output_byte_offset(conv_sample_output_byte_offset),
+        .input_valid(conv_sample_input_valid)
     );
 
     function real pow2_int;

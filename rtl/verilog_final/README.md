@@ -29,8 +29,8 @@ Smoke tests:
 
 Current smoke coverage:
 
-- `conv`: true Verilog INT8 MAC + bias + MBQM + clamp primitive, plus INT16
-  sample MAC.
+- `conv`: true Verilog INT8 MAC + bias + MBQM + clamp primitive, INT16
+  sample MAC, and a 2D NHWC convolution address-walk primitive.
 - `requant`: true Verilog MBQM + output zero-point + activation clamp sample.
 - `pool`: true Verilog INT8 max/avg sample reduction.
 - `ewe`: true Verilog INT8 ADD/MUL/SUB vector sample with lane saturation, plus
@@ -43,7 +43,7 @@ Current smoke coverage:
 - `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top_final`.
 
 `host_final.v` is the first program-driven path for `verilog_final`. It uses a
-simple 20-word descriptor format and has a built-in default
+simple 28-word descriptor format and has a built-in default
 CONV -> REQUANT -> POOL -> EWE -> UDMA -> TNPS program. It can also load a hex descriptor
 stream:
 
@@ -133,6 +133,10 @@ Conv datapath status:
 - `vf_conv_int8_mac` is a first correctness primitive for integer conv:
   signed INT8 dot product, input zero-point subtraction, bias, MBQM requant,
   output zero-point, and activation clamp.
+- `vf_conv2d_addrgen` is the first tile-streaming building block for CONV:
+  it maps output element + kernel position + input channel into NHWC input,
+  weight, and output byte offsets with stride, dilation, padding, and element
+  byte width.
 - `vf_conv_sample_engine` connects that primitive to `mdla7_top_final`, issues
   activation/weight/output L1Mesh tokens, and is now reachable from generated
   `.bin` descriptors.
@@ -141,7 +145,8 @@ Conv datapath status:
   synthesizable IEEE754 pipeline.
 - It also has a signed INT16 sample MAC path for hybrid/int16 bring-up
   descriptors.
-- This is still a sample MAC path, not full-layer tile streaming or CRC.
+- This is still a sample MAC/address-walk path, not full-layer tile streaming
+  or CRC.
 
 Requant datapath status:
 
@@ -182,7 +187,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
@@ -193,8 +198,18 @@ Descriptor word layout:
 | 17 | CONV activation max or expected TNPS sample destination byte offset |
 | 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
 | 19 | source layer index |
+| 20 | CONV 2D sample shape `{in_w, in_h}` |
+| 21 | CONV 2D sample shape `{out_c, in_c}` |
+| 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
+| 23 | CONV 2D sample dilation/sample-k `{sample_kw, sample_kh, dilation_w, dilation_h}` |
+| 24 | CONV 2D sample input channel |
+| 25 | CONV expected sample input byte offset |
+| 26 | CONV expected sample weight byte offset |
+| 27 | CONV expected sample output byte offset |
 
 For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9,
 `EWE`: bit 10). For INT16 descriptors, word 12 bit 11 marks INT16 mode for
 `CONV`, `POOL`, and `EWE`.
 words 16/17 hold the expected double-precision sample result bits `{high, low}`.
+INT8 CONV descriptors use words 20..27 to check one descriptor-driven 2D
+NHWC/OHWI sample address alongside the sample MAC.

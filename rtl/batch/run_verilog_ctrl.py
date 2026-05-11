@@ -17,9 +17,11 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -34,6 +36,8 @@ VERILOG_CYCLES_RE = re.compile(r"VERILOG_CYCLES:\s*([0-9]+)")
 VERILOG_CTRL_VERSION = "verilog_ctrl"
 VERILOG_FINAL_VERSION = "verilog_final"
 CACHE_VERSION = 1
+MDL7_MAGIC = 0x374C444D
+PROGRAM_COL_WIDTH = 34
 ETHZ_FILTER_ALIASES = {"ethz", "ethz_v6", "ethz-v6"}
 HOTSPOT_FILTER_ALIASES = {"hotspot"}
 SLICE_FILTER_ALIASES = {"slice", "ethz_slice", "ethz-v6-slice", "ethz_v6_slice"}
@@ -49,6 +53,15 @@ TIME_UNIT_TO_MS = {
     "ps": 0.000000001,
     "fs": 0.000000000001,
 }
+
+
+@dataclass(frozen=True)
+class BinInfo:
+    size_bytes: int
+    layers: int
+    tensor_bytes: int
+    pattern_class: str
+    timeout_s: float
 
 
 def repo_paths() -> tuple[Path, Path]:
@@ -343,6 +356,61 @@ def file_signature(path: Path) -> dict[str, int | str]:
     }
 
 
+def rd32(data: bytes, off: int) -> int:
+    if off + 4 > len(data):
+        return 0
+    return int.from_bytes(data[off:off + 4], "little")
+
+
+def classify_bin(program: Path, compare_mode: bool) -> BinInfo:
+    st = program.stat()
+    size_bytes = st.st_size
+    layers = 0
+    tensor_bytes = 0
+    try:
+        with program.open("rb") as f:
+            header = f.read(16)
+            if len(header) == 16 and rd32(header, 0) == MDL7_MAGIC:
+                layers = rd32(header, 8)
+                table = f.read(layers * 64)
+                for idx in range(layers):
+                    off = idx * 64
+                    if off + 44 > len(table):
+                        break
+                    tensor_bytes += rd32(table, off + 32)
+                    tensor_bytes += rd32(table, off + 36)
+                    tensor_bytes += rd32(table, off + 40)
+    except OSError:
+        pass
+
+    score = max(size_bytes, tensor_bytes)
+    if layers >= 200 or score >= 256 * 1024 * 1024:
+        pattern_class = "huge"
+        timeout_s = 3600.0
+    elif layers >= 80 or score >= 96 * 1024 * 1024:
+        pattern_class = "large"
+        timeout_s = 1800.0
+    elif layers >= 25 or score >= 24 * 1024 * 1024:
+        pattern_class = "medium"
+        timeout_s = 900.0
+    else:
+        pattern_class = "small"
+        timeout_s = 300.0 if compare_mode else 30.0
+    return BinInfo(size_bytes, layers, tensor_bytes, pattern_class, timeout_s)
+
+
+def fmt_timeout(value: float) -> str:
+    return f"{int(value)}s" if float(value).is_integer() else f"{value:.1f}s"
+
+
+def fmt_program_name(stem: str) -> str:
+    if len(stem) <= PROGRAM_COL_WIDTH:
+        return f"{stem:<{PROGRAM_COL_WIDTH}}"
+    if PROGRAM_COL_WIDTH <= 3:
+        return stem[:PROGRAM_COL_WIDTH]
+    return stem[:PROGRAM_COL_WIDTH - 3] + "..."
+
+
 def load_cache(path: Path) -> dict[str, object]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -379,6 +447,25 @@ def cache_hit(
     if entry.get("source_mtime_ns") != source_mtime_ns:
         return None
     return entry
+
+
+def cached_float(entry: dict[str, object], key: str) -> float | None:
+    value = entry.get(key)
+    return value if isinstance(value, float) else None
+
+
+def timeout_for_program(
+    info: BinInfo,
+    manual_timeout: bool,
+    arg_timeout: float | None,
+    no_auto_timeout: bool,
+    fixed_default_timeout: float,
+) -> float:
+    if manual_timeout and arg_timeout is not None:
+        return arg_timeout
+    if no_auto_timeout:
+        return fixed_default_timeout
+    return info.timeout_s
 
 
 def find_cxx_stdlib_include() -> Path | None:
@@ -688,11 +775,21 @@ def fmt_ratio(num: float | None, den: float | None) -> str:
     return f"{num / den:.3f}x"
 
 
+def find_default_verilator(rtl_dir: Path) -> Path:
+    bundled = rtl_dir / "verilator" / "bin" / "verilator"
+    bundled_bin = rtl_dir / "verilator" / "bin" / "verilator_bin"
+    if bundled.exists() and bundled_bin.exists():
+        return bundled
+    for name in ("/opt/homebrew/bin/verilator", "/usr/local/bin/verilator", "verilator"):
+        found = shutil.which(name) if name == "verilator" else name
+        if found and Path(found).exists():
+            return Path(found)
+    return bundled if bundled.exists() else Path("verilator")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     repo_root, rtl_dir = repo_paths()
-    default_verilator = rtl_dir / "verilator" / "bin" / "verilator"
-    if not default_verilator.exists():
-        default_verilator = Path("verilator")
+    default_verilator = find_default_verilator(rtl_dir)
 
     parser = argparse.ArgumentParser(
         description="Run rtl/obj_dir/VTestbench over rtl/bin/*.bin programs."
@@ -789,9 +886,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Timeout per .bin in seconds. Default: 300 because "
-            "synth-vs-verilog_ctrl compare mode is enabled by default."
+            "Manual timeout per .bin in seconds. Default: auto-timeout by .bin size/layer count."
         ),
+    )
+    parser.add_argument(
+        "--no-auto-timeout",
+        action="store_true",
+        help="Disable size/layer based timeout and use 300s in compare mode or 30s otherwise.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N matched .bin files.")
     parser.add_argument("--list", action="store_true", help="List matched .bin files and exit.")
@@ -912,8 +1013,8 @@ def main(argv: list[str]) -> int:
     if args.compare_synth_verilog_final:
         args.sim_version = VERILOG_FINAL_VERSION
     compare_mode = args.compare_synth_verilog_ctrl or args.compare_synth_verilog_final
-    if args.timeout is None:
-        args.timeout = 300.0 if compare_mode else 30.0
+    manual_timeout = args.timeout is not None
+    fixed_default_timeout = 300.0 if compare_mode else 30.0
     if args.sim_version != VERILOG_CTRL_VERSION:
         print(
             f"[run_verilog_ctrl] ERROR: {args.sim_version} is reserved for the "
@@ -960,6 +1061,12 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog_ctrl] simulator: {display(args.sim, repo_root)}")
     print(f"[run_verilog_ctrl] sim_version: {args.sim_version}")
     print(f"[run_verilog_ctrl] cache: {display(args.cache_file, repo_root)}")
+    if manual_timeout:
+        print(f"[run_verilog_ctrl] timeout_mode: manual {fmt_timeout(args.timeout)}")
+    elif args.no_auto_timeout:
+        print(f"[run_verilog_ctrl] timeout_mode: fixed {fmt_timeout(fixed_default_timeout)}")
+    else:
+        print("[run_verilog_ctrl] timeout_mode: auto")
     if args.rerun_all:
         print("[run_verilog_ctrl] cache_mode: rerun-all")
     if compare_mode:
@@ -1059,13 +1166,21 @@ def main(argv: list[str]) -> int:
 
     if compare_mode:
         print(
-            f"{'idx':>3}  {'program':<42} {'ans':<6} "
+            f"{'idx':>3}  {fmt_program_name('program')} {'class':<6} {'tout':>6} {'ans':<6} "
             f"{'synth_ms':>10} {'verilog_ctrl_ms':>15} {'vc/synth':>9} {'wall_s':>8}"
         )
-        print("-" * 102)
+        print("-" * (3 + 2 + PROGRAM_COL_WIDTH + 1 + 6 + 1 + 6 + 1 + 6 + 1 + 10 + 1 + 15 + 1 + 9 + 1 + 8))
 
     for idx, program in enumerate(bins, start=1):
         rel_program = display(program, repo_root)
+        info = classify_bin(program, compare_mode)
+        run_timeout = timeout_for_program(
+            info,
+            manual_timeout,
+            args.timeout,
+            args.no_auto_timeout,
+            fixed_default_timeout,
+        )
         cached = None
         if not args.rerun_all:
             cached = cache_hit(
@@ -1076,10 +1191,8 @@ def main(argv: list[str]) -> int:
             )
         if cached is not None:
             cache_hits += 1
-            synth_ms = cached.get("synth_ms")
-            verilog_ms = cached.get("verilog_ctrl_ms")
-            synth_ms = synth_ms if isinstance(synth_ms, float) else None
-            verilog_ms = verilog_ms if isinstance(verilog_ms, float) else None
+            synth_ms = cached_float(cached, "synth_ms")
+            verilog_ms = cached_float(cached, "verilog_ctrl_ms")
             rows.append({
                 "program": rel_program,
                 "passed": True,
@@ -1088,10 +1201,12 @@ def main(argv: list[str]) -> int:
                 "wall_s": 0.0,
                 "reason": "",
                 "cached": True,
+                "class": info.pattern_class,
+                "timeout_s": run_timeout,
             })
             if compare_mode:
                 print(
-                    f"{idx:>3}  {program.stem:<42} {'CACHED':<6} "
+                    f"{idx:>3}  {fmt_program_name(program.stem)} {info.pattern_class:<6} {fmt_timeout(run_timeout):>6} {'CACHED':<6} "
                     f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {0.0:>8.2f}"
                 )
@@ -1109,7 +1224,7 @@ def main(argv: list[str]) -> int:
             args.sim,
             program,
             repo_root,
-            args.timeout,
+            run_timeout,
             timing_file=timing_file,
         )
         if output and args.show_verilog_output:
@@ -1137,6 +1252,8 @@ def main(argv: list[str]) -> int:
             "wall_s": elapsed,
             "reason": reason,
             "cached": False,
+            "class": info.pattern_class,
+            "timeout_s": run_timeout,
         })
         cache_entries[rel_program] = {
             "status": "PASS" if passed else "FAIL",
@@ -1147,13 +1264,15 @@ def main(argv: list[str]) -> int:
             "verilog_ctrl_ms": verilog_ms,
             "wall_s": elapsed,
             "reason": reason,
+            "class": info.pattern_class,
+            "timeout_s": run_timeout,
         }
         save_cache(args.cache_file, cache)
 
         if passed:
             if compare_mode:
                 print(
-                    f"{idx:>3}  {program.stem:<42} {'PASS':<6} "
+                    f"{idx:>3}  {fmt_program_name(program.stem)} {info.pattern_class:<6} {fmt_timeout(run_timeout):>6} {'PASS':<6} "
                     f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {elapsed:>8.2f}"
                 )
@@ -1165,7 +1284,7 @@ def main(argv: list[str]) -> int:
         else:
             if compare_mode:
                 print(
-                    f"{idx:>3}  {program.stem:<42} {'FAIL':<6} "
+                    f"{idx:>3}  {fmt_program_name(program.stem)} {info.pattern_class:<6} {fmt_timeout(run_timeout):>6} {'FAIL':<6} "
                     f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>15} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {elapsed:>8.2f}"
                 )

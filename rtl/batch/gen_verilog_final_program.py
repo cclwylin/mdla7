@@ -66,7 +66,7 @@ UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
 
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
-WORDS_PER_COMMAND = 20
+WORDS_PER_COMMAND = 28
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 
 
@@ -114,6 +114,68 @@ def pack_word(chunk: bytes) -> int:
 
 def sample_bytes(data: bytes, offset: int, size: int, count: int = 16) -> bytes:
     return data[offset:offset + min(count, size)].ljust(count, b"\x00")
+
+
+def conv2d_int8_window_sample(
+    layer: Layer,
+    data: bytes,
+    max_count: int = 16,
+) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool]:
+    """Return one NHWC/OHWI output-pixel sample window for INT8 CONV descriptors."""
+    if (
+        layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+        layer.out_c <= 0 or layer.k_h <= 0 or layer.k_w <= 0
+    ):
+        act = data[layer.in_off:layer.in_off + min(max_count, layer.in_size)]
+        wgt = data[layer.wgt_off:layer.wgt_off + min(max_count, layer.wgt_size)]
+        elem_count = min(len(act), len(wgt), max_count)
+        valid = elem_count > 0
+        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, valid
+
+    act_values = bytearray()
+    wgt_values = bytearray()
+    last_kh = 0
+    last_kw = 0
+    last_ic = 0
+    last_input_byte = 0
+    last_weight_byte = 0
+    for kh in range(layer.k_h):
+        for kw in range(layer.k_w):
+            for ic in range(layer.in_c):
+                if len(act_values) >= max_count:
+                    break
+                input_elem = ((kh * layer.in_w + kw) * layer.in_c) + ic
+                weight_elem = (((kh * layer.k_w + kw) * layer.in_c + ic) * layer.out_c)
+                input_byte = input_elem
+                weight_byte = weight_elem
+                if input_byte >= layer.in_size or weight_byte >= layer.wgt_size:
+                    continue
+                act_values.append(data[layer.in_off + input_byte])
+                wgt_values.append(data[layer.wgt_off + weight_byte])
+                last_kh = kh
+                last_kw = kw
+                last_ic = ic
+                last_input_byte = input_byte
+                last_weight_byte = weight_byte
+            if len(act_values) >= max_count:
+                break
+        if len(act_values) >= max_count:
+            break
+
+    elem_count = min(len(act_values), len(wgt_values), max_count)
+    valid = elem_count > 0
+    return (
+        bytes(act_values).ljust(max_count, b"\x00"),
+        bytes(wgt_values).ljust(max_count, b"\x00"),
+        elem_count,
+        last_kh,
+        last_kw,
+        last_ic,
+        last_input_byte,
+        last_weight_byte,
+        0,
+        valid,
+    )
 
 
 def fp16_at(data: bytes, offset: int) -> float:
@@ -355,16 +417,24 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         return words
 
     if layer.op_kind in OK_CONV and elem == 1 and layer.in_size > 0 and layer.wgt_size > 0:
-        # Emit a real Verilog MAC sample from the layer payload. This is intentionally
-        # small while the final datapath grows from sample MAC to full tile streaming.
+        # Emit one NHWC/OHWI output-pixel window sample from the layer payload.
+        # This keeps the descriptor small while the final path grows toward full
+        # tile streaming.
         data = descriptor_for_layer.program_bytes
-        act = data[layer.in_off:layer.in_off + min(16, layer.in_size)]
-        wgt = data[layer.wgt_off:layer.wgt_off + min(16, layer.wgt_size)]
-        elem_count = min(len(act), len(wgt), 16)
+        (
+            act,
+            wgt,
+            elem_count,
+            sample_kh,
+            sample_kw,
+            sample_ic,
+            expected_input_offset,
+            expected_weight_offset,
+            expected_output_offset,
+            expected_valid,
+        ) = conv2d_int8_window_sample(layer, data)
         if elem_count == 0:
             return None
-        act = act.ljust(16, b"\x00")
-        wgt = wgt.ljust(16, b"\x00")
         bias = 0
         multiplier = 1073741824
         shift = 1
@@ -376,6 +446,7 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[0] = OP_CONV
         words[1] = elem_count
         words[2] = addr
+        words[3] = (1 << 2) | ((1 if expected_valid else 0) << 3)
         for idx in range(4):
             words[4 + idx] = pack_word(act[idx * 4:(idx + 1) * 4])
             words[8 + idx] = pack_word(wgt[idx * 4:(idx + 1) * 4])
@@ -387,6 +458,17 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[17] = 127
         words[18] = scaled & 0xFF
         words[19] = layer.index
+        words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+        words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+        words[22] = ((layer.k_h & 0xFF) |
+                     ((layer.k_w & 0xFF) << 8) |
+                     (1 << 16) |
+                     (1 << 24))
+        words[23] = (1 | (1 << 8) | ((sample_kh & 0xFF) << 16) | ((sample_kw & 0xFF) << 24))
+        words[24] = sample_ic & 0xFFFF
+        words[25] = expected_input_offset & 0xFFFF_FFFF
+        words[26] = expected_weight_offset & 0xFFFF_FFFF
+        words[27] = expected_output_offset & 0xFFFF_FFFF
         return words
 
     if layer.op_kind in OK_POOL and elem == 1 and layer.in_size > 0:

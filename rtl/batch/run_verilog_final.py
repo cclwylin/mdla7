@@ -26,8 +26,16 @@ FILTER_ALIASES = {
 }
 PASS_RE = re.compile(r"PASS: verilog_final host-driven .* issued=([0-9]+) done=([0-9]+)")
 FAIL_RE = re.compile(r"(HOST_FINAL_FAIL:.*|FAIL: verilog_final host program.*)")
-GEN_STATS_RE = re.compile(r"commands=([0-9]+)\s+tnps=([0-9]+)\s+udma=([0-9]+)")
-CACHE_VERSION = 1
+GEN_STATS_RE = re.compile(
+    r"commands=([0-9]+)"
+    r"(?:\s+conv=([0-9]+))?"
+    r"(?:\s+pool=([0-9]+))?"
+    r"(?:\s+requant=([0-9]+))?"
+    r"(?:\s+ewe=([0-9]+))?"
+    r"\s+tnps=([0-9]+)\s+udma=([0-9]+)"
+)
+CACHE_VERSION = 3
+WORDS_PER_COMMAND = 28
 
 
 def repo_paths() -> tuple[Path, Path]:
@@ -188,7 +196,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def count_commands(hex_path: Path) -> tuple[int, int, int]:
+def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int]:
     words: list[int] = []
     for line in hex_path.read_text(encoding="ascii").splitlines():
         line = line.strip()
@@ -196,9 +204,13 @@ def count_commands(hex_path: Path) -> tuple[int, int, int]:
             continue
         words.append(int(line, 16))
     count = 0
+    conv = 0
+    pool = 0
+    requant = 0
+    ewe = 0
     tnps = 0
     udma = 0
-    for off in range(0, len(words), 20):
+    for off in range(0, len(words), WORDS_PER_COMMAND):
         op = words[off] & 0xF
         if op == 0:
             break
@@ -207,7 +219,15 @@ def count_commands(hex_path: Path) -> tuple[int, int, int]:
             tnps += 1
         elif op == 6:
             udma += 1
-    return count, tnps, udma
+        elif op == 1:
+            conv += 1
+        elif op == 2:
+            requant += 1
+        elif op == 3:
+            ewe += 1
+        elif op == 4:
+            pool += 1
+    return count, conv, pool, requant, ewe, tnps, udma
 
 
 def main(argv: list[str]) -> int:
@@ -233,8 +253,8 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog_final] cache: {display(args.cache_file, repo_root)}")
     if args.rerun_all:
         print("[run_verilog_final] cache_mode: rerun-all")
-    print("idx  program                                  ans   cmds  tnps  udma  done  wall_s")
-    print("----------------------------------------------------------------------------------")
+    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma  done  wall_s")
+    print("-----------------------------------------------------------------------------------------------------")
 
     passed = 0
     failed = 0
@@ -264,16 +284,20 @@ def main(argv: list[str]) -> int:
             cache_hits += 1
             status = str(cached.get("status"))
             command_count = int(cached.get("cmds") or 0)
+            conv_count = int(cached.get("conv") or 0)
+            pool_count = int(cached.get("pool") or 0)
+            requant_count = int(cached.get("requant") or 0)
+            ewe_count = int(cached.get("ewe") or 0)
             tnps_count = int(cached.get("tnps") or 0)
             udma_count = int(cached.get("udma") or 0)
             done = int(cached.get("done") or 0)
             if status == "SKIP":
                 skipped += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
         rc, gen_out, _ = run(
@@ -290,14 +314,18 @@ def main(argv: list[str]) -> int:
         stats_match = GEN_STATS_RE.search(gen_out)
         if stats_match:
             command_count = int(stats_match.group(1))
-            tnps_count = int(stats_match.group(2))
-            udma_count = int(stats_match.group(3))
+            conv_count = int(stats_match.group(2) or 0)
+            pool_count = int(stats_match.group(3) or 0)
+            requant_count = int(stats_match.group(4) or 0)
+            ewe_count = int(stats_match.group(5) or 0)
+            tnps_count = int(stats_match.group(6))
+            udma_count = int(stats_match.group(7))
         else:
-            command_count, tnps_count, udma_count = count_commands(hex_path)
+            command_count, conv_count, pool_count, requant_count, ewe_count, tnps_count, udma_count = count_commands(hex_path)
         if command_count == 0:
             skipped += 1
-            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0     0    0.00")
-            print("     reason: no byte-moving command")
+            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0     0    0.00")
+            print("     reason: no final command")
             cache_entries[rel_bin] = {
                 "status": "SKIP",
                 "bin_sig": file_signature(bin_path),
@@ -305,6 +333,10 @@ def main(argv: list[str]) -> int:
                 "generator_mtime_ns": generator_mtime_ns,
                 "source_mtime_ns": source_mtime_ns,
                 "cmds": 0,
+                "conv": 0,
+                "pool": 0,
+                "requant": 0,
+                "ewe": 0,
                 "tnps": 0,
                 "udma": 0,
                 "done": 0,
@@ -324,7 +356,7 @@ def main(argv: list[str]) -> int:
             passed += 1
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} PASS "
-                f"{issued:5d} {tnps_count:5d} {udma_count:5d} {done:5d} {wall:7.2f}"
+                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {wall:7.2f}"
             )
             cache_entries[rel_bin] = {
                 "status": "PASS",
@@ -333,6 +365,10 @@ def main(argv: list[str]) -> int:
                 "generator_mtime_ns": generator_mtime_ns,
                 "source_mtime_ns": source_mtime_ns,
                 "cmds": issued,
+                "conv": conv_count,
+                "pool": pool_count,
+                "requant": requant_count,
+                "ewe": ewe_count,
                 "tnps": tnps_count,
                 "udma": udma_count,
                 "done": done,
@@ -349,7 +385,7 @@ def main(argv: list[str]) -> int:
                 reason = f"TIMEOUT after {args.timeout:.1f}s"
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL "
-                f"{command_count:5d} {tnps_count:5d} {udma_count:5d}   n/a  {wall:7.2f}"
+                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d}   n/a  {wall:7.2f}"
             )
             print(f"     reason: {reason}")
 

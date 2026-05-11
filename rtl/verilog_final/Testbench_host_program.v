@@ -37,6 +37,25 @@ module Testbench_host_program;
     wire signed [31:0] conv_zp_out;
     wire signed [31:0] conv_act_min;
     wire signed [31:0] conv_act_max;
+    wire [15:0] conv_in_h;
+    wire [15:0] conv_in_w;
+    wire [15:0] conv_in_c;
+    wire [15:0] conv_out_h;
+    wire [15:0] conv_out_w;
+    wire [15:0] conv_out_c;
+    wire [7:0] conv_k_h;
+    wire [7:0] conv_k_w;
+    wire [7:0] conv_stride_h;
+    wire [7:0] conv_stride_w;
+    wire [7:0] conv_dilation_h;
+    wire [7:0] conv_dilation_w;
+    wire signed [15:0] conv_pad_top;
+    wire signed [15:0] conv_pad_left;
+    wire [1:0] conv_elem_bytes;
+    wire [31:0] conv_out_elem_index;
+    wire [15:0] conv_sample_kh;
+    wire [15:0] conv_sample_kw;
+    wire [15:0] conv_sample_ic;
     wire signed [31:0] requant_input_value;
     wire pool_avg_mode;
     wire pool_fp_mode;
@@ -62,6 +81,10 @@ module Testbench_host_program;
     wire signed [7:0] conv_out_q;
     wire [63:0] conv_fp_sum_bits;
     wire signed [31:0] conv_int16_acc_out;
+    wire [31:0] conv_sample_input_byte_offset;
+    wire [31:0] conv_sample_weight_byte_offset;
+    wire [31:0] conv_sample_output_byte_offset;
+    wire conv_sample_input_valid;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -118,6 +141,25 @@ module Testbench_host_program;
         .conv_zp_out(conv_zp_out),
         .conv_act_min(conv_act_min),
         .conv_act_max(conv_act_max),
+        .conv_in_h(conv_in_h),
+        .conv_in_w(conv_in_w),
+        .conv_in_c(conv_in_c),
+        .conv_out_h(conv_out_h),
+        .conv_out_w(conv_out_w),
+        .conv_out_c(conv_out_c),
+        .conv_k_h(conv_k_h),
+        .conv_k_w(conv_k_w),
+        .conv_stride_h(conv_stride_h),
+        .conv_stride_w(conv_stride_w),
+        .conv_dilation_h(conv_dilation_h),
+        .conv_dilation_w(conv_dilation_w),
+        .conv_pad_top(conv_pad_top),
+        .conv_pad_left(conv_pad_left),
+        .conv_elem_bytes(conv_elem_bytes),
+        .conv_out_elem_index(conv_out_elem_index),
+        .conv_sample_kh(conv_sample_kh),
+        .conv_sample_kw(conv_sample_kw),
+        .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
@@ -145,6 +187,10 @@ module Testbench_host_program;
         .conv_out_q(conv_out_q),
         .conv_fp_sum_bits(conv_fp_sum_bits),
         .conv_int16_acc_out(conv_int16_acc_out),
+        .conv_sample_input_byte_offset(conv_sample_input_byte_offset),
+        .conv_sample_weight_byte_offset(conv_sample_weight_byte_offset),
+        .conv_sample_output_byte_offset(conv_sample_output_byte_offset),
+        .conv_sample_input_valid(conv_sample_input_valid),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -197,6 +243,25 @@ module Testbench_host_program;
         .conv_zp_out(conv_zp_out),
         .conv_act_min(conv_act_min),
         .conv_act_max(conv_act_max),
+        .conv_in_h(conv_in_h),
+        .conv_in_w(conv_in_w),
+        .conv_in_c(conv_in_c),
+        .conv_out_h(conv_out_h),
+        .conv_out_w(conv_out_w),
+        .conv_out_c(conv_out_c),
+        .conv_k_h(conv_k_h),
+        .conv_k_w(conv_k_w),
+        .conv_stride_h(conv_stride_h),
+        .conv_stride_w(conv_stride_w),
+        .conv_dilation_h(conv_dilation_h),
+        .conv_dilation_w(conv_dilation_w),
+        .conv_pad_top(conv_pad_top),
+        .conv_pad_left(conv_pad_left),
+        .conv_elem_bytes(conv_elem_bytes),
+        .conv_out_elem_index(conv_out_elem_index),
+        .conv_sample_kh(conv_sample_kh),
+        .conv_sample_kw(conv_sample_kw),
+        .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
@@ -226,6 +291,10 @@ module Testbench_host_program;
         .conv_out_q(conv_out_q),
         .conv_fp_sum_bits(conv_fp_sum_bits),
         .conv_int16_acc_out(conv_int16_acc_out),
+        .conv_sample_input_byte_offset(conv_sample_input_byte_offset),
+        .conv_sample_weight_byte_offset(conv_sample_weight_byte_offset),
+        .conv_sample_output_byte_offset(conv_sample_output_byte_offset),
+        .conv_sample_input_valid(conv_sample_input_valid),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
