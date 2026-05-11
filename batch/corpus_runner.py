@@ -114,6 +114,18 @@ def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
         pass
 
 
+def _compare_csv_path(default_csv: Path, csv_out: str) -> Path:
+    path = Path(csv_out)
+    if path == default_csv:
+        return default_csv.with_name(f"{default_csv.stem}.compare_synth{default_csv.suffix}")
+    return path
+
+
+def _compare_html_name(profile_html: str) -> str:
+    profile_path = Path(profile_html)
+    return f"{profile_path.stem}.compare_synth{profile_path.suffix}"
+
+
 def _ms_cell(value: str) -> str:
     return f"{float(value):>10.3f} ms" if value else f"{'—':>10s}    "
 
@@ -219,6 +231,159 @@ def _row_update(s: str) -> None:
     sys.stdout.flush()
 
 
+def _load_prior_compare_results(csv_path: Path) -> dict[str, dict]:
+    rows = _load_prior_csv(csv_path)
+    return {p: r for p, r in rows.items()
+            if r.get("status") == "ok" and r.get("synth_status") == "ok" and
+            r.get("mdla7_ms") and r.get("mdla7_synth_ms")}
+
+
+def _run_compare_synth_fast(*,
+                            corpus_name: str,
+                            model_dir: Path,
+                            patterns: list[str],
+                            csv_path: Path,
+                            profile_html: str,
+                            profile_title: str,
+                            rerun_all: bool,
+                            no_html: bool,
+                            keep_bin: bool,
+                            microblock_metrics: bool) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    prior_full = {} if rerun_all else _load_prior_csv(csv_path)
+    prior_ok = {} if rerun_all else _load_prior_compare_results(csv_path)
+    if prior_ok:
+        print(f"  (cache: {len(prior_ok)} prior compare rows in {csv_path.name}; "
+              f"--rerun-all to ignore)", flush=True)
+
+    def _checkpoint(rows: list[dict]) -> None:
+        seen = {r["pattern"] for r in rows}
+        merged = list(rows)
+        for pat, prow in prior_full.items():
+            if pat not in seen:
+                merged.append(prow)
+        fields = [
+            "pattern",
+            "mdla7_ms",
+            "mdla7_synth_ms",
+            "synth_over_fast",
+            "status",
+            "synth_status",
+        ]
+        if microblock_metrics:
+            fields.extend([
+                "fuse_hit", "fuse_flows", "streamed_layers",
+                "mb_hit", "mb_count", "mb_layers", "mb_stages",
+            ])
+        with csv_path.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(merged)
+
+    try:
+        rel_model_dir = model_dir.relative_to(REPO_ROOT)
+    except ValueError:
+        rel_model_dir = model_dir
+    print(f"==== MDLA7 {corpus_name} synth/model fast compare: {len(patterns)} models "
+          f"(from {rel_model_dir}) ====", flush=True)
+
+    rows_out = []
+    t_total = time.time()
+    for i, pat in enumerate(patterns, 1):
+        cache_ok = (
+            pat in prior_ok and
+            (no_html or (
+                _report_exists_for(pat, model_dir, engine_model="model") and
+                _report_exists_for(pat, model_dir, engine_model="synth")
+            ))
+        )
+        if cache_ok:
+            cached = prior_ok[pat]
+            model_path = model_dir / f"{pat}.tflite"
+            mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
+            ratio = cached.get("synth_over_fast") or ""
+            ratio_suffix = f" synth/fast={float(ratio):.3f}" if ratio else ""
+            _row_print(f"[{i:>2}/{len(patterns)}] {_fit_cell(pat)} "
+                       f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
+                       f"synth={_ms_cell(cached.get('mdla7_synth_ms', ''))} "
+                       f"cached  ok/ok{ratio_suffix}")
+            row = {
+                "pattern": pat,
+                "mdla7_ms": cached.get("mdla7_ms", ""),
+                "mdla7_synth_ms": cached.get("mdla7_synth_ms", ""),
+                "synth_over_fast": cached.get("synth_over_fast", ""),
+                "status": cached.get("status", "ok"),
+                "synth_status": cached.get("synth_status", "ok"),
+            }
+            row.update(mb)
+            rows_out.append(row)
+            _checkpoint(rows_out)
+            continue
+
+        t0 = time.time()
+
+        def _progress(stage: str) -> None:
+            elapsed = time.time() - t0
+            _row_update(f"[{i:>2}/{len(patterns)}] {_fit_cell(pat)} "
+                        f"{'—':>10s}      ({elapsed:5.1f}s)  "
+                        f"running {stage}...")
+
+        _, ms, _, _, status, _, _ = run_one(
+            pat, model_dir, progress=_progress, fast_only=True,
+            skip_html=no_html, engine_model="model")
+        _, synth_ms, _, _, synth_status, _, _ = run_one(
+            pat, model_dir, progress=_progress, fast_only=True,
+            skip_html=no_html, engine_model="synth")
+
+        ratio = (synth_ms / ms) if ms and synth_ms is not None else None
+        elapsed = time.time() - t0
+        ratio_suffix = f" synth/fast={ratio:.3f}" if ratio is not None else ""
+        fast_cell = f"{ms:>10.3f} ms" if ms is not None else _ms_cell("")
+        synth_cell = f"{synth_ms:>10.3f} ms" if synth_ms is not None else _ms_cell("")
+        _row_print(f"[{i:>2}/{len(patterns)}] {_fit_cell(pat)} "
+                   f"fast={fast_cell} synth={synth_cell}  "
+                   f"({elapsed:5.1f}s)  {status}/{synth_status}{ratio_suffix}")
+
+        model_path = model_dir / f"{pat}.tflite"
+        mb = _microblock_metrics_for(model_path) if microblock_metrics else {}
+        row = {
+            "pattern": pat,
+            "mdla7_ms": f"{ms:.3f}" if ms is not None else "",
+            "mdla7_synth_ms": f"{synth_ms:.3f}" if synth_ms is not None else "",
+            "synth_over_fast": f"{ratio:.6f}" if ratio is not None else "",
+            "status": status,
+            "synth_status": synth_status,
+        }
+        row.update(mb)
+        rows_out.append(row)
+        _checkpoint(rows_out)
+
+        if not keep_bin:
+            canonical = _normalise_pattern(pat)
+            for bin_path in (_artefact_paths(model_path)["prog"],
+                             OUT_DIR / f"{canonical}.synth.bin"):
+                try:
+                    if bin_path.exists():
+                        bin_path.unlink()
+                except OSError:
+                    pass
+
+    n_fast = sum(1 for r in rows_out if r.get("mdla7_ms"))
+    n_synth = sum(1 for r in rows_out if r.get("mdla7_synth_ms"))
+    total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
+    total_synth_ms = sum(float(r["mdla7_synth_ms"]) for r in rows_out
+                         if r.get("mdla7_synth_ms"))
+    total_s = time.time() - t_total
+    print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
+          f"synth {n_synth}/{len(rows_out)} ran, "
+          f"sim total fast {total_ms:.1f} ms, synth {total_synth_ms:.1f} ms, "
+          f"wall {total_s:.0f}s ====", flush=True)
+    print(f"csv: {csv_path}", flush=True)
+    if not no_html:
+        _refresh_profile_index(profile_title, profile_html, csv_path)
+        print(f"html: {HERE / profile_html}", flush=True)
+
+
 def run_corpus(*,
                corpus_name: str,
                default_model_dir: Path,
@@ -250,6 +415,8 @@ def run_corpus(*,
                     help="engine timing model: current analytical model or synth-like EWE/POOL/TNPS")
     ap.add_argument("--synth-fast", action="store_true",
                     help="alias for --fast-only --engine-model=synth")
+    ap.add_argument("--compare-synth-fast", action="store_true",
+                    help="run fast mode with both engine-model=model and synth, then emit a combined comparison HTML")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
     ap.add_argument("--no-html", action="store_true",
@@ -260,6 +427,9 @@ def run_corpus(*,
     if args.synth_fast:
         args.fast_only = True
         args.engine_model = "synth"
+    if args.compare_synth_fast:
+        args.fast_only = True
+        args.engine_model = "model"
 
     OUT_DIR.mkdir(exist_ok=True)
     default_csv = Path(default_csv_out)
@@ -290,6 +460,23 @@ def run_corpus(*,
     if not MODEL_RUNNER.exists():
         raise SystemExit(f"mdla7_model_runner not built: {MODEL_RUNNER}\n"
                          f"  run `make -C systemc -s` from repo root")
+
+    if args.compare_synth_fast:
+        csv_path = _compare_csv_path(Path(default_csv_out), args.csv_out)
+        compare_html = _compare_html_name(profile_html)
+        _run_compare_synth_fast(
+            corpus_name=corpus_name,
+            model_dir=model_dir,
+            patterns=patterns,
+            csv_path=csv_path,
+            profile_html=compare_html,
+            profile_title=f"{profile_title} Synth/Fast Compare",
+            rerun_all=args.rerun_all,
+            no_html=args.no_html,
+            keep_bin=args.keep_bin,
+            microblock_metrics=microblock_metrics,
+        )
+        return
 
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)

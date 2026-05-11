@@ -336,7 +336,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
             progress("html fast")
         try:
             _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
-            if paths["html"].exists():
+            if paths["html"].exists() and paths["html"] != fast_html:
                 fast_html.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(paths["html"], fast_html)
         except Exception as e:

@@ -58,6 +58,8 @@ def load_metrics(paths: list[Path]) -> dict[str, dict[str, str]]:
                                row.get("conflict_ms") or "").strip()
                 mesh_ms = (row.get("mdla7_mesh_ms") or
                            row.get("mesh_ms") or "").strip()
+                synth_ms = (row.get("mdla7_synth_ms") or
+                            row.get("synth_ms") or "").strip()
                 if not pat:
                     continue
                 out[normalise_pattern(pat)] = {
@@ -66,6 +68,7 @@ def load_metrics(paths: list[Path]) -> dict[str, dict[str, str]]:
                     "ms": ms,
                     "conflict_ms": conflict_ms,
                     "mesh_ms": mesh_ms,
+                    "synth_ms": synth_ms,
                     "fuse_hit": (row.get("fuse_hit") or "").strip(),
                     "fuse_flows": (row.get("fuse_flows") or "").strip(),
                     "streamed_layers": (row.get("streamed_layers") or "").strip(),
@@ -145,8 +148,9 @@ def _row_from_metric(stem: str,
     csv_ms = metric.get("ms", "")
     csv_conflict_ms = metric.get("conflict_ms", "")
     csv_mesh_ms = metric.get("mesh_ms", "")
+    csv_synth_ms = metric.get("synth_ms", "")
     html = _first_existing_output_path(stem, ".html")
-    if html is None and not csv_ms:
+    if html is None and not csv_ms and not csv_synth_ms:
         return None
     our_ms = load_our_ms(stem, csv_ms)
     conflict_ms = None
@@ -161,10 +165,17 @@ def _row_from_metric(stem: str,
             mesh_ms = float(csv_mesh_ms)
         except ValueError:
             pass
+    synth_ms = None
+    if csv_synth_ms:
+        try:
+            synth_ms = float(csv_synth_ms)
+        except ValueError:
+            pass
     ratio = None
     conflict_ratio = None
     mesh_ratio = None
     mesh_conflict_ratio = None
+    synth_ratio = None
     try:
         cx_f = float(cx)
         if cx_f > 0 and our_ms is not None:
@@ -177,6 +188,8 @@ def _row_from_metric(stem: str,
         mesh_ratio = mesh_ms / our_ms
     if conflict_ms and conflict_ms > 0 and mesh_ms is not None:
         mesh_conflict_ratio = mesh_ms / conflict_ms
+    if our_ms and our_ms > 0 and synth_ms is not None:
+        synth_ratio = synth_ms / our_ms
     return {
         "pattern": pat,
         "stem": stem,
@@ -188,10 +201,12 @@ def _row_from_metric(stem: str,
         "our_ms": our_ms,
         "conflict_ms": conflict_ms,
         "mesh_ms": mesh_ms,
+        "synth_ms": synth_ms,
         "ratio": ratio,
         "conflict_ratio": conflict_ratio,
         "mesh_ratio": mesh_ratio,
         "mesh_conflict_ratio": mesh_conflict_ratio,
+        "synth_ratio": synth_ratio,
         "fuse_hit": metric.get("fuse_hit", ""),
         "fuse_flows": metric.get("fuse_flows", ""),
         "streamed_layers": metric.get("streamed_layers", ""),
@@ -226,6 +241,7 @@ def collect_rows(metrics_csvs: list[Path],
             continue
         metric = metrics.get(stem, {
             "pattern": stem, "cx": "", "ms": "", "conflict_ms": "", "mesh_ms": "",
+            "synth_ms": "",
             "fuse_hit": "", "fuse_flows": "", "streamed_layers": "",
             "mb_hit": "", "mb_count": "", "mb_layers": "", "mb_stages": "",
         })
@@ -234,6 +250,7 @@ def collect_rows(metrics_csvs: list[Path],
         csv_ms = metric.get("ms", "")
         csv_conflict_ms = metric.get("conflict_ms", "")
         csv_mesh_ms = metric.get("mesh_ms", "")
+        csv_synth_ms = metric.get("synth_ms", "")
         our_ms = load_our_ms(stem, csv_ms)
         conflict_ms = None
         if csv_conflict_ms:
@@ -247,10 +264,17 @@ def collect_rows(metrics_csvs: list[Path],
                 mesh_ms = float(csv_mesh_ms)
             except ValueError:
                 pass
+        synth_ms = None
+        if csv_synth_ms:
+            try:
+                synth_ms = float(csv_synth_ms)
+            except ValueError:
+                pass
         ratio = None
         conflict_ratio = None
         mesh_ratio = None
         mesh_conflict_ratio = None
+        synth_ratio = None
         try:
             cx_f = float(cx)
             if cx_f > 0 and our_ms is not None:
@@ -263,6 +287,8 @@ def collect_rows(metrics_csvs: list[Path],
             mesh_ratio = mesh_ms / our_ms
         if conflict_ms and conflict_ms > 0 and mesh_ms is not None:
             mesh_conflict_ratio = mesh_ms / conflict_ms
+        if our_ms and our_ms > 0 and synth_ms is not None:
+            synth_ratio = synth_ms / our_ms
         rows.append({
             "pattern": pat,
             "stem": stem,
@@ -274,10 +300,12 @@ def collect_rows(metrics_csvs: list[Path],
             "our_ms": our_ms,
             "conflict_ms": conflict_ms,
             "mesh_ms": mesh_ms,
+            "synth_ms": synth_ms,
             "ratio": ratio,
             "conflict_ratio": conflict_ratio,
             "mesh_ratio": mesh_ratio,
             "mesh_conflict_ratio": mesh_conflict_ratio,
+            "synth_ratio": synth_ratio,
             "fuse_hit": metric.get("fuse_hit", ""),
             "fuse_flows": metric.get("fuse_flows", ""),
             "streamed_layers": metric.get("streamed_layers", ""),
@@ -323,6 +351,8 @@ def main() -> None:
     show_mb = any(r.get("fuse_hit") or r.get("mb_hit") or r.get("mb_count") or r.get("mb_stages")
                   for r in rows)
     show_mb_json = "true" if show_mb else "false"
+    show_synth = any(r.get("synth_ms") for r in rows)
+    show_synth_json = "true" if show_synth else "false"
     default_sort_key = "ratio" if show_cx else "mesh_ratio"
     default_sort_key_json = json.dumps(default_sort_key)
     cx_headers = """
@@ -333,6 +363,9 @@ def main() -> None:
       <th><button class="sort-btn" data-sort-key="fuse_hit">fuse <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mb_count">mb <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="mb_stages">mb stages <span class="sort-mark"></span></button></th>""" if show_mb else ""
+    synth_headers = """
+      <th class="num"><button class="sort-btn" data-sort-key="synth_ms">synth_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="synth_ratio">synth/fast <span class="sort-mark"></span></button></th>""" if show_synth else ""
     live_csv = DEFAULT_REGRESSION_CSV
     for path in reversed(metrics_csvs):
         if path.parent.resolve() == OUT_DIR.resolve():
@@ -397,6 +430,7 @@ tr:hover td {{ background:#f4f7fb; }}
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
+{synth_headers}
 {ratio_headers}
 {mb_headers}
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
@@ -413,6 +447,7 @@ const LIVE_CSV = {live_csv_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
 const SHOW_CX = {show_cx_json};
 const SHOW_MB = {show_mb_json};
+const SHOW_SYNTH = {show_synth_json};
 const DEFAULT_SORT_KEY = {default_sort_key_json};
 let rows = EMBEDDED_ROWS.slice();
 let sortState = {{ key: DEFAULT_SORT_KEY, dir: "desc", default: true }};
@@ -470,6 +505,18 @@ function fmtMeshConflictRatio(r) {{
   const n = meshConflictRatioOf(r);
   return n === null ? "" : n.toFixed(2);
 }}
+function synthRatioOf(r) {{
+  if (r.synth_ratio !== null && r.synth_ratio !== undefined && r.synth_ratio !== "") {{
+    const n = Number(r.synth_ratio);
+    if (Number.isFinite(n)) return n;
+  }}
+  const synth = Number(r.synth_ms), fast = Number(r.our_ms);
+  return Number.isFinite(synth) && Number.isFinite(fast) && fast > 0 ? synth / fast : null;
+}}
+function fmtSynthRatio(r) {{
+  const n = synthRatioOf(r);
+  return n === null ? "" : n.toFixed(2);
+}}
 function sortRows(xs) {{
   if (!sortState.default) {{
     const key = sortState.key;
@@ -480,6 +527,7 @@ function sortRows(xs) {{
       if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
           key === "mesh_ratio" || key === "mesh_conflict_ratio" ||
+          key === "synth_ms" || key === "synth_ratio" ||
           key === "mb_count") {{
         const an = numOrNull(av), bn = numOrNull(bv);
         if (an !== null && bn !== null) cmp = an - bn;
@@ -510,9 +558,11 @@ function sortValue(r, key) {{
   if (key === "conflict_ratio") return conflictRatioOf(r);
   if (key === "mesh_ratio") return meshRatioOf(r);
   if (key === "mesh_conflict_ratio") return meshConflictRatioOf(r);
+  if (key === "synth_ratio") return synthRatioOf(r);
   if (key === "our_ms") return r.our_ms;
   if (key === "conflict_ms") return r.conflict_ms;
   if (key === "mesh_ms") return r.mesh_ms;
+  if (key === "synth_ms") return r.synth_ms;
   if (key === "fuse_hit") return r.fuse_hit || "";
   if (key === "mb_count") return r.mb_count;
   if (key === "mb_stages") return r.mb_stages || "";
@@ -544,6 +594,7 @@ function render() {{
   for (const r of sortRows(rows.slice())) {{
     const parts = [r.pattern, r.stem || "",
                    fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   fmtMs(r.synth_ms), fmtSynthRatio(r),
                    r.fuse_hit || "", r.fuse_flows || "", r.streamed_layers || "",
                    r.mb_count || "", r.mb_stages || "",
                    fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
@@ -557,6 +608,7 @@ function render() {{
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` +
+      (SHOW_SYNTH ? `<td class="num">${{esc(fmtMs(r.synth_ms))}}</td><td class="num">${{esc(fmtSynthRatio(r))}}</td>` : "") +
       (SHOW_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
       (SHOW_MB ? `<td>${{esc(r.fuse_hit || "")}}</td><td class="num">${{esc(r.mb_count || "")}}</td><td>${{esc(r.mb_stages || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtConflictRatio(r))}}</td>` +
@@ -588,6 +640,7 @@ function csvParse(text) {{
       ms: row.mdla7_ms || "",
       conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
       mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || "",
+      synth_ms: row.mdla7_synth_ms || row.synth_ms || "",
       fuse_hit: row.fuse_hit || "",
       fuse_flows: row.fuse_flows || "",
       streamed_layers: row.streamed_layers || "",
@@ -623,6 +676,7 @@ async function refreshFromOutput() {{
       let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
       const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
       const meshMs = cx[stem] && cx[stem].mesh_ms ? Number(cx[stem].mesh_ms) : null;
+      const synthMs = cx[stem] && cx[stem].synth_ms ? Number(cx[stem].synth_ms) : null;
       try {{
         const p = await fetch(`output/${{stem}}.profile.json`);
         if (p.ok) {{
@@ -639,10 +693,12 @@ async function refreshFromOutput() {{
         our_ms: ms,
         conflict_ms: conflictMs,
         mesh_ms: meshMs,
+        synth_ms: synthMs,
         ratio: null,
         conflict_ratio: null,
         mesh_ratio: null,
         mesh_conflict_ratio: null,
+        synth_ratio: null,
         fuse_hit: (cx[stem] && cx[stem].fuse_hit) || "",
         fuse_flows: (cx[stem] && cx[stem].fuse_flows) || "",
         streamed_layers: (cx[stem] && cx[stem].streamed_layers) || "",
