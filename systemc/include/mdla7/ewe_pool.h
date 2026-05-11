@@ -447,8 +447,9 @@ SC_MODULE(EweEngine) {
             const uint64_t lanes = ewe_lanes_for_dtype(last_dtype);
             // v8.30: binary ADD/MUL/SUB share the same dispatch shape (two
             // input tensors + 48-byte params) — only the math differs. Unary
-            // HARD_SWISH/GELU mirror the softmax shape (single input + 8-byte
-            // clamp params) but use compute_fp-style nonlinearities.
+            // activations use one input plus clamp params. HARD_SWISH is a
+            // fused EWE pipeline in RTL timing; GELU/LOGISTIC keep their
+            // multi-pass nonlinear estimates.
             if (e.subtype == ES_ADD || e.subtype == ES_MUL || e.subtype == ES_SUB) {
                 const char* nm = (e.subtype == ES_MUL) ? "mul"
                                : (e.subtype == ES_SUB) ? "sub" : "add";
@@ -485,7 +486,9 @@ SC_MODULE(EweEngine) {
                     run_unary_fp(e, elems, e.subtype);
                 }
                 if (is_rtl_style(engine_model)) {
-                    const uint64_t passes = (e.subtype == ES_GELU) ? 6 : 4;
+                    const uint64_t passes = (e.subtype == ES_GELU) ? 6
+                                          : (e.subtype == ES_LOGISTIC) ? 4
+                                          : 1;
                     rtl_run_unary(elems, lanes, passes);
                 } else {
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
