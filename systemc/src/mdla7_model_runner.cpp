@@ -659,6 +659,7 @@ int sc_main(int argc, char* argv[]) {
 
     struct MicroblockWavefrontResult {
         uint8_t done_tag = 0;
+        uint8_t load_done_tag = 0;
         uint64_t dram_r = 0, dram_w = 0, sram_r = 0, sram_w = 0;
         bool streamed = false;
         std::vector<uint8_t> mb_done_tags;
@@ -722,6 +723,7 @@ int sc_main(int argc, char* argv[]) {
                 mark_stream(b, tc.layer_idx, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
             }
             program.push_back(b);
+            r.load_done_tag = b_tag;
 
             r.dram_r += a_charged + b_charged;
             r.sram_w += uint64_t(mb.bytes);
@@ -1031,6 +1033,7 @@ int sc_main(int argc, char* argv[]) {
     uint32_t fuse_prev_l1_out_addr  = 0;
     uint32_t fuse_prev_l1_out_size  = 0;
     uint8_t  fuse_prev_done_tag     = 0;
+    uint8_t  fuse_prev_udma_done_tag = 0;
     uint16_t fuse_prev_out_h = 0, fuse_prev_out_w = 0, fuse_prev_out_c = 0;
     uint16_t fuse_prev_dtype = 0;
     bool     fuse_prev_single_tile  = false;
@@ -1047,6 +1050,7 @@ int sc_main(int argc, char* argv[]) {
         fuse_prev_is_logistic_ewe = false;
         fuse_prev_live_a_size = fuse_prev_live_b_size = fuse_prev_live_o_size = 0;
         fuse_prev_logistic_input_size = 0;
+        fuse_prev_udma_done_tag = 0;
         fuse_prev_mb_done_tags.clear();
     };
 
@@ -4953,29 +4957,37 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             const uint32_t params_l1 = 0;
             uint32_t slot0 = align64(64u);
-            auto choose_slot0_for = [&](uint32_t vectors, uint32_t& chosen) -> bool {
+            const uint32_t desired_slots = input_a_preloaded ? 5u : 2u;
+            uint32_t slot_count = 2;
+            auto choose_slot0_for = [&](uint32_t vectors, uint32_t& chosen,
+                                        uint32_t& chosen_slots) -> bool {
                 const uint32_t bytes = vectors * vec_bytes;
                 const uint32_t seg = align64(bytes);
-                const uint64_t span = 2ull * 4ull * seg;
                 std::array<uint32_t, 2> candidates = {
                     align64(64u),
                     input_a_preloaded
                         ? align64(fuse_prev_l1_out_addr + fuse_prev_l1_out_size)
                         : align64(64u),
                 };
-                for (uint32_t cand : candidates) {
-                    if (uint64_t(cand) + span + safety > L1_BUDGET)
-                        continue;
-                    if (input_a_preloaded &&
-                        ranges_overlap(cand, uint32_t(span),
-                                       fuse_prev_l1_out_addr, fuse_prev_l1_out_size))
-                        continue;
-                    chosen = cand;
-                    return true;
+                for (uint32_t slots = desired_slots; slots >= 2; --slots) {
+                    const uint64_t span = uint64_t(slots) * 4ull * seg;
+                    for (uint32_t cand : candidates) {
+                        if (uint64_t(cand) + span + safety > L1_BUDGET)
+                            continue;
+                        if (input_a_preloaded &&
+                            ranges_overlap(cand, uint32_t(span),
+                                           fuse_prev_l1_out_addr, fuse_prev_l1_out_size))
+                            continue;
+                        chosen = cand;
+                        chosen_slots = slots;
+                        return true;
+                    }
+                    if (slots == 2)
+                        break;
                 }
                 return false;
             };
-            while (tile_vecs > 0 && !choose_slot0_for(tile_vecs, slot0))
+            while (tile_vecs > 0 && !choose_slot0_for(tile_vecs, slot0, slot_count))
                 --tile_vecs;
             if (tile_vecs == 0)
                 return false;
@@ -4994,14 +5006,26 @@ int sc_main(int argc, char* argv[]) {
             auto slot_s = [&](uint32_t slot) { return slot_base(slot) + 3u * seg; };
 
             const uint8_t params_tag = alloc_tag();
-            program.push_back(make_udma(B.dram_wgt + B.wgt_size - 48,
-                                        params_l1, 48, /*dir*/ 0, params_tag));
+            {
+                Microblock params_mb{};
+                params_mb.id = 0;
+                params_mb.slot = 0;
+                const uint8_t prefetch_wait =
+                    (input_a_preloaded && fuse_prev_is_binary_ewe)
+                        ? fuse_prev_udma_done_tag
+                        : 0;
+                Descriptor pd = make_udma(B.dram_wgt + B.wgt_size - 48,
+                                          params_l1, 48, /*dir*/ 0,
+                                          params_tag, prefetch_wait);
+                if (input_a_preloaded)
+                    mark_stream(pd, i, params_mb, SMF_LOAD_B);
+                program.push_back(pd);
+            }
             acc[i].dram_r += 48;
             acc[i].sram_w += 48;
             ++udma_count_so_far;
             udma_count_at_layer_end[i] = udma_count_so_far;
 
-            uint8_t slot_free[2] = {0, 0};
             uint8_t last_ewe_tag = params_tag;
             uint8_t last_softmax_tag = params_tag;
             size_t last_udma_i = udma_count_so_far;
@@ -5015,7 +5039,144 @@ int sc_main(int argc, char* argv[]) {
             tiles_oc_per_layer[i] = 1;
             tiles_oc_per_layer[i + 1] = 1;
 
-            for (uint64_t row = 0, mb_id = 0; row < vec_rows; row += tile_vecs, ++mb_id) {
+            if (input_a_preloaded) {
+                struct BinarySoftmaxMb {
+                    Microblock mb{};
+                    uint32_t rows = 0;
+                    uint32_t elems = 0;
+                    uint32_t bytes = 0;
+                    uint32_t off = 0;
+                    uint8_t b_tag = 0;
+                    uint8_t a_wait_tag = 0;
+                    uint8_t e_tag = 0;
+                    uint8_t sm_tag = 0;
+                    uint8_t st_tag = 0;
+                    bool final_mb = false;
+                };
+                std::vector<BinarySoftmaxMb> mbs;
+                mbs.reserve(size_t(tile_count));
+                const uint64_t prev_mb_bytes =
+                    (fuse_prev_is_binary_ewe && !fuse_prev_mb_done_tags.empty())
+                        ? (uint64_t(B.in_size) + fuse_prev_mb_done_tags.size() - 1) /
+                              fuse_prev_mb_done_tags.size()
+                        : 0;
+                for (uint64_t row = 0, mb_id = 0; row < vec_rows; row += tile_vecs, ++mb_id) {
+                    const uint32_t rows_this =
+                        uint32_t(std::min<uint64_t>(tile_vecs, vec_rows - row));
+                    const uint32_t elems = rows_this * vec_elems;
+                    const uint32_t bytes = elems * elem;
+                    BinarySoftmaxMb t{};
+                    t.mb.id = uint16_t(std::min<uint64_t>(mb_id, 65535));
+                    t.mb.slot = uint8_t(uint32_t(mb_id) % slot_count);
+                    t.mb.elem_off = row * vec_elems;
+                    t.mb.rows = rows_this;
+                    t.mb.elems = elems;
+                    t.mb.bytes = bytes;
+                    t.rows = rows_this;
+                    t.elems = elems;
+                    t.bytes = bytes;
+                    t.off = uint32_t(row * vec_bytes);
+                    t.b_tag = alloc_tag();
+                    t.a_wait_tag = fuse_prev_done_tag;
+                    if (prev_mb_bytes > 0) {
+                        const uint64_t end_byte = uint64_t(t.off) + t.bytes - 1;
+                        const size_t prev_idx = std::min<size_t>(
+                            fuse_prev_mb_done_tags.size() - 1,
+                            size_t(end_byte / prev_mb_bytes));
+                        if (fuse_prev_mb_done_tags[prev_idx])
+                            t.a_wait_tag = fuse_prev_mb_done_tags[prev_idx];
+                    }
+                    t.e_tag = alloc_tag();
+                    t.sm_tag = alloc_tag();
+                    t.st_tag = suppress_softmax_store ? 0 : alloc_tag();
+                    t.final_mb = (row + rows_this >= vec_rows);
+                    mbs.push_back(t);
+                }
+
+                std::vector<uint8_t> slot_free(slot_count, 0);
+                std::vector<bool> b_loaded(mbs.size(), false);
+                auto emit_b_load = [&](size_t idx, uint8_t wait_tag) {
+                    auto& t = mbs[idx];
+                    auto [bd, b_charged] = make_binary_b_load(
+                        B, uint32_t(B.dram_wgt + t.off), slot_b(t.mb.slot),
+                        t.bytes, t.b_tag, wait_tag);
+                    mark_stream(bd, i, t.mb, SMF_LOAD_B | (t.final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(bd);
+                    acc[i].dram_r += b_charged;
+                    acc[i].sram_w += t.bytes;
+                    ++udma_count_so_far;
+                    last_udma_i = udma_count_so_far;
+                    b_loaded[idx] = true;
+                };
+
+                const size_t initial_loads = std::min<size_t>(slot_count, mbs.size());
+                for (size_t idx = 0; idx < initial_loads; ++idx)
+                    emit_b_load(idx, params_tag);
+
+                for (size_t idx = 0; idx < mbs.size(); ++idx) {
+                    auto& t = mbs[idx];
+                    const uint32_t slot = t.mb.slot;
+                    const uint32_t a_l1 = uint32_t(fuse_prev_l1_out_addr + t.off);
+
+                    LayerMeta tile_B = B;
+                    tile_B.in_h = 1;
+                    tile_B.in_w = 1;
+                    tile_B.in_c = uint16_t(t.elems);
+                    tile_B.out_h = 1;
+                    tile_B.out_w = 1;
+                    tile_B.out_c = uint16_t(t.elems);
+                    Descriptor ed = make_ewe_add(tile_B, a_l1, slot_b(slot),
+                                                 slot_e(slot), params_l1,
+                                                 t.b_tag, t.a_wait_tag, t.e_tag);
+                    mark_stream(ed, i, t.mb, SMF_COMPUTE | (t.final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(ed);
+                    acc[i].sram_r += 2ull * t.bytes;
+                    acc[i].sram_w += t.bytes;
+                    ++ewe_count_so_far;
+                    last_ewe_i = ewe_count_so_far;
+                    last_ewe_tag = t.e_tag;
+
+                    LayerMeta tile_S = S;
+                    tile_S.in_h = uint16_t(t.rows);
+                    tile_S.in_w = 1;
+                    tile_S.in_c = uint16_t(vec_elems);
+                    tile_S.out_h = uint16_t(t.rows);
+                    tile_S.out_w = 1;
+                    tile_S.out_c = uint16_t(vec_elems);
+                    Descriptor sm = make_softmax(tile_S, slot_e(slot), slot_s(slot),
+                                                 t.e_tag, t.sm_tag);
+                    mark_stream(sm, i + 1, t.mb,
+                                SMF_COMPUTE | (t.final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(sm);
+                    acc[i + 1].sram_r += t.bytes;
+                    acc[i + 1].sram_w += t.bytes;
+                    ++ewe_count_so_far;
+                    last_ewe_s = ewe_count_so_far;
+
+                    if (suppress_softmax_store) {
+                        slot_free[slot] = t.sm_tag;
+                        last_softmax_tag = t.sm_tag;
+                    } else {
+                        Descriptor wd = make_udma(slot_s(slot), uint32_t(S.dram_out + t.off),
+                                                  t.bytes, /*dir*/ 1, t.st_tag, t.sm_tag);
+                        mark_stream(wd, i + 1, t.mb,
+                                    SMF_STORE | (t.final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(wd);
+                        acc[i + 1].sram_r += t.bytes;
+                        acc[i + 1].dram_w += t.bytes;
+                        ++udma_count_so_far;
+                        last_udma_s = udma_count_so_far;
+                        slot_free[slot] = t.st_tag;
+                        last_softmax_tag = t.st_tag;
+                    }
+
+                    const size_t next_idx = idx + slot_count;
+                    if (next_idx < mbs.size() && !b_loaded[next_idx])
+                        emit_b_load(next_idx, slot_free[slot]);
+                }
+            } else {
+                uint8_t slot_free[2] = {0, 0};
+                for (uint64_t row = 0, mb_id = 0; row < vec_rows; row += tile_vecs, ++mb_id) {
                 const uint32_t rows_this =
                     uint32_t(std::min<uint64_t>(tile_vecs, vec_rows - row));
                 const uint32_t elems = rows_this * vec_elems;
@@ -5031,27 +5192,23 @@ int sc_main(int argc, char* argv[]) {
                 mb.elems = elems;
                 mb.bytes = bytes;
 
-                const uint8_t a_tag = input_a_preloaded ? fuse_prev_done_tag : alloc_tag();
+                const uint8_t a_tag = alloc_tag();
                 const uint8_t b_tag = alloc_tag();
                 const uint8_t e_tag = alloc_tag();
                 const uint8_t sm_tag = alloc_tag();
                 const uint8_t st_tag = suppress_softmax_store ? 0 : alloc_tag();
                 const uint8_t wait_slot = slot_free[slot] ? slot_free[slot] : params_tag;
 
-                const uint32_t a_l1 = input_a_preloaded
-                    ? uint32_t(fuse_prev_l1_out_addr + off)
-                    : slot_a(slot);
-                if (!input_a_preloaded) {
-                    auto [ad, a_charged] = make_act_load(B, uint32_t(B.dram_in + off),
-                                                         a_l1, bytes,
-                                                         a_tag, wait_slot);
-                    mark_stream(ad, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
-                    program.push_back(ad);
-                    acc[i].dram_r += a_charged;
-                    acc[i].sram_w += bytes;
-                    ++udma_count_so_far;
-                    last_udma_i = udma_count_so_far;
-                }
+                const uint32_t a_l1 = slot_a(slot);
+                auto [ad, a_charged] = make_act_load(B, uint32_t(B.dram_in + off),
+                                                     a_l1, bytes,
+                                                     a_tag, wait_slot);
+                mark_stream(ad, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                program.push_back(ad);
+                acc[i].dram_r += a_charged;
+                acc[i].sram_w += bytes;
+                ++udma_count_so_far;
+                last_udma_i = udma_count_so_far;
 
                 auto [bd, b_charged] = make_binary_b_load(B, uint32_t(B.dram_wgt + off),
                                                            slot_b(slot), bytes,
@@ -5113,6 +5270,7 @@ int sc_main(int argc, char* argv[]) {
                     slot_free[slot] = st_tag;
                     last_softmax_tag = st_tag;
                 }
+            }
             }
 
             udma_w_skipped[i] = true;
@@ -9762,6 +9920,7 @@ int sc_main(int argc, char* argv[]) {
 	                    (force_streamed_binary_wavefront || force_fused_binary_wavefront) &&
 	                    (full_output_top_one_row <= L1_BUDGET);
 	                std::vector<uint8_t> emitted_mb_done_tags;
+                    uint8_t emitted_load_done_tag = 0;
 
                 if (tile_oh >= 1) {
                     // Per-tile loop along H.
@@ -9852,6 +10011,7 @@ int sc_main(int argc, char* argv[]) {
                     }
 	                    prev_st_tag = wr.done_tag;
 	                    emitted_mb_done_tags = wr.mb_done_tags;
+                        emitted_load_done_tag = wr.load_done_tag;
                     tiles_h_per_layer[i] = uint16_t((uint32_t(L.in_h) + tile_oh - 1) / tile_oh);
                     tiles_oc_per_layer[i] = 1;
                 } else {
@@ -9915,6 +10075,7 @@ int sc_main(int argc, char* argv[]) {
                     }
 	                    prev_st_tag = wr.done_tag;
 	                    emitted_mb_done_tags = wr.mb_done_tags;
+                        emitted_load_done_tag = wr.load_done_tag;
 	                    tiles_h_per_layer[i] = uint16_t((uint64_t(L.in_h) * L.in_w * L.in_c
 	                                                     + tile_elems - 1) / tile_elems);
                     tiles_oc_per_layer[i] = 1;
@@ -9944,6 +10105,7 @@ int sc_main(int argc, char* argv[]) {
                     fuse_prev_live_b_size   = 0;
                     fuse_prev_live_o_addr   = L1_OUT;
                     fuse_prev_live_o_size   = L.ref_size;
+                    fuse_prev_udma_done_tag = emitted_load_done_tag;
 	                    fuse_prev_mb_done_tags  = emitted_mb_done_tags;
                 } else {
                     // Multi-tile binary op: only the LAST tile's output sits in L1
@@ -9992,6 +10154,7 @@ int sc_main(int argc, char* argv[]) {
 
                     uint8_t slot_free_tag[2] = {0, 0};
                     uint8_t prev_tag = params_tag;
+                    uint8_t load_done_tag = params_tag;
                     uint32_t row_done = 0;
                     uint16_t mb_id = 0;
                     std::vector<uint8_t> mb_done_tags;
@@ -10014,6 +10177,7 @@ int sc_main(int argc, char* argv[]) {
                             slot_free_tag[mb.slot] ? slot_free_tag[mb.slot] : params_tag);
                         mark_stream(bd, i, mb, SMF_LOAD_B | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(bd);
+                        load_done_tag = b_tag;
                         acc[i].dram_r += b_charged;
                         acc[i].sram_w += mb.bytes;
 
@@ -10076,6 +10240,7 @@ int sc_main(int argc, char* argv[]) {
                     fuse_prev_live_b_size   = L.wgt_size;
                     fuse_prev_live_o_addr   = L1_OUT;
                     fuse_prev_live_o_size   = L.ref_size;
+                    fuse_prev_udma_done_tag = load_done_tag;
                     fuse_prev_mb_done_tags  = mb_done_tags;
                     if (fused_this_layer) chain_alt = fused_used_low ? 1 : 0;
                     else                  chain_alt = 0;
