@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from run_mdla6_pattern import (  # noqa: E402
     REPO_ROOT,
     MODEL_RUNNER,
     _artefact_paths,
+    _mode_paths,
     _normalise_pattern,
     _report_exists_for,
     run_one,
@@ -209,6 +211,131 @@ def _microblock_metrics_for(model_path: Path) -> dict[str, str]:
     }
 
 
+def _compare_paths(model_path: Path) -> dict[str, Path]:
+    return _mode_paths(model_path, "rtl_compare")
+
+
+def _compare_report_exists_for(pattern: str, model_dir: Path) -> bool:
+    canonical = _normalise_pattern(pattern)
+    return _compare_paths(model_dir / f"{canonical}.tflite")["html"].exists()
+
+
+def _ratio_cell(num: float | None, den: float | None) -> str:
+    if num is None or den is None or den <= 0:
+        return ""
+    return f"{num / den:.3f}"
+
+
+def _write_rtl_compare_html(model_path: Path,
+                            fast_html: Path,
+                            rtl_html: Path,
+                            fast_ms: float | None,
+                            rtl_ms: float | None,
+                            fast_status: str,
+                            rtl_status: str) -> Path:
+    out = _compare_paths(model_path)["html"]
+    ratio = _ratio_cell(rtl_ms, fast_ms)
+    fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
+    rtl_doc = rtl_html.read_text(errors="ignore") if rtl_html.exists() else ""
+
+    def ms(v: float | None) -> str:
+        return f"{v:.3f} ms" if v is not None else ""
+
+    doc = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDLA7 profile — {html.escape(model_path.name)} — fast/rtl</title>
+<style>
+body {{ margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       color:#222; background:#f6f7f9; }}
+header {{ position:sticky; top:0; z-index:10; background:#fff; border-bottom:1px solid #d8dde6;
+          padding:12px 18px; box-shadow:0 1px 4px rgba(0,0,0,.04); }}
+h1 {{ margin:0 0 8px; font-size:18px; }}
+.summary {{ display:flex; flex-wrap:wrap; gap:10px 18px; color:#495464; font-size:12px; }}
+.summary b {{ color:#222; }}
+.tabs {{ margin-top:10px; display:flex; gap:8px; }}
+button {{ border:1px solid #c8d0dc; background:#fff; border-radius:5px; padding:5px 10px; cursor:pointer; }}
+button.active {{ background:#1f5fa8; color:#fff; border-color:#1f5fa8; }}
+.pane {{ display:none; padding:0; }}
+.pane.active {{ display:block; }}
+iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; display:block; }}
+</style></head>
+<body>
+<header>
+  <h1>{html.escape(model_path.name)} — fast/rtl profile</h1>
+  <div class="summary">
+    <span><b>fast:</b> {html.escape(ms(fast_ms))} {html.escape(fast_status)}</span>
+    <span><b>rtl:</b> {html.escape(ms(rtl_ms))} {html.escape(rtl_status)}</span>
+    <span><b>rtl/fast:</b> {html.escape(ratio + 'x' if ratio else '')}</span>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-target="fast">fast</button>
+    <button class="tab" data-target="rtl">rtl</button>
+  </div>
+</header>
+<section id="fast" class="pane active">
+  <iframe title="fast profile" srcdoc="{html.escape(fast_doc, quote=True)}"></iframe>
+</section>
+<section id="rtl" class="pane">
+  <iframe title="rtl profile" srcdoc="{html.escape(rtl_doc, quote=True)}"></iframe>
+</section>
+<script>
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {{
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === btn.dataset.target));
+}}));
+</script>
+</body></html>
+"""
+    out.write_text(doc)
+    return out
+
+
+def _write_rtl_compare_index(title: str, html_out: str,
+                             rows: list[dict], csv_path: Path) -> None:
+    def ms(v: str) -> str:
+        return f"{float(v):.3f}" if v else ""
+
+    body = []
+    for row in rows:
+        pat = row.get("pattern", "")
+        link = f"output/{html.escape(pat)}.rtl_compare.html"
+        status = row.get("status", "")
+        body.append(
+            "<tr>"
+            f"<td><a href=\"{link}\">{html.escape(pat)}</a></td>"
+            f"<td style='text-align:right'>{html.escape(ms(row.get('fast_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(ms(row.get('rtl_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(row.get('rtl_over_fast', ''))}</td>"
+            f"<td>{html.escape(status)}</td>"
+            "</tr>"
+        )
+    doc = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>
+body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       max-width:1200px; margin:24px auto; padding:0 16px; color:#222; }}
+h1 {{ font-size:20px; margin-bottom:4px; }}
+.meta {{ color:#666; font-size:12px; margin-bottom:14px; }}
+table {{ border-collapse:collapse; width:100%; font-size:12px; }}
+th,td {{ border:1px solid #e4e4e4; padding:5px 8px; font-variant-numeric:tabular-nums; }}
+th {{ background:#f4f4f4; text-align:left; }}
+a {{ color:#1f5fa8; text-decoration:none; }}
+a:hover {{ text-decoration:underline; }}
+</style></head><body>
+<h1>{html.escape(title)}</h1>
+<div class="meta">csv: {html.escape(str(csv_path))}</div>
+<table>
+  <thead><tr><th>pattern</th><th>fast ms</th><th>rtl ms</th><th>rtl/fast</th><th>status</th></tr></thead>
+  <tbody>{''.join(body)}</tbody>
+</table>
+</body></html>
+"""
+    (HERE / html_out).write_text(doc)
+
+
 def _row_print(s: str) -> None:
     sys.stdout.write("\r\033[2K" + s + "\n")
     sys.stdout.flush()
@@ -250,6 +377,8 @@ def run_corpus(*,
                     help="engine timing model: analytical model or RTL-style EWE/POOL/TNPS")
     ap.add_argument("--rtl-fast", action="store_true",
                     help="alias for --fast-only --engine-model=rtl")
+    ap.add_argument("--compare-rtl-fast", action="store_true",
+                    help="run pure fast and rtl-fast, then emit combined CSV/HTML")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
     ap.add_argument("--no-html", action="store_true",
@@ -257,6 +386,9 @@ def run_corpus(*,
     ap.add_argument("--list", action="store_true",
                     help="list selected models and exit")
     args = ap.parse_args()
+    if args.compare_rtl_fast:
+        args.fast_only = True
+        args.engine_model = "model"
     if args.rtl_fast:
         args.fast_only = True
         args.engine_model = "rtl"
@@ -290,6 +422,128 @@ def run_corpus(*,
     if not MODEL_RUNNER.exists():
         raise SystemExit(f"mdla7_model_runner not built: {MODEL_RUNNER}\n"
                          f"  run `make -C systemc -s` from repo root")
+
+    if args.compare_rtl_fast:
+        compare_csv = default_csv.with_name(
+            f"{default_csv.stem}.rtl_compare{default_csv.suffix}")
+        csv_path = Path(args.csv_out)
+        if csv_path == default_csv:
+            csv_path = compare_csv
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        prior_full = {} if args.rerun_all else _load_prior_csv(csv_path)
+        prior_ok = {
+            p: r for p, r in prior_full.items()
+            if r.get("status") == "ok" and r.get("fast_ms") and r.get("rtl_ms")
+        }
+        profile_path = Path(profile_html)
+        compare_html = f"{profile_path.stem}.rtl_compare{profile_path.suffix}"
+
+        def _checkpoint_compare(rows: list[dict]) -> None:
+            seen = {r["pattern"] for r in rows}
+            merged = list(rows)
+            for pat, prow in prior_full.items():
+                if pat not in seen:
+                    merged.append(prow)
+            fields = [
+                "pattern", "fast_ms", "rtl_ms", "rtl_over_fast",
+                "status", "fast_status", "rtl_status",
+            ]
+            with csv_path.open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(merged)
+            if not args.no_html:
+                _write_rtl_compare_index(f"{profile_title} — fast vs rtl",
+                                         compare_html, merged, csv_path)
+
+        try:
+            rel_model_dir = model_dir.relative_to(REPO_ROOT)
+        except ValueError:
+            rel_model_dir = model_dir
+        print(f"==== MDLA7 {corpus_name} fast vs rtl regression: {len(patterns)} models "
+              f"(from {rel_model_dir}) ====", flush=True)
+        rows_out = []
+        t_total = time.time()
+        for i, pat in enumerate(patterns, 1):
+            if pat in prior_ok and (args.no_html or _compare_report_exists_for(pat, model_dir)):
+                cached = prior_ok[pat]
+                display_pat = _fit_cell(pat)
+                _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
+                           f"fast={_ms_cell(cached.get('fast_ms', ''))} "
+                           f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
+                           f"ratio={cached.get('rtl_over_fast', ''):>8s} cached  "
+                           f"{cached.get('status', 'ok')}")
+                rows_out.append(cached)
+                _checkpoint_compare(rows_out)
+                continue
+
+            t0 = time.time()
+
+            def _progress(stage: str) -> None:
+                elapsed = time.time() - t0
+                display_pat = _fit_cell(pat)
+                _row_update(f"[{i:>2}/{len(patterns)}] {display_pat} "
+                            f"{'—':>10s}      ({elapsed:5.1f}s)  "
+                            f"running {stage}...")
+
+            _, fast_ms, _, _, fast_status, _, _ = run_one(
+                pat, model_dir, progress=lambda s: _progress(f"fast {s}"),
+                fast_only=True, skip_html=args.no_html, engine_model="model")
+            _, rtl_ms, _, _, rtl_status, _, _ = run_one(
+                pat, model_dir, progress=lambda s: _progress(f"rtl {s}"),
+                fast_only=True, skip_html=args.no_html, engine_model="rtl")
+            ratio = _ratio_cell(rtl_ms, fast_ms)
+            status = "ok" if fast_status == "ok" and rtl_status == "ok" else f"{fast_status}/{rtl_status}"
+            model_path = model_dir / f"{_normalise_pattern(pat)}.tflite"
+            if not args.no_html and fast_ms is not None and rtl_ms is not None:
+                try:
+                    _write_rtl_compare_html(
+                        model_path,
+                        OUT_DIR / f"{model_path.stem}.fast.html",
+                        _mode_paths(model_path, "rtl")["html"],
+                        fast_ms, rtl_ms, fast_status, rtl_status)
+                except Exception as e:
+                    status = f"{status}; html-fail: {str(e)[:80]}"
+            elapsed = time.time() - t0
+            display_pat = _fit_cell(pat)
+            _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
+                       f"fast={f'{fast_ms:>10.3f} ms' if fast_ms is not None else f'{chr(8212):>10s}    '} "
+                       f"rtl={f'{rtl_ms:>10.3f} ms' if rtl_ms is not None else f'{chr(8212):>10s}    '} "
+                       f"ratio={ratio or '':>8s}  ({elapsed:5.1f}s)  {status}")
+            row = {
+                "pattern": pat,
+                "fast_ms": f"{fast_ms:.3f}" if fast_ms is not None else "",
+                "rtl_ms": f"{rtl_ms:.3f}" if rtl_ms is not None else "",
+                "rtl_over_fast": ratio,
+                "status": status,
+                "fast_status": fast_status,
+                "rtl_status": rtl_status,
+            }
+            rows_out.append(row)
+            _checkpoint_compare(rows_out)
+            if not args.keep_bin:
+                for bin_path in (
+                    _artefact_paths(model_path)["prog"],
+                    _mode_paths(model_path, "rtl")["prog"],
+                    _mode_paths(model_path, "rtl_compare")["prog"],
+                ):
+                    try:
+                        if bin_path.exists():
+                            bin_path.unlink()
+                    except OSError:
+                        pass
+
+        n_both = sum(1 for r in rows_out if r.get("fast_ms") and r.get("rtl_ms"))
+        total_fast = sum(float(r["fast_ms"]) for r in rows_out if r.get("fast_ms"))
+        total_rtl = sum(float(r["rtl_ms"]) for r in rows_out if r.get("rtl_ms"))
+        total_s = time.time() - t_total
+        print(f"\n==== summary: compared {n_both}/{len(rows_out)}, "
+              f"fast total {total_fast:.1f} ms, rtl total {total_rtl:.1f} ms, "
+              f"wall {total_s:.0f}s ====", flush=True)
+        print(f"csv: {csv_path}", flush=True)
+        if not args.no_html:
+            print(f"html: {HERE / compare_html}", flush=True)
+        return
 
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)

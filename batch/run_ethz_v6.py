@@ -12,6 +12,7 @@ Usage:
     ./batch/run_ethz_v6.py --rerun-all
     ./batch/run_ethz_v6.py --fast-only
     ./batch/run_ethz_v6.py --rtl-fast
+    ./batch/run_ethz_v6.py --compare-rtl-fast
     ./batch/run_ethz_v6.py --fast-only --engine-model rtl
     ./batch/run_ethz_v6.py --pattern-order-csv other_order.csv
 """
