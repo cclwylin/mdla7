@@ -346,26 +346,25 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
+                  << " program.bin [--quiet] [--l1-timing=fast|rtl]"
                   << " [--engine-model=model|rtl] [--no-microblock]\n";
         return 2;
     }
     bool quiet = false;
     bool enable_microblocks = true;
-    L1TimingMode l1_timing_mode = L1TimingMode::FastEstimate;
+    L1TimingMode l1_timing_mode = L1TimingMode::Fast;
     EngineModel engine_model = EngineModel::Analytical;
     for (int ai = 2; ai < argc; ++ai) {
         const std::string arg = argv[ai];
         if (arg == "--quiet") {
             quiet = true;
         } else if (arg == "--l1-timing=fast" || arg == "--l1-fast") {
-            l1_timing_mode = L1TimingMode::FastEstimate;
-        } else if (arg == "--l1-timing=conflict" || arg == "--l1-conflict") {
-            l1_timing_mode = L1TimingMode::PortConflict;
-        } else if (arg == "--l1-timing=mesh" || arg == "--l1-mesh") {
-            l1_timing_mode = L1TimingMode::MeshConflict;
-        } else if (arg == "--l1-timing=mesh-opt" || arg == "--l1-mesh-opt") {
-            l1_timing_mode = L1TimingMode::MeshOptimistic;
+            l1_timing_mode = L1TimingMode::Fast;
+        } else if (arg == "--l1-timing=rtl" || arg == "--l1-rtl" ||
+                   arg == "--l1-timing=conflict" || arg == "--l1-conflict" ||
+                   arg == "--l1-timing=mesh" || arg == "--l1-mesh" ||
+                   arg == "--l1-timing=mesh-opt" || arg == "--l1-mesh-opt") {
+            l1_timing_mode = L1TimingMode::Rtl;
         } else if (arg == "--no-microblock" || arg == "--disable-microblock") {
             enable_microblocks = false;
         } else if (arg == "--engine-model=model" || arg == "--engine-model=analytical") {
@@ -375,7 +374,7 @@ int sc_main(int argc, char* argv[]) {
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|conflict|mesh|mesh-opt]"
+                      << " program.bin [--quiet] [--l1-timing=fast|rtl]"
                       << " [--engine-model=model|rtl] [--no-microblock]\n";
             return 2;
         }
@@ -403,11 +402,7 @@ int sc_main(int argc, char* argv[]) {
               << N << " layers, v" << hdr->version << ", "
               << file.size() / 1024 << " KB)\n";
     if (!quiet) {
-        const char* timing_name =
-            (l1_timing_mode == L1TimingMode::MeshOptimistic) ? "mesh-opt" :
-            (l1_timing_mode == L1TimingMode::MeshConflict) ? "mesh" :
-            (l1_timing_mode == L1TimingMode::PortConflict) ? "conflict" : "fast";
-        std::cout << "  L1 timing: " << timing_name << "\n";
+        std::cout << "  L1 timing: " << l1_timing_mode_name(l1_timing_mode) << "\n";
         std::cout << "  engine model: " << engine_model_name(engine_model) << "\n";
     }
 
@@ -11102,8 +11097,7 @@ int sc_main(int argc, char* argv[]) {
               << peak_pct << "% (" << peak_eng << ")\n";
     std::cout.unsetf(std::ios::floatfield);
     const auto& l1_stats = sys.l1mesh.stats();
-    if (l1_timing_mode == L1TimingMode::MeshConflict ||
-        l1_timing_mode == L1TimingMode::MeshOptimistic) {
+    if (is_l1_rtl_style(l1_timing_mode)) {
         auto pns = [](double v) -> uint64_t { return uint64_t(v + 0.5); };
         std::cout << "  L1Mesh NoC: accesses=" << l1_stats.accesses
                   << " bytes=" << l1_stats.bytes
@@ -11167,8 +11161,7 @@ int sc_main(int argc, char* argv[]) {
         pf << "    \"util_avg_pct\":  " << std::fixed << std::setprecision(2) << overall_util << ",\n";
         pf << "    \"util_peak_pct\": " << peak_pct << ",\n";
         pf << "    \"util_peak_engine\": \"" << peak_eng << "\"";
-        if (l1_timing_mode == L1TimingMode::MeshConflict ||
-            l1_timing_mode == L1TimingMode::MeshOptimistic) {
+        if (is_l1_rtl_style(l1_timing_mode)) {
             pf << ",\n";
             pf << "    \"l1mesh\": {"
                << "\"accesses\": " << l1_stats.accesses

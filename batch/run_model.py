@@ -16,8 +16,7 @@ Usage:
   ./run_model.py --all                 # try every INT8 model
   ./run_model.py --layer N             # legacy: run only one CONV layer
   ./run_model.py <pattern> --fast-only # alias for --l1-timing fast
-  ./run_model.py <pattern> --l1-timing conflict
-  ./run_model.py <pattern> --l1-timing mesh
+  ./run_model.py <pattern> --l1-timing rtl
 """
 
 from __future__ import annotations
@@ -2276,9 +2275,9 @@ def main():
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="Keep .bin and .profile.json intermediates "
                          "(default: deleted on successful run; .csv/.png/.html stay)")
-    ap.add_argument("--l1-timing", choices=("fast", "conflict", "mesh"), default="fast",
-                    help="L1Mesh timing mode: fast aggregate estimate (default) "
-                         "or per-bank SRAM port conflict model, or 4x4 mesh router/link conflict model")
+    ap.add_argument("--l1-timing", choices=("fast", "rtl", "conflict", "mesh", "mesh-opt"), default="fast",
+                    help="L1Mesh timing mode: fast aggregate estimate (default) or RTL mesh+port KPI model. "
+                         "Legacy conflict/mesh/mesh-opt aliases map to rtl.")
     ap.add_argument("--engine-model", choices=("model", "rtl"), default="model",
                     help="Engine timing model for EWE/POOL/TNPS: analytical model or RTL-style model")
     ap.add_argument("--fast-only", action="store_true",
@@ -2286,6 +2285,8 @@ def main():
     args = ap.parse_args()
     if args.fast_only:
         args.l1_timing = "fast"
+    elif args.l1_timing in ("conflict", "mesh", "mesh-opt"):
+        args.l1_timing = "rtl"
     global _keep_intermediate
     _keep_intermediate = bool(args.keep_intermediate)
 

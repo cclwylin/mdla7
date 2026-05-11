@@ -76,7 +76,7 @@ public:
     // need >256 MB; default 256 MB segfaults on `sys.dram.write` out-of-bounds).
     Mdla7System(sc_core::sc_module_name nm,
                 std::size_t dram_bytes = 256 * 1024 * 1024,
-                L1TimingMode l1_timing_mode = L1TimingMode::FastEstimate,
+                L1TimingMode l1_timing_mode = L1TimingMode::Fast,
                 EngineModel engine_model = EngineModel::Analytical)
       : sc_module(nm),
         l1mesh ("l1mesh", L1MESH_BYTES, l1_timing_mode),

@@ -36,10 +36,10 @@
 // v8.32: L1Mesh SRAM runs at 1.3 GHz while the simulator cycle axis remains
 //        core-clock based at 1.9 GHz. One SRAM beat therefore costs
 //        1.9 / 1.3 core cycles.
-// v8.33: selectable L1 timing:
-//        FastEstimate = aggregate 16-bank bandwidth estimate (default);
-//        PortConflict = per-bank finish-array SRAM port conflict model.
-//        MeshConflict = dual-4x4 mesh edge/router/link + SRAM macro conflict model.
+// v8.33: selectable L1 timing.
+//        Fast = aggregate 16-bank bandwidth estimate (default).
+//        Rtl = dual-4x4 mesh route plus SRAM bank/port scheduling. Port
+//        conflict is reported as L1Mesh KPI, not selected as a separate mode.
 
 #include <systemc>
 #include <array>
@@ -59,11 +59,24 @@
 namespace mdla7 {
 
 enum class L1TimingMode {
-    FastEstimate,
-    PortConflict,
-    MeshConflict,
-    MeshOptimistic,
+    Fast,
+    Rtl,
+
+    // Backward-compatible aliases for old command-line scripts. All detailed
+    // L1 conflict modeling now goes through the single RTL mode.
+    FastEstimate = Fast,
+    PortConflict = Rtl,
+    MeshConflict = Rtl,
+    MeshOptimistic = Rtl,
 };
+
+inline bool is_l1_rtl_style(L1TimingMode mode) {
+    return mode == L1TimingMode::Rtl;
+}
+
+inline const char* l1_timing_mode_name(L1TimingMode mode) {
+    return is_l1_rtl_style(mode) ? "rtl" : "fast";
+}
 
 enum class EngineModel {
     Analytical,
@@ -158,7 +171,7 @@ public:
     SC_HAS_PROCESS(L1Mesh);
     L1Mesh(sc_core::sc_module_name nm,
            std::size_t bytes = L1MESH_BYTES,
-           L1TimingMode timing_mode = L1TimingMode::FastEstimate)
+           L1TimingMode timing_mode = L1TimingMode::Fast)
       : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {
         if (const char* p = std::getenv("MDLA7_L1_PAYLOAD_PROBE")) {
             if (*p) open_payload_probe(p);
@@ -269,11 +282,8 @@ private:
 
     sc_core::sc_time schedule_latency(uint32_t offset, uint32_t bytes,
                                       bool is_read) {
-        if (timing_mode_ == L1TimingMode::MeshConflict ||
-            timing_mode_ == L1TimingMode::MeshOptimistic)
+        if (is_l1_rtl_style(timing_mode_))
             return schedule_mesh_latency(offset, bytes, is_read);
-        else if (timing_mode_ == L1TimingMode::PortConflict)
-            return schedule_bank_latency(offset, bytes, is_read);
         return schedule_fast_latency(bytes);
     }
 
@@ -301,8 +311,7 @@ private:
         const uint64_t sram_cycles = std::max<uint64_t>(
             1, uint64_t((bytes + PAYLOAD_FAST_WINDOW_BYTES - 1) /
                         PAYLOAD_FAST_WINDOW_BYTES));
-        if (timing_mode_ == L1TimingMode::MeshConflict ||
-            timing_mode_ == L1TimingMode::MeshOptimistic) {
+        if (is_l1_rtl_style(timing_mode_)) {
             const uint64_t noc_cycles =
                 (display > sram_cycles + 1) ? (display - sram_cycles - 1) : 1;
             RtlPhaseTrace mesh;
@@ -310,9 +319,7 @@ private:
             mesh.cycles = noc_cycles;
             mesh.read_bytes = is_read ? bytes : 0;
             mesh.write_bytes = is_read ? 0 : bytes;
-            mesh.stall = timing_mode_ == L1TimingMode::MeshOptimistic
-                       ? "mesh_optimistic"
-                       : "mesh_route";
+            mesh.stall = "mesh_route";
             phases.push_back(mesh);
         }
 
@@ -508,7 +515,7 @@ private:
         ready = max_time(ready, start);
     }
 
-    // Mesh mode: 16 SRAM banks sit behind two parallel 4x4 mesh planes. The
+    // RTL mode: 16 SRAM banks sit behind two parallel 4x4 mesh planes. The
     // original model charged
     // every 16B stripe for edge + router + link + local latency in series.
     // That was intentionally conservative, but it made small transformer-like
@@ -521,7 +528,7 @@ private:
     //   * bank SRAM ports remain the throughput limiter;
     //   * edge/router/link/local resources are reserved for contention stats;
     //   * resource service time is pipelined and only prior contention delays
-    //     the caller. MeshOptimistic skips those NoC reservations entirely.
+    //     the caller.
     //
     // This is intentionally still an architectural timing model, not a
     // cycle-accurate packet network: current read/write calls do not carry the
@@ -536,8 +543,6 @@ private:
 
         stats_.accesses += 1;
         stats_.bytes += bytes;
-        const bool optimistic = timing_mode_ == L1TimingMode::MeshOptimistic;
-
         for (uint32_t chunk_off = offset; chunk_off < end; ) {
             const uint32_t chunk_end = std::min<uint32_t>(
                 end, chunk_off + PAYLOAD_SCHED_CHUNK_BYTES);
@@ -567,35 +572,33 @@ private:
                 ceil_div(chunk_bytes, N_BANKS * BYTES_PER_CYCLE);
 
             sc_core::sc_time ingress_ready = chunk_now;
-            if (!optimistic) {
-                // Four row ingress lanes per side and direction. Pick the
-                // earliest perimeter lane for this scheduling chunk.
-                sc_core::sc_time best_start;
-                bool have_best = false;
-                unsigned best_plane = 0;
-                unsigned best_side = 0;
-                unsigned best_row = 0;
-                const unsigned rw = is_read ? 0 : 1;
-                for (unsigned plane = 0; plane < MESH_PLANES; ++plane) {
-                    for (unsigned side = 0; side < 2; ++side) {
-                        for (unsigned row = 0; row < MESH_H; ++row) {
-                            const sc_core::sc_time finish = mesh_edge_finish_[plane][rw][side][row];
-                            const sc_core::sc_time start =
-                                (finish > chunk_now) ? finish : chunk_now;
-                            if (!have_best || start < best_start) {
-                                best_start = start;
-                                best_plane = plane;
-                                best_side = side;
-                                best_row = row;
-                                have_best = true;
-                            }
+            // Four row ingress lanes per side and direction. Pick the earliest
+            // perimeter lane for this scheduling chunk.
+            sc_core::sc_time best_start;
+            bool have_best = false;
+            unsigned best_plane = 0;
+            unsigned best_side = 0;
+            unsigned best_row = 0;
+            const unsigned rw = is_read ? 0 : 1;
+            for (unsigned plane = 0; plane < MESH_PLANES; ++plane) {
+                for (unsigned side = 0; side < 2; ++side) {
+                    for (unsigned row = 0; row < MESH_H; ++row) {
+                        const sc_core::sc_time finish = mesh_edge_finish_[plane][rw][side][row];
+                        const sc_core::sc_time start =
+                            (finish > chunk_now) ? finish : chunk_now;
+                        if (!have_best || start < best_start) {
+                            best_start = start;
+                            best_plane = plane;
+                            best_side = side;
+                            best_row = row;
+                            have_best = true;
                         }
                     }
                 }
-                ingress_ready = reserve_resource(
-                    mesh_edge_finish_[best_plane][rw][best_side][best_row], chunk_now,
-                    aggregate_beats, stats_.edge_wait_ns, stats_.edge_service_ns);
             }
+            ingress_ready = reserve_resource(
+                mesh_edge_finish_[best_plane][rw][best_side][best_row], chunk_now,
+                aggregate_beats, stats_.edge_wait_ns, stats_.edge_service_ns);
 
             sc_core::sc_time chunk_finish = chunk_now;
             for (uint32_t bank = 0; bank < N_BANKS; ++bank) {
@@ -606,15 +609,13 @@ private:
                 const uint32_t dst_y = bank / MESH_W;
                 sc_core::sc_time ready = ingress_ready;
 
-                if (!optimistic) {
-                    const uint32_t west_dist = dst_x;
-                    const uint32_t east_dist = (MESH_W - 1) - dst_x;
-                    const uint32_t src_x = (west_dist <= east_dist) ? 0 : (MESH_W - 1);
-                    const uint32_t src_y = dst_y;
-                    const unsigned plane = (bank + stats_.chunks) % MESH_PLANES;
-                    reserve_route(src_x, src_y, dst_x, dst_y, beats,
-                                  chunk_now, plane, ready);
-                }
+                const uint32_t west_dist = dst_x;
+                const uint32_t east_dist = (MESH_W - 1) - dst_x;
+                const uint32_t src_x = (west_dist <= east_dist) ? 0 : (MESH_W - 1);
+                const uint32_t src_y = dst_y;
+                const unsigned plane = (bank + stats_.chunks) % MESH_PLANES;
+                reserve_route(src_x, src_y, dst_x, dst_y, beats,
+                              chunk_now, plane, ready);
 
                 const double sram_service_before = stats_.sram_service_ns;
                 probe_payload_input(ready, is_read, bank, bank_addr[bank]);
