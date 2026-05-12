@@ -80,7 +80,8 @@ The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`,
 coverage is visible while the final datapath is still growing. `refB` is the
 number of full-ref walker bytes checked from the original `.bin`; `sramB` is the
 number of output SRAM image bytes checked by the SRAM walker. Layers with no
-final descriptor are reported as `SKIP`.
+final descriptor are reported as `SKIP`. The runner summary also prints suite
+totals for `refcrc`, `sramcrc`, `refB`, and `sramB`.
 
 `--emit-conv-partial-psum` expands INT8 CONV descriptors into partial-K output
 tiles and checks the output SRAM image CRC/count. The host program now

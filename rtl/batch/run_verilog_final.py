@@ -277,6 +277,10 @@ def main(argv: list[str]) -> int:
     failed = 0
     skipped = 0
     cache_hits = 0
+    total_refcrc = 0
+    total_sramcrc = 0
+    total_refbytes = 0
+    total_srambytes = 0
     build_done = args.no_build
     cache = load_cache(args.cache_file)
     cache_entries = cache.setdefault("entries", {})
@@ -312,6 +316,10 @@ def main(argv: list[str]) -> int:
             refcrc_bytes = int(cached.get("refbytes") or 0)
             sramcrc_bytes = int(cached.get("srambytes") or 0)
             done = int(cached.get("done") or 0)
+            total_refcrc += refcrc_count
+            total_sramcrc += sramcrc_count
+            total_refbytes += refcrc_bytes
+            total_srambytes += sramcrc_bytes
             if status == "SKIP":
                 skipped += 1
                 print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {done:5d} {0.0:7.2f}")
@@ -378,6 +386,10 @@ def main(argv: list[str]) -> int:
                 }
                 save_cache(args.cache_file, cache)
             continue
+        total_refcrc += refcrc_count
+        total_sramcrc += sramcrc_count
+        total_refbytes += refcrc_bytes
+        total_srambytes += sramcrc_bytes
 
         cmd = [str(smoke), "--test", "host", "--program", str(hex_path), "--ref-program", str(bin_path)]
         if build_done:
@@ -430,6 +442,10 @@ def main(argv: list[str]) -> int:
             print(f"     reason: {reason}")
 
     print(f"[run_verilog_final] summary: pass={passed} fail={failed} skip={skipped} total={len(bins)}")
+    print(
+        f"[run_verilog_final] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
+        f"refB={total_refbytes} sramB={total_srambytes}"
+    )
     if cache_hits:
         print(f"[run_verilog_final] cache_hits: {cache_hits}")
     return 0 if failed == 0 else 1
