@@ -127,6 +127,8 @@ module mdla7_top_final #(
     output     [31:0]           tnps_sample_src_byte_offset,
     output     [31:0]           tnps_sample_dst_byte_offset,
     output                      tnps_sample_valid,
+    output     [31:0]           l1mesh_crc,
+    output     [31:0]           l1mesh_crc_count,
     output     [31:0]           udma_sramcrc_crc,
     output     [31:0]           udma_sramcrc_count,
     output     [31:0]           tnps_sramcrc_crc,
@@ -192,6 +194,7 @@ module mdla7_top_final #(
     localparam [3:0] OP_POOL = 4'd4;
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
+    localparam [3:0] OP_L1CRC = 4'd7;
 
     localparam [2:0] ST_IDLE = 3'd0;
     localparam [2:0] ST_RUN  = 3'd1;
@@ -388,6 +391,8 @@ module mdla7_top_final #(
     wire [3:0] l1mesh_phase_id;
     wire [31:0] l1mesh_remaining_cycles;
     wire [DATA_WIDTH-1:0] l1mesh_rdata;
+    wire l1mesh_crc_busy;
+    wire l1mesh_crc_done;
     wire [1:0] route_source_x;
     wire [1:0] route_source_y;
     wire [1:0] route_tile_x;
@@ -418,24 +423,28 @@ module mdla7_top_final #(
     wire run_pool = (op_class_q == OP_POOL);
     wire run_udma = (op_class_q == OP_UDMA);
     wire run_tnps = (op_class_q == OP_TNPS);
+    wire run_l1crc = (op_class_q == OP_L1CRC);
     wire selected_start_ready = run_conv ? conv_start_ready :
                                 run_requant ? requant_start_ready :
                                 run_ewe ? ewe_start_ready :
                                 run_pool ? pool_start_ready :
                                 run_udma ? udma_start_ready :
-                                run_tnps ? tnps_start_ready : 1'b1;
+                                run_tnps ? tnps_start_ready :
+                                run_l1crc ? !l1mesh_crc_busy : 1'b1;
     wire selected_done_valid = run_conv ? conv_done_valid :
                                run_requant ? requant_done_valid :
                                run_ewe ? ewe_done_valid :
                                run_pool ? pool_done_valid :
                                run_udma ? udma_done_valid :
-                               run_tnps ? tnps_done_valid : 1'b1;
+                               run_tnps ? tnps_done_valid :
+                               run_l1crc ? l1mesh_crc_done : 1'b1;
     wire selected_busy = run_conv ? conv_busy :
                          run_requant ? requant_busy :
                          run_ewe ? ewe_busy :
                          run_pool ? pool_busy :
                          run_udma ? udma_busy :
-                         run_tnps ? tnps_busy : 1'b0;
+                         run_tnps ? tnps_busy :
+                         run_l1crc ? l1mesh_crc_busy : 1'b0;
     wire [3:0] selected_phase = run_conv ? conv_phase_id :
                                 run_requant ? requant_phase_id :
                                 run_ewe ? ewe_phase_id :
@@ -448,13 +457,14 @@ module mdla7_top_final #(
                                      run_pool ? pool_remaining_cycles :
                                      run_udma ? udma_remaining_cycles :
                                      run_tnps ? tnps_remaining_cycles : 32'd0;
-    wire l1_drained = !l1mgr_busy && !l1mgr_resp_valid && !l1mesh_busy && !l1mesh_resp_valid;
+    wire l1_drained = !l1mgr_busy && !l1mgr_resp_valid && !l1mesh_busy && !l1mesh_resp_valid && !l1mesh_crc_busy;
     wire conv_start = start_pending && run_conv;
     wire requant_start = start_pending && run_requant;
     wire ewe_start = start_pending && run_ewe;
     wire pool_start = start_pending && run_pool;
     wire udma_start = start_pending && run_udma;
     wire tnps_start = start_pending && run_tnps;
+    wire l1mesh_crc_start = start_pending && run_l1crc && !l1mesh_crc_busy;
 
     assign desc_ready = (state == ST_IDLE);
     assign done_valid = done_valid_q;
@@ -834,6 +844,13 @@ module mdla7_top_final #(
         .route_cycles(placement_route_cycles),
         .req_wdata(run_conv ? l1mesh_wdata_q : l1mgr_mesh_req_wdata),
         .req_wstrb(run_conv ? l1mesh_wstrb_q : l1mgr_mesh_req_wstrb),
+        .debug_crc_start(l1mesh_crc_start),
+        .debug_crc_addr(l1mesh_addr_q),
+        .debug_crc_count(bytes_q),
+        .debug_crc_busy(l1mesh_crc_busy),
+        .debug_crc_done(l1mesh_crc_done),
+        .debug_crc(l1mesh_crc),
+        .debug_crc_byte_count(l1mesh_crc_count),
         .resp_valid(l1mesh_resp_valid),
         .resp_ready(1'b1),
         .resp_rdata(l1mesh_rdata),

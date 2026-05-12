@@ -121,6 +121,8 @@ module Testbench_host_program;
     wire [3:0] active_op_class;
     wire [3:0] active_phase_id;
     wire [31:0] active_remaining_cycles;
+    wire [31:0] l1mesh_crc;
+    wire [31:0] l1mesh_crc_count;
     wire [31:0] udma_sramcrc_crc;
     wire [31:0] udma_sramcrc_count;
     wire [31:0] tnps_sample_src_byte_offset;
@@ -313,6 +315,8 @@ module Testbench_host_program;
         .active_phase_id(active_phase_id),
         .active_remaining_cycles(active_remaining_cycles),
         .placement_route_cycles(placement_route_cycles),
+        .l1mesh_crc(l1mesh_crc),
+        .l1mesh_crc_count(l1mesh_crc_count),
         .udma_sramcrc_crc(udma_sramcrc_crc),
         .udma_sramcrc_count(udma_sramcrc_count),
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
@@ -498,6 +502,8 @@ module Testbench_host_program;
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
+        .l1mesh_crc(l1mesh_crc),
+        .l1mesh_crc_count(l1mesh_crc_count),
         .udma_sramcrc_crc(udma_sramcrc_crc),
         .udma_sramcrc_count(udma_sramcrc_count),
         .tnps_sramcrc_crc(tnps_sramcrc_crc),

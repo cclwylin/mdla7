@@ -92,6 +92,8 @@ module Testbench_top_byte_movers;
     wire [3:0] active_op_class;
     wire [3:0] active_phase_id;
     wire [31:0] active_remaining_cycles;
+    wire [31:0] l1mesh_crc;
+    wire [31:0] l1mesh_crc_count;
     wire [31:0] tnps_sample_src_byte_offset;
     wire [31:0] tnps_sample_dst_byte_offset;
     wire tnps_sample_valid;
@@ -267,6 +269,8 @@ module Testbench_top_byte_movers;
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
+        .l1mesh_crc(l1mesh_crc),
+        .l1mesh_crc_count(l1mesh_crc_count),
         .udma_sramcrc_crc(udma_sramcrc_crc),
         .udma_sramcrc_count(udma_sramcrc_count),
         .tnps_sramcrc_crc(tnps_sramcrc_crc),

@@ -251,6 +251,10 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+        elif op == 7:
+            if words[off + 3] & (1 << 10):
+                sramcrc += 1
+                srambytes += words[off + 29]
         elif op == 1:
             conv += 1
             if words[off + 3] & (1 << 9):

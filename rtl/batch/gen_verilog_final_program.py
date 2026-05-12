@@ -18,6 +18,7 @@ OP_EWE = 3
 OP_POOL = 4
 OP_TNPS = 5
 OP_UDMA = 6
+OP_L1CRC = 7
 
 OK_CONV = {0, 1, 6}
 OK_POOL = {2, 3}
@@ -748,6 +749,21 @@ def udma_sramcrc_probe_descriptor(layer: Layer, ordinal: int, ref_bytes: bytes) 
     words[5] = 1
     words[19] = layer.index
     words[27] = 0
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    return words
+
+
+def l1mesh_crc_probe_descriptor(ordinal: int, start_addr: int, ref_bytes: bytes) -> list[int] | None:
+    if not ref_bytes:
+        return None
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_L1CRC
+    words[1] = len(ref_bytes)
+    words[2] = start_addr & 0x003F_FFFF
+    words[3] = 1 << 10
+    words[19] = ordinal
+    words[27] = start_addr & 0xFFFF_FFFF
     words[28] = fnv_bytes(ref_bytes)
     words[29] = len(ref_bytes)
     return words
@@ -1845,6 +1861,7 @@ def requant_output_descriptor_from_conv_final(layer: Layer, ordinal: int, conv_d
     words[0] = OP_REQUANT
     words[1] = 1
     words[2] = addr
+    words[3] = 1 << 6
     words[4] = conv_desc[19]
     words[14] = conv_desc[14]
     words[15] = conv_desc[15]
@@ -2075,6 +2092,13 @@ def main() -> int:
                     )
                     if pool_probe_desc is not None:
                         descs.append(pool_probe_desc)
+                    l1_probe_desc = l1mesh_crc_probe_descriptor(
+                        len(commands) + len(descs),
+                        0,
+                        ref_pool,
+                    )
+                    if l1_probe_desc is not None:
+                        descs.append(l1_probe_desc)
             pool_crc_desc = pool_full_ref_crc_descriptor(layer, len(commands) + len(descs))
             if pool_crc_desc is not None:
                 descs.append(pool_crc_desc)
@@ -2107,6 +2131,13 @@ def main() -> int:
                     )
                     if requant_probe_desc is not None:
                         descs.append(requant_probe_desc)
+                    l1_probe_desc = l1mesh_crc_probe_descriptor(
+                        len(commands) + len(descs),
+                        0,
+                        ref_requant,
+                    )
+                    if l1_probe_desc is not None:
+                        descs.append(l1_probe_desc)
         if args.emit_conv_partial_psum and layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
             ewe_output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
@@ -2131,6 +2162,13 @@ def main() -> int:
                     )
                     if ewe_probe_desc is not None:
                         descs.append(ewe_probe_desc)
+                    l1_probe_desc = l1mesh_crc_probe_descriptor(
+                        len(commands) + len(descs),
+                        0,
+                        ref_ewe,
+                    )
+                    if l1_probe_desc is not None:
+                        descs.append(l1_probe_desc)
         if args.emit_conv_partial_psum and layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if layer.ref_size > 0 and remaining_commands > 2:
@@ -2153,6 +2191,13 @@ def main() -> int:
                     )
                     if tnps_probe_desc is not None:
                         descs.append(tnps_probe_desc)
+                    l1_probe_desc = l1mesh_crc_probe_descriptor(
+                        len(commands) + len(descs),
+                        0,
+                        ref_tnps,
+                    )
+                    if l1_probe_desc is not None:
+                        descs.append(l1_probe_desc)
         if args.emit_conv_partial_psum and layer.op_kind in UDMA_OPS:
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if layer.ref_size > 0 and remaining_commands > 2:
@@ -2175,6 +2220,13 @@ def main() -> int:
                     )
                     if udma_probe_desc is not None:
                         descs.append(udma_probe_desc)
+                    l1_probe_desc = l1mesh_crc_probe_descriptor(
+                        len(commands) + len(descs),
+                        0,
+                        ref_udma,
+                    )
+                    if l1_probe_desc is not None:
+                        descs.append(l1_probe_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -2194,6 +2246,9 @@ def main() -> int:
                 tnps_count += 1
             elif (desc[0] & 0xF) == OP_UDMA:
                 udma_count += 1
+            if (desc[0] & 0xF) == OP_L1CRC:
+                sramcrc_count += 1
+                sramcrc_bytes += desc[29]
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]

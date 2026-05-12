@@ -229,6 +229,12 @@ module mdla7_top #(
     wire l1mesh_resp_valid;
     wire [3:0] l1mesh_phase_id;
     wire [31:0] l1mesh_remaining_cycles;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire l1mesh_debug_crc_busy;
+    wire l1mesh_debug_crc_done;
+    wire [31:0] l1mesh_debug_crc;
+    wire [31:0] l1mesh_debug_crc_byte_count;
+    /* verilator lint_on UNUSEDSIGNAL */
     wire engine_payload_op =
         (op_class_q == OP_UDMA) ||
         (op_class_q == OP_REQUANT) ||
@@ -863,6 +869,13 @@ module mdla7_top #(
         .route_cycles(l1mesh_route_cycles_q),
         .req_wdata(direct_l1mesh_req ? l1mesh_wdata_q : l1mgr_mesh_req_wdata),
         .req_wstrb(direct_l1mesh_req ? l1mesh_wstrb_q : l1mgr_mesh_req_wstrb),
+        .debug_crc_start(1'b0),
+        .debug_crc_addr({ADDR_WIDTH{1'b0}}),
+        .debug_crc_count(32'd0),
+        .debug_crc_busy(l1mesh_debug_crc_busy),
+        .debug_crc_done(l1mesh_debug_crc_done),
+        .debug_crc(l1mesh_debug_crc),
+        .debug_crc_byte_count(l1mesh_debug_crc_byte_count),
         .resp_valid(l1mesh_resp_valid),
         .resp_ready(1'b1),
         .resp_rdata(l1mesh_rdata),

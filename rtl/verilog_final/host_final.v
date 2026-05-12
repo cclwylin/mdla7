@@ -127,6 +127,8 @@ module host_final #(
     input      [3:0]   active_phase_id,
     input      [31:0]  active_remaining_cycles,
     input      [31:0]  placement_route_cycles,
+    input      [31:0]  l1mesh_crc,
+    input      [31:0]  l1mesh_crc_count,
     input      [31:0]  udma_sramcrc_crc,
     input      [31:0]  udma_sramcrc_count,
     input      [31:0]  tnps_sample_src_byte_offset,
@@ -200,6 +202,7 @@ module host_final #(
     localparam [3:0] OP_POOL = 4'd4;
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
+    localparam [3:0] OP_L1CRC = 4'd7;
 
     localparam [2:0] ST_LOAD  = 3'd0;
     localparam [2:0] ST_ISSUE = 3'd1;
@@ -246,6 +249,25 @@ module host_final #(
         (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) ? cmd_mem[base + 19] : conv_acc_out;
 
     assign top_done_ready = 1'b1;
+
+    function [7:0] final_write_byte;
+        input [3:0] op;
+        begin
+            case (op)
+                OP_TNPS: final_write_byte = cmd_mem[base + 4][7:0];
+                OP_UDMA: final_write_byte = cmd_mem[base + 6][7:0];
+                default: final_write_byte = cmd_mem[base + 18][7:0];
+            endcase
+        end
+    endfunction
+
+    function [127:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {120'd0, value} << ({lane, 3'd0});
+        end
+    endfunction
 
     task load_command;
         begin
@@ -362,9 +384,16 @@ module host_final #(
             ewe_left_shift <= cmd_mem[base + 24];
             ewe_act_min <= cmd_mem[base + 25];
             ewe_act_max <= cmd_mem[base + 26];
-            l1mesh_wdata <= {cmd_mem[base + 2], cmd_mem[base + 1],
-                             cmd_mem[base + 14], cmd_mem[base + 15]};
-            l1mesh_wstrb <= 16'hffff;
+            if (cmd_mem[base + 3][6]) begin
+                l1mesh_addr <= cmd_mem[base + 27][21:0];
+                l1mesh_wdata <= byte_lane_wdata(final_write_byte(cmd_mem[base][3:0]),
+                                                cmd_mem[base + 27][3:0]);
+                l1mesh_wstrb <= 16'h0001 << cmd_mem[base + 27][3:0];
+            end else begin
+                l1mesh_wdata <= {cmd_mem[base + 2], cmd_mem[base + 1],
+                                 cmd_mem[base + 14], cmd_mem[base + 15]};
+                l1mesh_wstrb <= 16'hffff;
+            end
         end
     endtask
 
@@ -682,6 +711,17 @@ module host_final #(
                         if (placement_route_cycles == 32'd0) begin
                             $display("HOST_FINAL_FAIL: zero route cycles cmd=%0d op=%0d",
                                      command_index, desc_op_class);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_L1CRC) &&
+                            ((l1mesh_crc !== cmd_mem[base + 28]) ||
+                             (l1mesh_crc_count !== cmd_mem[base + 29]))) begin
+                            $display("HOST_FINAL_FAIL: L1Mesh crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d addr=%0d",
+                                     command_index, l1mesh_crc,
+                                     cmd_mem[base + 28],
+                                     l1mesh_crc_count,
+                                     cmd_mem[base + 29],
+                                     cmd_mem[base + 2]);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && conv_fp_mode &&
