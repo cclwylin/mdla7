@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -26,6 +27,10 @@ FILTER_ALIASES = {
 }
 PASS_RE = re.compile(r"PASS: verilog_final host-driven .* issued=([0-9]+) done=([0-9]+)")
 FAIL_RE = re.compile(r"(HOST_FINAL_FAIL:.*|FAIL: verilog_final host program.*)")
+SIM_FINISH_RE = re.compile(
+    r"Verilator:\s+\$finish at\s+([0-9]+(?:\.[0-9]+)?)\s*([munpf]?s)",
+    re.IGNORECASE,
+)
 GEN_STATS_RE = re.compile(
     r"commands=([0-9]+)"
     r"(?:\s+conv=([0-9]+))?"
@@ -43,6 +48,26 @@ GEN_STATS_RE = re.compile(
 CACHE_VERSION = 6
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
+MDL7_MAGIC = 0x374C444D
+PROGRAM_COL_WIDTH = 34
+
+TIME_UNIT_TO_MS = {
+    "s": 1000.0,
+    "ms": 1.0,
+    "us": 0.001,
+    "ns": 0.000001,
+    "ps": 0.000000001,
+    "fs": 0.000000000001,
+}
+
+
+@dataclass(frozen=True)
+class BinInfo:
+    size_bytes: int
+    layers: int
+    tensor_bytes: int
+    pattern_class: str
+    timeout_s: float
 
 
 def repo_paths() -> tuple[Path, Path]:
@@ -121,6 +146,118 @@ def file_signature(path: Path) -> dict[str, int | str]:
     }
 
 
+def rd32(data: bytes, off: int) -> int:
+    if off + 4 > len(data):
+        return 0
+    return int.from_bytes(data[off:off + 4], "little")
+
+
+def classify_bin(program: Path) -> BinInfo:
+    st = program.stat()
+    size_bytes = st.st_size
+    layers = 0
+    tensor_bytes = 0
+    try:
+        with program.open("rb") as f:
+            header = f.read(16)
+            if len(header) == 16 and rd32(header, 0) == MDL7_MAGIC:
+                layers = rd32(header, 8)
+                table = f.read(layers * 64)
+                for idx in range(layers):
+                    off = idx * 64
+                    if off + 44 > len(table):
+                        break
+                    tensor_bytes += rd32(table, off + 32)
+                    tensor_bytes += rd32(table, off + 36)
+                    tensor_bytes += rd32(table, off + 40)
+    except OSError:
+        pass
+
+    score = max(size_bytes, tensor_bytes)
+    if layers >= 200 or score >= 256 * 1024 * 1024:
+        pattern_class = "huge"
+        timeout_s = 3600.0
+    elif layers >= 80 or score >= 96 * 1024 * 1024:
+        pattern_class = "large"
+        timeout_s = 1800.0
+    elif layers >= 25 or score >= 24 * 1024 * 1024:
+        pattern_class = "medium"
+        timeout_s = 900.0
+    else:
+        pattern_class = "small"
+        timeout_s = 300.0
+    return BinInfo(size_bytes, layers, tensor_bytes, pattern_class, timeout_s)
+
+
+def fmt_timeout(value: float) -> str:
+    return f"{int(value)}s" if float(value).is_integer() else f"{value:.1f}s"
+
+
+def fmt_program_name(stem: str) -> str:
+    if len(stem) <= PROGRAM_COL_WIDTH:
+        return f"{stem:<{PROGRAM_COL_WIDTH}}"
+    return stem[:PROGRAM_COL_WIDTH - 3] + "..."
+
+
+def fmt_ms(value: float | None) -> str:
+    return "" if value is None else f"{value:.3f}"
+
+
+def fmt_ratio(num: float | None, den: float | None) -> str:
+    if num is None or den is None or den == 0:
+        return ""
+    return f"{num / den:.3f}x"
+
+
+def parse_verilog_ms(output: str) -> float | None:
+    matches = SIM_FINISH_RE.findall(output)
+    if not matches:
+        return None
+    value_s, unit = matches[-1]
+    scale = TIME_UNIT_TO_MS.get(unit.lower())
+    if scale is None:
+        return None
+    return float(value_s) * scale
+
+
+def profile_dir_for(program: Path) -> Path:
+    return program.parent / "profile"
+
+
+def profile_candidates(program: Path, profile_root: Path) -> list[Path]:
+    stem = program.stem
+    return [
+        profile_dir_for(program) / f"{stem}.profile.json",
+        profile_dir_for(program) / f"{stem}.synth.profile.json",
+        profile_dir_for(program) / f"{stem}.mesh.profile.json",
+        profile_root / f"{stem}.profile.json",
+        profile_root / f"{stem}.synth.profile.json",
+        profile_root / f"{stem}.mesh.profile.json",
+        program.with_suffix(".profile.json"),
+        program.with_suffix(".synth.profile.json"),
+        program.with_suffix(".mesh.profile.json"),
+    ]
+
+
+def load_synth_ms(program: Path, profile_root: Path) -> float | None:
+    for path in profile_candidates(program, profile_root):
+        if not path.exists() or path.name.startswith("._"):
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        summary = data.get("summary") if isinstance(data, dict) else None
+        cycles = summary.get("total_cycles") if isinstance(summary, dict) else None
+        if cycles is None:
+            continue
+        try:
+            return float(cycles) / 1.9e6
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def latest_tree_mtime_ns(root: Path) -> int:
     mtimes: list[int] = []
     for pattern in ("*.v", "*.sv", "*.f"):
@@ -191,7 +328,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--filter", action="append", default=[],
                     help="bin filter, glob, path, or alias: slice, ethz, hotspot")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--timeout", type=float, default=None,
+                    help="Manual per-program timeout. Default: auto by bin size/layer class.")
     ap.add_argument("--max-commands", type=int, default=DEFAULT_MAX_COMMANDS)
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--crc-coverage", action="store_true",
@@ -217,6 +355,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--cache-file", type=Path,
                     default=rtl_dir / "obj" / "verilog_final" / "cache.json",
                     help="Regression cache JSON. Default: rtl/obj/verilog_final/cache.json")
+    ap.add_argument("--profile-root", type=Path, default=repo_root / "batch" / "output",
+                    help="Profile directory for synth_ms. Default: batch/output")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     args = ap.parse_args(argv)
     if args.crc_coverage:
@@ -323,6 +463,7 @@ def main(argv: list[str]) -> int:
     program_dir = rtl_dir / "obj" / "verilog_final" / "programs"
     program_dir.mkdir(parents=True, exist_ok=True)
     args.cache_file = args.cache_file.resolve()
+    args.profile_root = args.profile_root.resolve()
 
     bins = collect_bins(args.filter, rtl_dir, repo_root, cwd)
     if args.limit > 0:
@@ -334,10 +475,14 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog_final] matched: {len(bins)}")
     print(f"[run_verilog_final] program_dir: {display(program_dir, repo_root)}")
     print(f"[run_verilog_final] cache: {display(args.cache_file, repo_root)}")
+    print(f"[run_verilog_final] profile_root: {display(args.profile_root, repo_root)}")
     if args.rerun_all:
         print("[run_verilog_final] cache_mode: rerun-all")
-    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma refcrc sramcrc final      refB    sramB   finalB  done  wall_s")
-    print("-----------------------------------------------------------------------------------------------------------------------------------------------------")
+    print(
+        f"{'idx':>3}  {fmt_program_name('program')} {'class':<6} {'tout':>6} {'ans':<6} "
+        f"{'synth_ms':>10} {'verilog_final_ms':>16} {'vf/synth':>9} {'wall_s':>8}"
+    )
+    print("-" * (3 + 2 + PROGRAM_COL_WIDTH + 1 + 6 + 1 + 6 + 1 + 6 + 1 + 10 + 1 + 16 + 1 + 9 + 1 + 8))
 
     passed = 0
     failed = 0
@@ -349,6 +494,9 @@ def main(argv: list[str]) -> int:
     total_srambytes = 0
     total_finalcrc = 0
     total_finalbytes = 0
+    synth_total = 0.0
+    verilog_total = 0.0
+    comparable = 0
     build_done = args.no_build
     cache = load_cache(args.cache_file)
     cache_entries = cache.setdefault("entries", {})
@@ -360,6 +508,8 @@ def main(argv: list[str]) -> int:
     source_mtime_ns = latest_tree_mtime_ns(rtl_dir / "verilog_final")
     for idx, bin_path in enumerate(bins, 1):
         rel_bin = display(bin_path, repo_root)
+        info = classify_bin(bin_path)
+        run_timeout = args.timeout if args.timeout is not None else info.timeout_s
         cached = None
         if not args.rerun_all and not args.emit_conv_partial_psum:
             cached = cache_hit(
@@ -385,6 +535,10 @@ def main(argv: list[str]) -> int:
             sramcrc_bytes = int(cached.get("srambytes") or 0)
             finalcrc_count = int(cached.get("finalcrc") or 0)
             finalcrc_bytes = int(cached.get("finalbytes") or 0)
+            synth_ms = cached.get("synth_ms")
+            synth_ms = synth_ms if isinstance(synth_ms, float) else None
+            verilog_ms = cached.get("verilog_final_ms")
+            verilog_ms = verilog_ms if isinstance(verilog_ms, float) else None
             done = int(cached.get("done") or 0)
             total_refcrc += refcrc_count
             total_sramcrc += sramcrc_count
@@ -392,13 +546,27 @@ def main(argv: list[str]) -> int:
             total_srambytes += sramcrc_bytes
             total_finalcrc += finalcrc_count
             total_finalbytes += finalcrc_bytes
+            if synth_ms is not None and verilog_ms is not None:
+                synth_total += synth_ms
+                verilog_total += verilog_ms
+                comparable += 1
             if status == "SKIP":
                 skipped += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {0.0:7.2f}")
+                print(
+                    f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                    f"{fmt_timeout(run_timeout):>6} {'SKIP':<6} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
+                    f"{fmt_ratio(verilog_ms, synth_ms):>9} {0.0:>8.2f}"
+                )
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {0.0:7.2f}")
+                print(
+                    f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                    f"{fmt_timeout(run_timeout):>6} {'CACHED':<6} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
+                    f"{fmt_ratio(verilog_ms, synth_ms):>9} {0.0:>8.2f}"
+                )
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
         gen_cmd = [
@@ -411,7 +579,7 @@ def main(argv: list[str]) -> int:
             gen_cmd.extend(["--conv-sram-window-commands", str(args.conv_sram_window_commands)])
         if args.conv_sram_window_count > 0:
             gen_cmd.extend(["--conv-sram-window-count", str(args.conv_sram_window_count)])
-        rc, gen_out, _ = run(gen_cmd, repo_root, timeout=args.timeout)
+        rc, gen_out, _ = run(gen_cmd, repo_root, timeout=run_timeout)
         if rc != 0:
             failed += 1
             print(f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL   n/a   n/a    0.00")
@@ -440,7 +608,12 @@ def main(argv: list[str]) -> int:
             ) = count_commands(hex_path)
         if command_count == 0:
             skipped += 1
-            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0      0       0     0        0        0        0     0    0.00")
+            synth_ms = load_synth_ms(bin_path, args.profile_root)
+            print(
+                f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                f"{fmt_timeout(run_timeout):>6} {'SKIP':<6} "
+                f"{fmt_ms(synth_ms):>10} {'':>16} {'':>9} {0.0:>8.2f}"
+            )
             print("     reason: no final command")
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -476,16 +649,24 @@ def main(argv: list[str]) -> int:
         cmd = [str(smoke), "--test", "host", "--program", str(hex_path), "--ref-program", str(bin_path)]
         if build_done:
             cmd.append("--no-build")
-        rc, out, wall = run(cmd, repo_root, timeout=args.timeout)
+        rc, out, wall = run(cmd, repo_root, timeout=run_timeout)
         build_done = True
         match = PASS_RE.search(out)
+        verilog_ms = parse_verilog_ms(out)
+        synth_ms = load_synth_ms(bin_path, args.profile_root)
+        if synth_ms is not None and verilog_ms is not None:
+            synth_total += synth_ms
+            verilog_total += verilog_ms
+            comparable += 1
         if rc == 0 and match:
             issued = int(match.group(1))
             done = int(match.group(2))
             passed += 1
             print(
-                f"{idx:3d}  {bin_path.stem[:38]:38s} PASS "
-                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {wall:7.2f}"
+                f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                f"{fmt_timeout(run_timeout):>6} {'PASS':<6} "
+                f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
+                f"{fmt_ratio(verilog_ms, synth_ms):>9} {wall:>8.2f}"
             )
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -507,6 +688,8 @@ def main(argv: list[str]) -> int:
                     "srambytes": sramcrc_bytes,
                     "finalcrc": finalcrc_count,
                     "finalbytes": finalcrc_bytes,
+                    "synth_ms": synth_ms,
+                    "verilog_final_ms": verilog_ms,
                     "done": done,
                     "wall_s": wall,
                 }
@@ -520,8 +703,10 @@ def main(argv: list[str]) -> int:
             elif rc == 124:
                 reason = f"TIMEOUT after {args.timeout:.1f}s"
             print(
-                f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL "
-                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d}   n/a  {wall:7.2f}"
+                f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                f"{fmt_timeout(run_timeout):>6} {'FAIL':<6} "
+                f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
+                f"{fmt_ratio(verilog_ms, synth_ms):>9} {wall:>8.2f}"
             )
             print(f"     reason: {reason}")
         if args.require_final_output_crc and command_count != 0 and finalcrc_count == 0:
@@ -533,6 +718,13 @@ def main(argv: list[str]) -> int:
         f"[run_verilog_final] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
         f"finalcrc={total_finalcrc} refB={total_refbytes} sramB={total_srambytes} "
         f"finalB={total_finalbytes}"
+    )
+    print(
+        "[run_verilog_final] compare: "
+        f"comparable={comparable}/{passed + failed} "
+        f"synth_total_ms={fmt_ms(synth_total if comparable else None)} "
+        f"verilog_final_total_ms={fmt_ms(verilog_total if comparable else None)} "
+        f"vf/synth={fmt_ratio(verilog_total if comparable else None, synth_total if comparable else None)}"
     )
     if total_refcrc == 0 and total_sramcrc == 0 and not args.emit_conv_partial_psum:
         print(
