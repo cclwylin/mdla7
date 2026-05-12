@@ -17,8 +17,10 @@ module Testbench_host_program;
     wire udma_direction_write;
     wire udma_final_write_mode;
     wire udma_sramcrc_mode;
+    wire udma_ref_fill_mode;
     wire [7:0] udma_input_byte;
     wire [31:0] udma_out_byte_offset;
+    wire [31:0] udma_ref_off;
     wire [31:0] udma_sramcrc_expected_crc;
     wire [31:0] udma_sramcrc_expected_count;
     wire [21:0] l1mesh_addr;
@@ -220,8 +222,10 @@ module Testbench_host_program;
         .udma_direction_write(udma_direction_write),
         .udma_final_write_mode(udma_final_write_mode),
         .udma_sramcrc_mode(udma_sramcrc_mode),
+        .udma_ref_fill_mode(udma_ref_fill_mode),
         .udma_input_byte(udma_input_byte),
         .udma_out_byte_offset(udma_out_byte_offset),
+        .udma_ref_off(udma_ref_off),
         .udma_sramcrc_expected_crc(udma_sramcrc_expected_crc),
         .udma_sramcrc_expected_count(udma_sramcrc_expected_count),
         .l1mesh_addr(l1mesh_addr),
@@ -421,8 +425,10 @@ module Testbench_host_program;
         .udma_direction_write(udma_direction_write),
         .udma_final_write_mode(udma_final_write_mode),
         .udma_sramcrc_mode(udma_sramcrc_mode),
+        .udma_ref_fill_mode(udma_ref_fill_mode),
         .udma_input_byte(udma_input_byte),
         .udma_out_byte_offset(udma_out_byte_offset),
+        .udma_ref_off(udma_ref_off),
         .udma_sramcrc_expected_count(udma_sramcrc_expected_count),
         .l1mesh_addr(l1mesh_addr),
         .l1mesh_wdata(l1mesh_wdata),

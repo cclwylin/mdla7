@@ -2089,27 +2089,44 @@ def pool_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None
     return words
 
 
-def generic_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+def udma_ref_fill_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return None
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = (1 << 0) | (1 << 6) | (1 << 13) | (1 << 14)
+    words[4] = layer.ref_size & 0xFFFF_FFFF
+    words[5] = 1 + (layer.ref_size // 4096)
+    words[19] = layer.index
+    words[25] = layer.ref_off & 0xFFFF_FFFF
+    words[27] = 0
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
+    return words
+
+
+def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
     ref_bytes = data[layer.ref_off:layer.ref_off + layer.ref_size]
-    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x3c) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
-    words[0] = OP_CONV
+    words[0] = OP_UDMA
     words[1] = layer.ref_size & 0xFFFF_FFFF
     words[2] = addr
-    words[3] = 1 << 9
+    words[3] = (1 << 10) | (1 << 12) | (1 << 13)
+    words[4] = layer.ref_size & 0xFFFF_FFFF
+    words[5] = 1
     words[19] = layer.index
-    words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
-    words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
     words[25] = layer.ref_off & 0xFFFF_FFFF
-    words[26] = layer.ref_size & 0xFFFF_FFFF
-    words[27] = (layer.ref_size - 1) & 0xFFFF_FFFF
+    words[27] = 0
     words[28] = fnv_bytes(ref_bytes)
     words[29] = len(ref_bytes)
-    words[30] = (layer.out_c & 0xFFFF) | ((layer.out_h & 0xFFFF) << 16)
-    words[31] = layer.out_w & 0xFFFF
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
     return words
 
 
@@ -2316,7 +2333,10 @@ def main() -> int:
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
         if args.microblock_descriptors:
             descs = synth_microblock_descriptors(layer, len(commands))
-            crc_desc = generic_full_ref_crc_descriptor(layer, len(commands) + len(descs))
+            fill_desc = udma_ref_fill_descriptor(layer, len(commands) + len(descs))
+            if fill_desc is not None:
+                descs.append(fill_desc)
+            crc_desc = udma_output_sram_crc_descriptor(layer, len(commands) + len(descs))
             if crc_desc is not None:
                 descs.append(crc_desc)
         elif (

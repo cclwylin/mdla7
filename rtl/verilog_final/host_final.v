@@ -19,8 +19,10 @@ module host_final #(
     output reg         udma_direction_write,
     output reg         udma_final_write_mode,
     output reg         udma_sramcrc_mode,
+    output reg         udma_ref_fill_mode,
     output reg [7:0]   udma_input_byte,
     output reg [31:0]  udma_out_byte_offset,
+    output reg [31:0]  udma_ref_off,
     output reg [31:0]  udma_sramcrc_expected_crc,
     output reg [31:0]  udma_sramcrc_expected_count,
     output reg [21:0]  l1mesh_addr,
@@ -293,8 +295,10 @@ module host_final #(
             udma_direction_write <= cmd_mem[base + 3][0];
             udma_final_write_mode <= cmd_mem[base + 3][6];
             udma_sramcrc_mode <= cmd_mem[base + 3][10];
+            udma_ref_fill_mode <= cmd_mem[base + 3][14];
             udma_input_byte <= cmd_mem[base + 6][7:0];
             udma_out_byte_offset <= cmd_mem[base + 27];
+            udma_ref_off <= cmd_mem[base + 25];
             udma_sramcrc_expected_crc <= cmd_mem[base + 28];
             udma_sramcrc_expected_count <= cmd_mem[base + 29];
             tnps_mode_space_to_depth <= cmd_mem[base + 3][1];
@@ -591,8 +595,10 @@ module host_final #(
             udma_direction_write <= 1'b0;
             udma_final_write_mode <= 1'b0;
             udma_sramcrc_mode <= 1'b0;
+            udma_ref_fill_mode <= 1'b0;
             udma_input_byte <= 8'd0;
             udma_out_byte_offset <= 32'd0;
+            udma_ref_off <= 32'd0;
             udma_sramcrc_expected_crc <= 32'd0;
             udma_sramcrc_expected_count <= 32'd0;
             l1mesh_addr <= 22'd0;

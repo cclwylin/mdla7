@@ -22,8 +22,10 @@ module mdla7_top_final #(
     input                       udma_direction_write,
     input                       udma_final_write_mode,
     input                       udma_sramcrc_mode,
+    input                       udma_ref_fill_mode,
     input      [7:0]            udma_input_byte,
     input      [31:0]           udma_out_byte_offset,
+    input      [31:0]           udma_ref_off,
     input      [31:0]           udma_sramcrc_expected_count,
     input      [ADDR_WIDTH-1:0] l1mesh_addr,
     input      [DATA_WIDTH-1:0] l1mesh_wdata,
@@ -233,8 +235,10 @@ module mdla7_top_final #(
     reg udma_direction_write_q;
     reg udma_final_write_mode_q;
     reg udma_sramcrc_mode_q;
+    reg udma_ref_fill_mode_q;
     reg [7:0] udma_input_byte_q;
     reg [31:0] udma_out_byte_offset_q;
+    reg [31:0] udma_ref_off_q;
     reg [31:0] udma_sramcrc_expected_count_q;
     reg [ADDR_WIDTH-1:0] l1mesh_addr_q;
     reg [DATA_WIDTH-1:0] l1mesh_wdata_q;
@@ -775,8 +779,10 @@ module mdla7_top_final #(
         .codec_cycles(udma_codec_cycles_q),
         .final_write_mode(udma_final_write_mode_q),
         .sramcrc_mode(udma_sramcrc_mode_q),
+        .ref_fill_mode(udma_ref_fill_mode_q),
         .input_byte(udma_input_byte_q),
         .out_byte_offset(udma_out_byte_offset_q),
+        .ref_off(udma_ref_off_q),
         .sramcrc_expected_count(udma_sramcrc_expected_count_q),
         .l1_req_base_addr(l1mesh_addr_q),
         .l1_req_valid(udma_l1_req_valid),
@@ -961,8 +967,10 @@ module mdla7_top_final #(
             udma_direction_write_q <= 1'b0;
             udma_final_write_mode_q <= 1'b0;
             udma_sramcrc_mode_q <= 1'b0;
+            udma_ref_fill_mode_q <= 1'b0;
             udma_input_byte_q <= 8'd0;
             udma_out_byte_offset_q <= 32'd0;
+            udma_ref_off_q <= 32'd0;
             udma_sramcrc_expected_count_q <= 32'd0;
             l1mesh_addr_q <= {ADDR_WIDTH{1'b0}};
             l1mesh_wdata_q <= {DATA_WIDTH{1'b0}};
@@ -1078,8 +1086,10 @@ module mdla7_top_final #(
                         udma_direction_write_q <= udma_direction_write;
                         udma_final_write_mode_q <= udma_final_write_mode;
                         udma_sramcrc_mode_q <= udma_sramcrc_mode;
+                        udma_ref_fill_mode_q <= udma_ref_fill_mode;
                         udma_input_byte_q <= udma_input_byte;
                         udma_out_byte_offset_q <= udma_out_byte_offset;
+                        udma_ref_off_q <= udma_ref_off;
                         udma_sramcrc_expected_count_q <= udma_sramcrc_expected_count;
                         l1mesh_addr_q <= l1mesh_addr;
                         l1mesh_wdata_q <= l1mesh_wdata;

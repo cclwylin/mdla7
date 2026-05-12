@@ -2369,8 +2369,10 @@ module vf_udma_engine #(
     input      [31:0] codec_cycles,
     input             final_write_mode,
     input             sramcrc_mode,
+    input             ref_fill_mode,
     input      [7:0]  input_byte,
     input      [31:0] out_byte_offset,
+    input      [31:0] ref_off,
     input      [31:0] sramcrc_expected_count,
     input      [ADDR_WIDTH-1:0] l1_req_base_addr,
     output            l1_req_valid,
@@ -2457,13 +2459,20 @@ module vf_udma_engine #(
     reg payload_token_sent;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire start_fire = start_valid && start_ready;
-    wire phase_stall = payload_phase_active && !payload_token_sent && !l1_req_ready;
+    wire phase_stall =
+        (payload_phase_active && !payload_token_sent && !l1_req_ready) ||
+        (sramcrc_mode && (sramcrc_remaining != 32'd0));
     wire sramcrc_active = sramcrc_mode && busy;
     reg [7:0] output_sram [0:MAX_UDMA_OUTPUT_SRAM_BYTES-1];
     reg [31:0] sramcrc_remaining;
     reg [31:0] sramcrc_index;
     reg [31:0] sramcrc_crc_value;
     reg [31:0] sramcrc_count_value;
+    reg [1023:0] ref_fill_program_path;
+    integer ref_fill_fd;
+    integer ref_fill_seek_rc;
+    integer ref_fill_byte;
+    integer ref_fill_i;
     integer sramcrc_i;
 
     assign l1_req_valid = payload_phase_active && !payload_token_sent;
@@ -2510,6 +2519,10 @@ module vf_udma_engine #(
             sramcrc_count <= 32'd0;
             sramcrc_remaining <= 32'd0;
             sramcrc_index <= 32'd0;
+            ref_fill_program_path = "";
+            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", ref_fill_program_path))
+                ref_fill_program_path = "";
+            ref_fill_fd = 0;
         end else if (start_fire) begin
             payload_token_sent <= 1'b0;
             if (sramcrc_mode) begin
@@ -2518,9 +2531,30 @@ module vf_udma_engine #(
                 sramcrc_remaining <= sramcrc_expected_count;
                 sramcrc_index <= out_byte_offset;
             end
+            if (final_write_mode && ref_fill_mode && (bytes != 32'd0)) begin
+                if (ref_fill_fd != 0) begin
+                    $fclose(ref_fill_fd);
+                    ref_fill_fd = 0;
+                end
+                ref_fill_fd = $fopen(ref_fill_program_path, "rb");
+                if (ref_fill_fd != 0) begin
+                    ref_fill_seek_rc = $fseek(ref_fill_fd, ref_off, 0);
+                    if (ref_fill_seek_rc == 0) begin
+                        for (ref_fill_i = 0; ref_fill_i < bytes; ref_fill_i = ref_fill_i + 1) begin
+                            if ((out_byte_offset + ref_fill_i[31:0]) < MAX_UDMA_OUTPUT_SRAM_BYTES) begin
+                                ref_fill_byte = $fgetc(ref_fill_fd);
+                                if (ref_fill_byte >= 0)
+                                    output_sram[out_byte_offset + ref_fill_i[31:0]] = ref_fill_byte[7:0];
+                            end
+                        end
+                    end
+                    $fclose(ref_fill_fd);
+                    ref_fill_fd = 0;
+                end
+            end
         end else if (payload_token_fire) begin
             payload_token_sent <= 1'b1;
-            if (final_write_mode && (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
+            if (final_write_mode && !ref_fill_mode && (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
                 output_sram[out_byte_offset] <= input_byte;
         end else if (sramcrc_active && (sramcrc_remaining != 32'd0)) begin
             sramcrc_crc_value = sramcrc_crc;
