@@ -2609,6 +2609,99 @@ def closed_loop_ewe_probes(layer: Layer, ordinal: int, result_dram_off: int,
     return descs
 
 
+def int16_ewe_output_descriptor(
+    layer: Layer,
+    ordinal: int,
+    out_elem_index: int,
+    read_a_from_l1: bool = False,
+) -> list[int] | None:
+    if layer.op_kind not in OK_EWE or elem_bytes(layer.dtype) != 2:
+        return None
+    byte_index = out_elem_index * 2
+    data = descriptor_for_layer.program_bytes
+    if byte_index + 2 > layer.in_size or byte_index + 2 > layer.wgt_size:
+        return None
+    op_mode = 1 if layer.op_kind == OK_MUL else 2 if layer.op_kind == OK_SUB else 0
+    a_bytes = data[layer.in_off + byte_index:layer.in_off + byte_index + 2]
+    b_bytes = data[layer.wgt_off + byte_index:layer.wgt_off + byte_index + 2]
+    av = i16_at(a_bytes.ljust(2, b"\x00"), 0)
+    bv = i16_at(b_bytes.ljust(2, b"\x00"), 0)
+    if layer.op_kind == OK_MUL:
+        expected = av * bv
+    elif layer.op_kind == OK_SUB:
+        expected = av - bv
+    else:
+        expected = av + bv
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x24) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_EWE
+    words[1] = 2
+    words[2] = addr
+    words[3] = (1 << 6) | ((1 << 11) if read_a_from_l1 else 0)
+    words[4] = pack_word(a_bytes)
+    words[8] = pack_word(b_bytes)
+    words[12] = 1 | (op_mode << 8) | (1 << 11)
+    words[18] = expected & 0xFFFF_FFFF
+    words[19] = layer.index
+    words[27] = byte_index & 0xFFFF_FFFF
+    return words
+
+
+def closed_loop_int16_ewe_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    out_elem_index: int = 0,
+) -> list[list[int]]:
+    byte_index = out_elem_index * 2
+    data = descriptor_for_layer.program_bytes
+    if byte_index + 2 > layer.ref_size:
+        return []
+    expected = data[layer.ref_off + byte_index:layer.ref_off + byte_index + 2]
+    desc = int16_ewe_output_descriptor(
+        layer,
+        ordinal + 1,
+        out_elem_index,
+        read_a_from_l1=True,
+    )
+    if desc is None:
+        return []
+    l1_base = 0x24000 + (((layer.index * 0x100) + (out_elem_index * 0x20)) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off + byte_index,
+            l1_base,
+            2,
+            SMF_LOAD_A,
+        )
+    ]
+    desc[2] = l1_base
+    desc[3] |= MICROBLOCK_FLAG
+    desc[18] = int.from_bytes(expected, "little", signed=True) & 0xFFFF_FFFF
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off + byte_index,
+            expected,
+        )
+    )
+    return descs
+
+
 def ewe_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
     if not ref_bytes:
         return None
@@ -3269,6 +3362,12 @@ def main() -> int:
                 )
             elif layer.dtype in DT_FP and layer.op_kind in OK_POOL:
                 closed_loop_descs = closed_loop_fp_sample_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
+                )
+            elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 2:
+                closed_loop_descs = closed_loop_int16_ewe_probe(
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
