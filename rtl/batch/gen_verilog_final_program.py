@@ -69,6 +69,7 @@ DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
+MAX_REFCRC_PREFIX_COMMANDS = 512
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 16777619
 
@@ -1150,6 +1151,13 @@ def conv_real_partial_psum_command_count(layer: Layer, output_elems: int) -> int
     return max(output_elems, 1) * lane_chunks + 1
 
 
+def conv_real_lane_chunk_count(layer: Layer) -> int:
+    group = layer.group or 1
+    in_per_group = max(layer.in_c // max(group, 1), 1)
+    total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * in_per_group
+    return max(math.ceil(total_lanes / 8), 1)
+
+
 def conv_real_partial_psum_descriptors(
     layer: Layer,
     ordinal: int,
@@ -1301,6 +1309,16 @@ def conv_shadow_readback_descriptor(
     return desc
 
 
+def conv_final_q_bytes(final_descs: list[list[int]]) -> bytes:
+    final_q_bytes: list[int] = []
+    for desc in final_descs:
+        tile_outputs = desc[31] & 0xFF
+        if tile_outputs == 0:
+            tile_outputs = 1
+        final_q_bytes.extend([desc[18] & 0xFF] * tile_outputs)
+    return bytes(final_q_bytes)
+
+
 def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
@@ -1429,8 +1447,28 @@ def main() -> int:
                 )
                 ref_bytes = descriptor_for_layer.program_bytes[layer.ref_off:layer.ref_off + layer.ref_size]
             elif int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None:
-                compact_desc = conv_full_ref_crc_descriptor(layer, len(commands))
-                descs = [compact_desc] if compact_desc is not None else []
+                lane_chunks = conv_real_lane_chunk_count(layer)
+                prefix_budget = max(min(remaining_commands - 3, MAX_REFCRC_PREFIX_COMMANDS), 0)
+                max_prefix_outputs = prefix_budget // lane_chunks
+                descs = []
+                if max_prefix_outputs > 0:
+                    descs = conv_real_partial_psum_descriptors(
+                        layer,
+                        len(commands),
+                        max_output_elems=max_prefix_outputs,
+                    )
+                    generated_prefix = conv_final_q_bytes([d for d in descs if d[3] & (1 << 6)])
+                    if generated_prefix:
+                        ref_prefix = descriptor_for_layer.program_bytes[
+                            layer.ref_off:layer.ref_off + min(len(generated_prefix), layer.ref_size)
+                        ]
+                        if generated_prefix == ref_prefix:
+                            ref_bytes = ref_prefix
+                        else:
+                            descs = []
+                compact_desc = conv_full_ref_crc_descriptor(layer, len(commands) + len(descs))
+                if compact_desc is not None:
+                    descs.append(compact_desc)
             else:
                 full_command_count = conv_partial_psum_command_count(layer, output_elems)
                 max_output_elems = None if full_command_count <= remaining_commands else 16

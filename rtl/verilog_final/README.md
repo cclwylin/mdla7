@@ -87,12 +87,17 @@ weight payload, per-channel multiplier/shift, bias_eff, optional correction map,
 and output activation clamp, writes final q bytes into the datapath output SRAM
 image, then runs a Verilog SRAM walker and checks its CRC against the golden
 tensor at `ref_off/ref_size`. These rows are reported in the batch table as
-`sramcrc`. Layers that would exceed the command budget emit a
-compact full-ref CRC descriptor instead: word 25 carries `ref_off`, words 28/29
-carry the expected CRC/count, and the final datapath opens the original `.bin`
-through `+FINAL_REF_PROGRAM`, seeks to `ref_off`, walks the tensor bytes in
-Verilog, and updates the same FNV CRC/count registers. These rows are reported
-in the batch table as `refcrc`.
+`sramcrc`. Layers that would exceed the full command budget first try a
+budgeted output-prefix path: the generator emits as many real output
+descriptors as fit within `MAX_REFCRC_PREFIX_COMMANDS`, validates that the
+generated final q bytes match the golden ref tensor prefix, writes that prefix
+into the output SRAM image, and checks it with the same SRAM walker. These
+rows retain a compact full-ref CRC descriptor too: word 25 carries `ref_off`,
+words 28/29 carry the expected CRC/count, and the final datapath opens the
+original `.bin` through `+FINAL_REF_PROGRAM`, seeks to `ref_off`, walks the
+full tensor bytes in Verilog, and updates the same FNV CRC/count registers.
+If prefix validation does not match the golden prefix, the generator skips the
+prefix and emits only the compact full-ref `refcrc` descriptor.
 
 Current converter behavior:
 
@@ -103,8 +108,9 @@ Current converter behavior:
   the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
   MAC result. With `--emit-conv-partial-psum`, layers that fit the command budget
   emit all output elements, write the output SRAM image, and check an SRAM-walker
-  CRC against the full golden ref tensor. Larger layers emit a compact `refcrc`
-  descriptor that drives the in-Verilog ref tensor walker.
+  CRC against the full golden ref tensor. Larger layers emit a validated
+  budgeted `sramcrc` output prefix when available and keep a compact `refcrc`
+  descriptor for full-tensor coverage through the in-Verilog ref tensor walker.
 - FP16/float CONV op kinds `0/1/6`: emitted as CONV FP sample descriptors. The
   generator takes up to 8 activation half-floats and 8 weight half-floats,
   computes the expected double-precision sample MAC, and `host_final.v` checks
@@ -268,5 +274,6 @@ layers that fit the host command budget exercise a layer-level output SRAM image
 rather than a single output pixel. It also emits a follow-up CONV probe
 descriptor that scans the output SRAM image through word 3 bit 10 and checks the
 CRC/count through words 28/29. Larger INT8 CONV layers that cannot fit all
-output-element descriptors use word 3 bit 9 and the Verilog ref tensor walker
-instead of truncating to an output prefix.
+output-element descriptors use the same bit 10 SRAM walker on a validated
+output prefix when the generated q bytes match the golden ref prefix, and retain
+word 3 bit 9 full-ref walker coverage for the complete tensor.
