@@ -1315,7 +1315,10 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[19] = layer.index
         return words
 
-    if layer.op_kind in OK_CONV and elem == 2 and layer.in_size >= 2 and layer.wgt_size >= 2:
+    if (
+        layer.op_kind in OK_CONV and elem == 2 and layer.dtype not in DT_FP and
+        layer.in_size >= 2 and layer.wgt_size >= 2
+    ):
         data = descriptor_for_layer.program_bytes
         elem_count = min(layer.in_size // 2, layer.wgt_size // 2, 8)
         if elem_count == 0:
@@ -1428,7 +1431,7 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[19] = layer.index
         return words
 
-    if layer.op_kind in OK_POOL and elem == 2 and layer.in_size >= 2:
+    if layer.op_kind in OK_POOL and elem == 2 and layer.dtype not in DT_FP and layer.in_size >= 2:
         data = descriptor_for_layer.program_bytes
         elem_count = min(layer.in_size // 2, 8)
         if elem_count == 0:
@@ -1499,7 +1502,10 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[19] = layer.index
         return words
 
-    if layer.op_kind in OK_EWE and elem == 2 and layer.in_size >= 2 and layer.wgt_size >= 2:
+    if (
+        layer.op_kind in OK_EWE and elem == 2 and layer.dtype not in DT_FP and
+        layer.in_size >= 2 and layer.wgt_size >= 2
+    ):
         data = descriptor_for_layer.program_bytes
         a_sample = data[layer.in_off:layer.in_off + min(layer.in_size, 16)].ljust(16, b"\x00")
         b_sample = data[layer.wgt_off:layer.wgt_off + min(layer.wgt_size, 16)].ljust(16, b"\x00")
@@ -1937,6 +1943,64 @@ def descriptor_payload_bytes(desc: list[int], first_word: int, byte_count: int) 
         word = desc[first_word + idx // 4]
         payload.append((word >> ((idx % 4) * 8)) & 0xFF)
     return bytes(payload)
+
+
+def descriptor_u64_bytes(desc: list[int], lo_word: int) -> bytes:
+    value = (desc[lo_word] & 0xFFFF_FFFF) | ((desc[lo_word + 1] & 0xFFFF_FFFF) << 32)
+    return struct.pack("<Q", value)
+
+
+def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if elem_bytes(layer.dtype) != 2 or layer.dtype not in DT_FP:
+        return []
+    if layer.op_kind not in OK_POOL:
+        return []
+    desc = descriptor_for_layer(layer, ordinal, False)
+    if desc is None:
+        return []
+    op = desc[0] & 0xF
+    if op != OP_POOL:
+        return []
+    byte_count = desc[1]
+    if byte_count <= 0 or byte_count > 16:
+        return []
+    data = descriptor_for_layer.program_bytes
+    l1_base = 0x50000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off,
+            l1_base,
+            byte_count,
+            SMF_LOAD_A,
+        )
+    ]
+    if data[layer.in_off:layer.in_off + byte_count] != descriptor_payload_bytes(desc, 4, byte_count):
+        return []
+    desc[2] = l1_base
+    desc[3] |= READ_FROM_L1_FLAG | MICROBLOCK_FLAG | (1 << 6)
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    expected = descriptor_u64_bytes(desc, 16)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            expected,
+        )
+    )
+    return descs
 
 
 def closed_loop_conv_probe(
@@ -3202,6 +3266,12 @@ def main() -> int:
                     len(commands) + len(descs),
                     result_dram_off,
                     remaining_commands,
+                )
+            elif layer.dtype in DT_FP and layer.op_kind in OK_POOL:
+                closed_loop_descs = closed_loop_fp_sample_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
                 )
             if closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
                 descs.extend(closed_loop_descs)
