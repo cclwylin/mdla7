@@ -68,6 +68,8 @@ DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
+FNV_OFFSET = 0x811C9DC5
+FNV_PRIME = 16777619
 
 
 @dataclass
@@ -110,6 +112,17 @@ def pack_word(chunk: bytes) -> int:
     for idx, byte in enumerate(chunk):
         value |= byte << (idx * 8)
     return value
+
+
+def fnv_byte(crc: int, byte_value: int) -> int:
+    return ((crc ^ (byte_value & 0xFF)) * FNV_PRIME) & 0xFFFF_FFFF
+
+
+def fnv_repeated(byte_value: int, count: int) -> int:
+    crc = FNV_OFFSET
+    for _ in range(count):
+        crc = fnv_byte(crc, byte_value)
+    return crc
 
 
 def sample_bytes(data: bytes, offset: int, size: int, count: int = 16) -> bytes:
@@ -891,8 +904,10 @@ def conv_shadow_readback_descriptor(
     if sample is None:
         return None
     desc, _ = sample
-    desc[3] |= 1 << 7
+    desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
     desc[19] = ((final_desc[18] & 0xFF) if final_desc[18] < 0x80 else (final_desc[18] & 0xFF) - 0x100) & 0xFFFF_FFFF
+    desc[28] = fnv_repeated(final_desc[18], tile_count)
+    desc[29] = tile_count
     desc[31] = (desc[31] & ~0xFF) | 1
     return desc
 

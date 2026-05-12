@@ -119,6 +119,8 @@ module host_final #(
     input              conv_shadow_read_valid,
     input      [31:0]  conv_shadow_read_output_byte_offset,
     input      [31:0]  conv_shadow_read_q_value,
+    input      [31:0]  conv_shadow_crc,
+    input      [31:0]  conv_shadow_byte_count,
     input      [3:0]   conv_psum_valid_mask,
     input      [127:0] conv_psum_acc_values,
     input signed [31:0] requant_scaled_out,
@@ -648,6 +650,18 @@ module host_final #(
                                      cmd_mem[base + 27],
                                      $signed(conv_shadow_read_q_value),
                                      $signed(cmd_mem[base + 19]));
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            cmd_mem[base + 3][8] &&
+                            ((conv_shadow_crc !== cmd_mem[base + 28]) ||
+                             (conv_shadow_byte_count !== cmd_mem[base + 29]))) begin
+                            $display("HOST_FINAL_FAIL: CONV shadow crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                                     command_index,
+                                     conv_shadow_crc,
+                                     cmd_mem[base + 28],
+                                     conv_shadow_byte_count,
+                                     cmd_mem[base + 29]);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&

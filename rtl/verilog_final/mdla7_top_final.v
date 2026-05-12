@@ -124,6 +124,8 @@ module mdla7_top_final #(
     output                      conv_shadow_read_valid,
     output     [31:0]           conv_shadow_read_output_byte_offset,
     output     [31:0]           conv_shadow_read_q_value,
+    output     [31:0]           conv_shadow_crc,
+    output     [31:0]           conv_shadow_byte_count,
     output     [3:0]            conv_psum_valid_mask,
     output     [127:0]          conv_psum_acc_values,
     output signed [31:0]        requant_scaled_out,
@@ -476,6 +478,8 @@ module mdla7_top_final #(
         .conv_shadow_read_valid(conv_shadow_read_valid),
         .conv_shadow_read_output_byte_offset(conv_shadow_read_output_byte_offset),
         .conv_shadow_read_q_value(conv_shadow_read_q_value),
+        .conv_shadow_crc(conv_shadow_crc),
+        .conv_shadow_byte_count(conv_shadow_byte_count),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values)
     );

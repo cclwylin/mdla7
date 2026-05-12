@@ -385,6 +385,8 @@ module vf_conv_sample_engine #(
     output                        conv_shadow_read_valid,
     output     [31:0]             conv_shadow_read_output_byte_offset,
     output     [31:0]             conv_shadow_read_q_value,
+    output reg [31:0]             conv_shadow_crc,
+    output reg [31:0]             conv_shadow_byte_count,
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
@@ -403,6 +405,8 @@ module vf_conv_sample_engine #(
     localparam [2:0] ST_DONE    = 3'd5;
     localparam [7:0] MAX_INT_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
+    localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
+    localparam [31:0] FNV_PRIME = 32'd16777619;
 
     reg [2:0] state;
     reg [31:0] compute_remaining;
@@ -422,6 +426,8 @@ module vf_conv_sample_engine #(
     reg signed [31:0] tile_result_q_value;
     reg [31:0] writeback_offset_value;
     reg [3:0] writeback_slot;
+    reg [31:0] writeback_crc_value;
+    reg [31:0] writeback_byte_count_value;
     wire [31:0] conv_read_output_byte_offset;
     wire [3:0] conv_shadow_read_slot;
 
@@ -501,6 +507,14 @@ module vf_conv_sample_engine #(
             shifted = (left_shift > 0) ? (x <<< left_shift) : x;
             high = saturating_doubling_high_mul(shifted, mult);
             mbqm = rounding_divide_by_pot(high, right_shift);
+        end
+    endfunction
+
+    function [31:0] fnv_byte;
+        input [31:0] crc;
+        input [7:0] byte_value;
+        begin
+            fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
         end
     endfunction
 
@@ -867,6 +881,8 @@ module vf_conv_sample_engine #(
             conv_shadow_mem_valid_mask <= 16'd0;
             conv_shadow_mem_output_byte_offsets <= 512'd0;
             conv_shadow_mem_q_values <= 512'd0;
+            conv_shadow_crc <= FNV_OFFSET;
+            conv_shadow_byte_count <= 32'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -895,6 +911,8 @@ module vf_conv_sample_engine #(
                         if (conv_partial_first) begin
                             conv_psum_valid_mask <= 4'd0;
                             conv_psum_acc_values <= 128'd0;
+                            conv_shadow_crc <= FNV_OFFSET;
+                            conv_shadow_byte_count <= 32'd0;
                             for (psum_i = 0; psum_i < 4; psum_i = psum_i + 1) begin
                                 if (psum_i < scoreboard_tile_output_count) begin
                                     conv_psum_valid_mask[psum_i] <= 1'b1;
@@ -913,6 +931,10 @@ module vf_conv_sample_engine #(
                             end
                         end
                         if (conv_writeback_valid_mask != 4'd0) begin
+                            writeback_crc_value =
+                                conv_partial_first ? FNV_OFFSET : conv_shadow_crc;
+                            writeback_byte_count_value =
+                                conv_partial_first ? 32'd0 : conv_shadow_byte_count;
                             conv_shadow_valid_mask <= conv_writeback_valid_mask;
                             conv_shadow_output_byte_offsets <= conv_writeback_output_byte_offsets;
                             conv_shadow_q_values <= conv_writeback_q_values;
@@ -926,8 +948,15 @@ module vf_conv_sample_engine #(
                                         conv_writeback_output_byte_offsets[wb_i*32 +: 32];
                                     conv_shadow_mem_q_values[writeback_slot*32 +: 32] <=
                                         conv_writeback_q_values[wb_i*32 +: 32];
+                                    writeback_crc_value =
+                                        fnv_byte(writeback_crc_value,
+                                                 conv_writeback_q_values[wb_i*32 +: 8]);
+                                    writeback_byte_count_value =
+                                        writeback_byte_count_value + 32'd1;
                                 end
                             end
+                            conv_shadow_crc <= writeback_crc_value;
+                            conv_shadow_byte_count <= writeback_byte_count_value;
                         end
                         state <= ST_DONE;
                     end

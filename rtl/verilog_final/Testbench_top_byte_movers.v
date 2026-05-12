@@ -119,6 +119,8 @@ module Testbench_top_byte_movers;
     wire conv_shadow_read_valid;
     wire [31:0] conv_shadow_read_output_byte_offset;
     wire [31:0] conv_shadow_read_q_value;
+    wire [31:0] conv_shadow_crc;
+    wire [31:0] conv_shadow_byte_count;
     wire [3:0] conv_psum_valid_mask;
     wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
@@ -253,6 +255,8 @@ module Testbench_top_byte_movers;
         .conv_shadow_read_valid(conv_shadow_read_valid),
         .conv_shadow_read_output_byte_offset(conv_shadow_read_output_byte_offset),
         .conv_shadow_read_q_value(conv_shadow_read_q_value),
+        .conv_shadow_crc(conv_shadow_crc),
+        .conv_shadow_byte_count(conv_shadow_byte_count),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),

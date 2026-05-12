@@ -191,7 +191,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback, bit7 CONV shadow readback check |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
@@ -210,8 +210,8 @@ Descriptor word layout:
 | 25 | CONV expected sample input byte offset |
 | 26 | CONV expected sample weight byte offset |
 | 27 | CONV expected sample output byte offset |
-| 28 | CONV expected first-lane input byte offset |
-| 29 | CONV expected first-lane weight byte offset |
+| 28 | CONV expected first-lane input byte offset, or expected shadow CRC when word 3 bit8 is set |
+| 29 | CONV expected first-lane weight byte offset, or expected shadow byte count when word 3 bit8 is set |
 | 30 | CONV expected valid lane count across the 16-lane window prefix |
 | 31 | CONV tile prefix check `{last_first_valid, last_valid_count, tile_output_count}` in bits 16, 15:8, 7:0 |
 
@@ -231,7 +231,10 @@ mask/offset/q tuple, and updates a 16-slot shadow output memory indexed by
 output byte offset low bits on the store handshake. A later CONV command can
 probe the same shadow memory with its descriptor-driven output byte offset and
 observe the stored offset/q tuple before full output SRAM/DRAM writeback exists;
-word 3 bit 7 asks the host to check that readback against word 19.
+word 3 bit 7 asks the host to check that readback against word 19. Final
+writeback bytes also update a rolling FNV CRC and byte count; word 3 bit 8 asks
+the host to check those against words 28/29 as the bridge toward full tensor
+SRAM/DRAM CRC compare.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
@@ -239,4 +242,5 @@ the host checks the cumulative accumulator through the result-buffer skeleton
 and the writeback/shadow tuple plus shadow memory offsets/q values. The
 generator also emits a follow-up CONV probe descriptor that reads back the last
 tile output slot from the shadow SRAM and checks the stored q answer through
-word 3 bit 7 / word 19.
+word 3 bit 7 / word 19, plus the rolling shadow CRC/count through word 3 bit 8
+and words 28/29.
