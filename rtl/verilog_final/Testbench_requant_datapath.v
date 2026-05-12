@@ -23,6 +23,7 @@ module Testbench_requant_datapath;
     wire signed [7:0] out_q;
     integer failures;
     integer watchdog;
+    reg saw_store_token;
 
     always #5 clk = ~clk;
 
@@ -37,14 +38,19 @@ module Testbench_requant_datapath;
         .zp_out(zp_out),
         .act_min(act_min),
         .act_max(act_max),
+        .read_input_from_l1(1'b0),
         .sramcrc_mode(1'b0),
         .sramcrc_expected_count(32'd0),
         .out_byte_offset(32'd0),
+        .l1_req_base_addr(22'd0),
         .l1_req_valid(l1_req_valid),
         .l1_req_ready(1'b1),
         .l1_req_write(l1_req_write),
+        .l1_req_addr(),
         .l1_req_bytes(l1_req_bytes),
         .l1_req_payload_cycles(l1_req_payload_cycles),
+        .l1_req_wdata(),
+        .l1_req_wstrb(),
         .busy(busy),
         .done_valid(done_valid),
         .done_ready(1'b1),
@@ -67,9 +73,12 @@ module Testbench_requant_datapath;
             start_valid = 1'b1;
             @(posedge clk);
             start_valid = 1'b0;
+            saw_store_token = 1'b0;
 
             watchdog = 0;
             while (!done_valid && watchdog < 100) begin
+                if (l1_req_valid && l1_req_write && (l1_req_bytes == 32'd1))
+                    saw_store_token = 1'b1;
                 watchdog = watchdog + 1;
                 @(posedge clk);
             end
@@ -84,7 +93,7 @@ module Testbench_requant_datapath;
                              name, scaled_out, exp_scaled, out_q, exp_q);
                     failures = failures + 1;
                 end
-                if (!l1_req_write || (l1_req_bytes !== 32'd1)) begin
+                if (!saw_store_token) begin
                     $display("FAIL: %0s store token write=%0d bytes=%0d",
                              name, l1_req_write, l1_req_bytes);
                     failures = failures + 1;
@@ -104,6 +113,7 @@ module Testbench_requant_datapath;
         zp_out = 32'sd0;
         act_min = -32'sd128;
         act_max = 32'sd127;
+        saw_store_token = 1'b0;
         failures = 0;
 
         repeat (4) @(posedge clk);

@@ -302,7 +302,9 @@ endmodule
 module vf_conv_sample_engine #(
     parameter MAX_ELEMS = 16,
     parameter L1_BYTES_PER_CYCLE = 256,
-    parameter MAX_CONV_OUTPUT_SRAM_BYTES = 16777216
+    parameter MAX_CONV_OUTPUT_SRAM_BYTES = 16777216,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input                         clk,
     input                         rst_n,
@@ -345,14 +347,18 @@ module vf_conv_sample_engine #(
     input      [31:0]             conv_refcrc_expected_crc,
     input      [31:0]             conv_refcrc_expected_count,
     input      [31:0]             conv_refcrc_ref_off,
+    input      [ADDR_WIDTH-1:0]   l1_req_base_addr,
     input      [15:0]             conv_sample_kh,
     input      [15:0]             conv_sample_kw,
     input      [15:0]             conv_sample_ic,
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
+    output     [ADDR_WIDTH-1:0]   l1_req_addr,
     output     [31:0]             l1_req_bytes,
     output     [31:0]             l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0]   l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output                        busy,
     output                        done_valid,
     input                         done_ready,
@@ -540,6 +546,14 @@ module vf_conv_sample_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
+        end
+    endfunction
+
     initial begin
         refcrc_program_path = "";
         refcrc_fd = 0;
@@ -566,8 +580,17 @@ module vf_conv_sample_engine #(
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = req_state;
     assign l1_req_write = (state == ST_STORE);
+    assign l1_req_addr =
+        ((state == ST_STORE) && conv_partial_final) ?
+        conv_read_output_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count : sample_bytes;
     assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 : payload_cycles;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
 
     wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
     wire [31:0] conv_k_w_safe = (conv_k_w == 8'd0) ? 32'd1 : {24'd0, conv_k_w};
@@ -1114,7 +1137,9 @@ module vf_conv_sample_engine #(
 endmodule
 
 module vf_requant_sample_engine #(
-    parameter WRITE_BYTES_PER_CYCLE = 64
+    parameter WRITE_BYTES_PER_CYCLE = 64,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input                  clk,
     input                  rst_n,
@@ -1130,13 +1155,17 @@ module vf_requant_sample_engine #(
     input                  sramcrc_mode,
     input      [31:0]      sramcrc_expected_count,
     input      [31:0]      out_byte_offset,
+    input      [ADDR_WIDTH-1:0] l1_req_base_addr,
     input                  l1_resp_valid,
     input      [127:0]     l1_resp_rdata,
     output                 l1_req_valid,
     input                  l1_req_ready,
     output                 l1_req_write,
+    output     [ADDR_WIDTH-1:0] l1_req_addr,
     output     [31:0]      l1_req_bytes,
     output     [31:0]      l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0] l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output                 busy,
     output                 done_valid,
     input                  done_ready,
@@ -1181,6 +1210,14 @@ module vf_requant_sample_engine #(
         input [7:0] byte_value;
         begin
             fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
         end
     endfunction
 
@@ -1261,8 +1298,15 @@ module vf_requant_sample_engine #(
     assign l1_req_valid = ((state == ST_PARAM) && read_input_from_l1 && !param_req_sent) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
+    assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 : 32'd1;
     assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
     assign scaled_out = clamped;
     assign out_q = clamped[7:0];
 
@@ -1395,7 +1439,9 @@ module vf_requant_sample_engine #(
 endmodule
 
 module vf_pool_sample_engine #(
-    parameter MAX_ELEMS = 16
+    parameter MAX_ELEMS = 16,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input                         clk,
     input                         rst_n,
@@ -1410,6 +1456,7 @@ module vf_pool_sample_engine #(
     input      [31:0]             refcrc_expected_count,
     input      [31:0]             refcrc_ref_off,
     input      [31:0]             out_byte_offset,
+    input      [ADDR_WIDTH-1:0]   l1_req_base_addr,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
     input                         l1_resp_valid,
@@ -1417,8 +1464,11 @@ module vf_pool_sample_engine #(
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
+    output     [ADDR_WIDTH-1:0]   l1_req_addr,
     output     [31:0]             l1_req_bytes,
     output     [31:0]             l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0]   l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output                        busy,
     output                        done_valid,
     input                         done_ready,
@@ -1498,10 +1548,17 @@ module vf_pool_sample_engine #(
     assign l1_req_valid = ((state == ST_FETCH) && (!read_sample_from_l1 || !fetch_req_sent)) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
+    assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = (state == ST_FETCH) ? ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                                           {24'd0, safe_count}) :
                           (fp_mode ? 32'd8 : (int16_mode ? 32'd4 : 32'd1));
     assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
     assign out_q = pool_out[7:0];
 
     function [31:0] fnv_byte;
@@ -1509,6 +1566,14 @@ module vf_pool_sample_engine #(
         input [7:0] byte_value;
         begin
             fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
         end
     endfunction
 
@@ -1783,7 +1848,9 @@ module vf_pool_sample_engine #(
 endmodule
 
 module vf_ewe_sample_engine #(
-    parameter MAX_ELEMS = 16
+    parameter MAX_ELEMS = 16,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input                         clk,
     input                         rst_n,
@@ -1797,6 +1864,7 @@ module vf_ewe_sample_engine #(
     input                         sramcrc_mode,
     input      [31:0]             sramcrc_expected_count,
     input      [31:0]             out_byte_offset,
+    input      [ADDR_WIDTH-1:0]   l1_req_base_addr,
     input signed [31:0]           zp_a,
     input signed [31:0]           zp_b,
     input signed [31:0]           zp_out,
@@ -1817,8 +1885,11 @@ module vf_ewe_sample_engine #(
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
+    output     [ADDR_WIDTH-1:0]   l1_req_addr,
     output     [31:0]             l1_req_bytes,
     output     [31:0]             l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0]   l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output                        busy,
     output                        done_valid,
     input                         done_ready,
@@ -1890,6 +1961,14 @@ module vf_ewe_sample_engine #(
         input [7:0] byte_value;
         begin
             fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
         end
     endfunction
 
@@ -2093,9 +2172,16 @@ module vf_ewe_sample_engine #(
     assign l1_req_valid = ((state == ST_A) && (!read_a_from_l1 || !a_req_sent)) ||
                           (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
+    assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                    {24'd0, safe_count};
     assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
     assign out_q = first_lane_value[7:0];
 
     always @* begin
@@ -2269,7 +2355,9 @@ module vf_udma_engine #(
     parameter L1_BYTES_PER_CYCLE = 256,
     parameter DRAM_BYTES_PER_CYCLE = 48,
     parameter DRAM_STARTUP_CYCLES = 50,
-    parameter DRAM_CMD_CYCLES = 8
+    parameter DRAM_CMD_CYCLES = 8,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input             clk,
     input             rst_n,
@@ -2284,11 +2372,15 @@ module vf_udma_engine #(
     input      [7:0]  input_byte,
     input      [31:0] out_byte_offset,
     input      [31:0] sramcrc_expected_count,
+    input      [ADDR_WIDTH-1:0] l1_req_base_addr,
     output            l1_req_valid,
     input             l1_req_ready,
     output            l1_req_write,
+    output     [ADDR_WIDTH-1:0] l1_req_addr,
     output     [31:0] l1_req_bytes,
     output     [31:0] l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0] l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output            busy,
     output            done_valid,
     input             done_ready,
@@ -2370,14 +2462,29 @@ module vf_udma_engine #(
 
     assign l1_req_valid = payload_phase_active && !payload_token_sent;
     assign l1_req_write = !direction_write;
+    assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = bytes;
     assign l1_req_payload_cycles = l1_payload_cycles;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(input_byte, l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
 
     function [31:0] fnv_byte;
         input [31:0] crc;
         input [7:0] byte_value;
         begin
             fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
         end
     endfunction
 
@@ -2448,7 +2555,9 @@ module vf_tnps_engine #(
     parameter READ_PORTS = 2,
     parameter WRITE_PORTS = 2,
     parameter PAYLOAD_BYTES = 32,
-    parameter PERMUTE_BYTES_PER_CYCLE = 128
+    parameter PERMUTE_BYTES_PER_CYCLE = 128,
+    parameter ADDR_WIDTH = 22,
+    parameter DATA_WIDTH = 128
 ) (
     input             clk,
     input             rst_n,
@@ -2471,11 +2580,15 @@ module vf_tnps_engine #(
     input      [7:0]  input_byte,
     input      [31:0] out_byte_offset,
     input      [31:0] sramcrc_expected_count,
+    input      [ADDR_WIDTH-1:0] l1_req_base_addr,
     output            l1_req_valid,
     input             l1_req_ready,
     output            l1_req_write,
+    output     [ADDR_WIDTH-1:0] l1_req_addr,
     output     [31:0] l1_req_bytes,
     output     [31:0] l1_req_payload_cycles,
+    output     [DATA_WIDTH-1:0] l1_req_wdata,
+    output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
     output            busy,
     output            done_valid,
     input             done_ready,
@@ -2509,6 +2622,14 @@ module vf_tnps_engine #(
         input [7:0] byte_value;
         begin
             fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
         end
     endfunction
 
@@ -2567,10 +2688,17 @@ module vf_tnps_engine #(
 
     assign l1_req_valid = payload_phase_active && !payload_token_sent;
     assign l1_req_write = (phase_id == PH_PAYLOAD_WRITE);
+    assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = bytes;
     assign l1_req_payload_cycles = (phase_id == PH_PAYLOAD_WRITE)
         ? payload_write_cycles
         : payload_read_cycles;
+    assign l1_req_wdata = l1_req_write
+        ? byte_lane_wdata(input_byte, l1_req_addr[3:0])
+        : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write
+        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        : {DATA_WIDTH/8{1'b0}};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
