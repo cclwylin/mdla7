@@ -13,6 +13,12 @@ module host_final #(
     output reg [31:0]  udma_dram_read_bytes,
     output reg [31:0]  udma_codec_cycles,
     output reg         udma_direction_write,
+    output reg         udma_final_write_mode,
+    output reg         udma_sramcrc_mode,
+    output reg [7:0]   udma_input_byte,
+    output reg [31:0]  udma_out_byte_offset,
+    output reg [31:0]  udma_sramcrc_expected_crc,
+    output reg [31:0]  udma_sramcrc_expected_count,
     output reg [21:0]  l1mesh_addr,
     output reg [127:0] l1mesh_wdata,
     output reg [15:0]  l1mesh_wstrb,
@@ -121,6 +127,8 @@ module host_final #(
     input      [3:0]   active_phase_id,
     input      [31:0]  active_remaining_cycles,
     input      [31:0]  placement_route_cycles,
+    input      [31:0]  udma_sramcrc_crc,
+    input      [31:0]  udma_sramcrc_count,
     input      [31:0]  tnps_sample_src_byte_offset,
     input      [31:0]  tnps_sample_dst_byte_offset,
     input              tnps_sample_valid,
@@ -245,6 +253,12 @@ module host_final #(
             bytes <= cmd_mem[base + 1];
             l1mesh_addr <= cmd_mem[base + 2][21:0];
             udma_direction_write <= cmd_mem[base + 3][0];
+            udma_final_write_mode <= cmd_mem[base + 3][6];
+            udma_sramcrc_mode <= cmd_mem[base + 3][10];
+            udma_input_byte <= cmd_mem[base + 6][7:0];
+            udma_out_byte_offset <= cmd_mem[base + 27];
+            udma_sramcrc_expected_crc <= cmd_mem[base + 28];
+            udma_sramcrc_expected_count <= cmd_mem[base + 29];
             tnps_mode_space_to_depth <= cmd_mem[base + 3][1];
             udma_dram_read_bytes <= cmd_mem[base + 4];
             udma_codec_cycles <= cmd_mem[base + 5];
@@ -523,6 +537,12 @@ module host_final #(
             udma_dram_read_bytes <= 32'd0;
             udma_codec_cycles <= 32'd0;
             udma_direction_write <= 1'b0;
+            udma_final_write_mode <= 1'b0;
+            udma_sramcrc_mode <= 1'b0;
+            udma_input_byte <= 8'd0;
+            udma_out_byte_offset <= 32'd0;
+            udma_sramcrc_expected_crc <= 32'd0;
+            udma_sramcrc_expected_count <= 32'd0;
             l1mesh_addr <= 22'd0;
             l1mesh_wdata <= 128'd0;
             l1mesh_wstrb <= 16'd0;
@@ -880,6 +900,16 @@ module host_final #(
                                      requant_sramcrc_expected_crc,
                                      requant_sramcrc_count,
                                      requant_sramcrc_expected_count);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_UDMA) && udma_sramcrc_mode &&
+                            ((udma_sramcrc_crc !== udma_sramcrc_expected_crc) ||
+                             (udma_sramcrc_count !== udma_sramcrc_expected_count))) begin
+                            $display("HOST_FINAL_FAIL: UDMA sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                                     command_index, udma_sramcrc_crc,
+                                     udma_sramcrc_expected_crc,
+                                     udma_sramcrc_count,
+                                     udma_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&

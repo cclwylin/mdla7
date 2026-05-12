@@ -11,6 +11,12 @@ module Testbench_host_program;
     wire [31:0] udma_dram_read_bytes;
     wire [31:0] udma_codec_cycles;
     wire udma_direction_write;
+    wire udma_final_write_mode;
+    wire udma_sramcrc_mode;
+    wire [7:0] udma_input_byte;
+    wire [31:0] udma_out_byte_offset;
+    wire [31:0] udma_sramcrc_expected_crc;
+    wire [31:0] udma_sramcrc_expected_count;
     wire [21:0] l1mesh_addr;
     wire [127:0] l1mesh_wdata;
     wire [15:0] l1mesh_wstrb;
@@ -115,6 +121,8 @@ module Testbench_host_program;
     wire [3:0] active_op_class;
     wire [3:0] active_phase_id;
     wire [31:0] active_remaining_cycles;
+    wire [31:0] udma_sramcrc_crc;
+    wire [31:0] udma_sramcrc_count;
     wire [31:0] tnps_sample_src_byte_offset;
     wire [31:0] tnps_sample_dst_byte_offset;
     wire tnps_sample_valid;
@@ -193,6 +201,12 @@ module Testbench_host_program;
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
         .udma_direction_write(udma_direction_write),
+        .udma_final_write_mode(udma_final_write_mode),
+        .udma_sramcrc_mode(udma_sramcrc_mode),
+        .udma_input_byte(udma_input_byte),
+        .udma_out_byte_offset(udma_out_byte_offset),
+        .udma_sramcrc_expected_crc(udma_sramcrc_expected_crc),
+        .udma_sramcrc_expected_count(udma_sramcrc_expected_count),
         .l1mesh_addr(l1mesh_addr),
         .l1mesh_wdata(l1mesh_wdata),
         .l1mesh_wstrb(l1mesh_wstrb),
@@ -299,6 +313,8 @@ module Testbench_host_program;
         .active_phase_id(active_phase_id),
         .active_remaining_cycles(active_remaining_cycles),
         .placement_route_cycles(placement_route_cycles),
+        .udma_sramcrc_crc(udma_sramcrc_crc),
+        .udma_sramcrc_count(udma_sramcrc_count),
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
@@ -373,6 +389,11 @@ module Testbench_host_program;
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
         .udma_direction_write(udma_direction_write),
+        .udma_final_write_mode(udma_final_write_mode),
+        .udma_sramcrc_mode(udma_sramcrc_mode),
+        .udma_input_byte(udma_input_byte),
+        .udma_out_byte_offset(udma_out_byte_offset),
+        .udma_sramcrc_expected_count(udma_sramcrc_expected_count),
         .l1mesh_addr(l1mesh_addr),
         .l1mesh_wdata(l1mesh_wdata),
         .l1mesh_wstrb(l1mesh_wstrb),
@@ -477,6 +498,8 @@ module Testbench_host_program;
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
+        .udma_sramcrc_crc(udma_sramcrc_crc),
+        .udma_sramcrc_count(udma_sramcrc_count),
         .tnps_sramcrc_crc(tnps_sramcrc_crc),
         .tnps_sramcrc_count(tnps_sramcrc_count),
         .placement_route_cycles(placement_route_cycles),

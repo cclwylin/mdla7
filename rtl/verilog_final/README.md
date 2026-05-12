@@ -186,7 +186,10 @@ Current converter behavior:
   weight/parameter payloads, computes the expected lane-sum, and `host_final.v`
   checks the Verilog INT16 EWE result.
 - `RESHAPE` / `CONCAT` / `TRANSPOSE` / `SLICE` / materialized byte movers:
-  emitted as UDMA-style byte-moving descriptors for now.
+  emitted as UDMA-style byte-moving descriptors for now. With `--crc-coverage`,
+  true UDMA-class `GATHER`/`MATERIALIZE` layers also emit a validated output-byte
+  prefix, write it into the UDMA output SRAM image, and check that image with
+  the UDMA SRAM CRC/count walker.
 
 The generator has an experimental `--enable-meta-tnps` option for
 TRANSPOSE/SLICE/SPLIT metadata decoding, but `mdla7_top_final` still needs
@@ -233,7 +236,9 @@ Pool datapath status:
   synthesizable IEEE754 pipeline.
 - It also has a signed INT16 avg/max sample path for hybrid/int16 bring-up
   descriptors.
-- This is still a sample-window path; full H/W/C window traversal comes later.
+- The output SRAM CRC path currently emits INT8 POOL windows; INT16/FP POOL use
+  sample checks plus full-ref CRC where available. Full H/W/C traversal comes
+  later.
 
 EWE datapath status:
 
@@ -246,6 +251,8 @@ EWE datapath status:
   yet a synthesizable IEEE754 pipeline.
 - It also has a signed INT16 ADD/MUL/SUB sample lane path for int16 bring-up
   descriptors.
+- The output SRAM CRC path currently emits INT8 final-q EWE windows; INT16/FP
+  EWE are sample-check coverage only.
 - This is still a small vector correctness check plus timing token path; full
   tensor traversal and writeback buffering come later.
 
@@ -256,8 +263,8 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV/POOL/TNPS final writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check, bit9 CONV/POOL ref CRC, bit10 CONV/REQUANT/EWE/POOL/TNPS SRAM CRC |
-| 4..7 | CONV/POOL/EWE-A/TNPS sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV/POOL/TNPS/UDMA final writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check, bit9 CONV/POOL ref CRC, bit10 CONV/REQUANT/EWE/POOL/TNPS/UDMA SRAM CRC |
+| 4..7 | CONV/POOL/EWE-A/TNPS sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields; word 6 carries UDMA coverage input byte when word 3 bit6 is set |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
 | 13 | CONV bias or TNPS element bytes |

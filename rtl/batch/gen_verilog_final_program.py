@@ -698,6 +698,61 @@ def tnps_sramcrc_probe_descriptor(layer: Layer, ordinal: int, ref_bytes: bytes) 
     return words
 
 
+def udma_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.op_kind not in UDMA_OPS:
+        return None
+    if out_byte_index < 0 or out_byte_index >= layer.ref_size:
+        return None
+    if layer.ref_off + out_byte_index >= len(data):
+        return None
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x30) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = 1
+    words[2] = addr
+    words[3] = 1 << 6
+    words[4] = 1
+    words[5] = 1
+    words[6] = data[layer.ref_off + out_byte_index]
+    words[19] = layer.index
+    words[27] = out_byte_index & 0xFFFF_FFFF
+    return words
+
+
+def udma_output_descriptors(layer: Layer, ordinal: int, max_output_bytes: int) -> list[list[int]]:
+    emit_bytes = min(max_output_bytes, layer.ref_size)
+    descs: list[list[int]] = []
+    for out_byte_index in range(emit_bytes):
+        desc = udma_output_descriptor(layer, ordinal + len(descs), out_byte_index)
+        if desc is None:
+            break
+        descs.append(desc)
+    return descs
+
+
+def udma_final_bytes(final_descs: list[list[int]]) -> bytes:
+    return bytes(desc[6] & 0xFF for desc in final_descs)
+
+
+def udma_sramcrc_probe_descriptor(layer: Layer, ordinal: int, ref_bytes: bytes) -> list[int] | None:
+    if layer.op_kind not in UDMA_OPS or not ref_bytes:
+        return None
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x30) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = max(1, len(ref_bytes) * 8)
+    words[2] = addr
+    words[3] = 1 << 10
+    words[4] = max(1, len(ref_bytes))
+    words[5] = 1
+    words[19] = layer.index
+    words[27] = 0
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    return words
+
+
 def shape_product(shape: list[int], rank: int) -> int:
     prod = 1
     for value in shape[:rank]:
@@ -2098,6 +2153,28 @@ def main() -> int:
                     )
                     if tnps_probe_desc is not None:
                         descs.append(tnps_probe_desc)
+        if args.emit_conv_partial_psum and layer.op_kind in UDMA_OPS:
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            if layer.ref_size > 0 and remaining_commands > 2:
+                max_udma_bytes = min(layer.ref_size, remaining_commands - 2, 512)
+                udma_sram_descs = udma_output_descriptors(
+                    layer,
+                    len(commands) + len(descs),
+                    max_output_bytes=max_udma_bytes,
+                )
+                generated_udma = udma_final_bytes(udma_sram_descs)
+                ref_udma = descriptor_for_layer.program_bytes[
+                    layer.ref_off:layer.ref_off + min(len(generated_udma), layer.ref_size)
+                ]
+                if generated_udma and generated_udma == ref_udma:
+                    descs.extend(udma_sram_descs)
+                    udma_probe_desc = udma_sramcrc_probe_descriptor(
+                        layer,
+                        len(commands) + len(descs),
+                        ref_udma,
+                    )
+                    if udma_probe_desc is not None:
+                        descs.append(udma_probe_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -2120,7 +2197,7 @@ def main() -> int:
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
-            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS) and (desc[3] & (1 << 10)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:
