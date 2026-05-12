@@ -94,6 +94,9 @@ module Testbench_host_program;
     wire [7:0] conv_tile_last_window_valid_count;
     wire [3:0] conv_tile_scoreboard_valid_mask;
     wire signed [31:0] conv_tile_scoreboard_q_sum;
+    wire [127:0] conv_tile_result_out_elem_indices;
+    wire [127:0] conv_tile_result_output_byte_offsets;
+    wire [127:0] conv_tile_result_q_values;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -209,6 +212,9 @@ module Testbench_host_program;
         .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .conv_tile_scoreboard_valid_mask(conv_tile_scoreboard_valid_mask),
         .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
+        .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
+        .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
+        .conv_tile_result_q_values(conv_tile_result_q_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -322,6 +328,9 @@ module Testbench_host_program;
         .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .conv_tile_scoreboard_valid_mask(conv_tile_scoreboard_valid_mask),
         .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
+        .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
+        .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
+        .conv_tile_result_q_values(conv_tile_result_q_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),

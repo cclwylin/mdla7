@@ -105,6 +105,9 @@ module mdla7_top_final #(
     output     [7:0]            conv_tile_last_window_valid_count,
     output     [3:0]            conv_tile_scoreboard_valid_mask,
     output signed [31:0]        conv_tile_scoreboard_q_sum,
+    output     [127:0]          conv_tile_result_out_elem_indices,
+    output     [127:0]          conv_tile_result_output_byte_offsets,
+    output     [127:0]          conv_tile_result_q_values,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
     output signed [31:0]        pool_out,
@@ -432,7 +435,10 @@ module mdla7_top_final #(
         .conv_tile_last_input_valid(conv_tile_last_input_valid),
         .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .conv_tile_scoreboard_valid_mask(conv_tile_scoreboard_valid_mask),
-        .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum)
+        .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
+        .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
+        .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
+        .conv_tile_result_q_values(conv_tile_result_q_values)
     );
 
     vf_requant_sample_engine u_requant (

@@ -218,6 +218,7 @@ words 16/17 hold the expected double-precision sample result bits `{high, low}`.
 INT8 CONV descriptors use words 20..31 to let the sample engine derive the
 first lane, last lane, valid lane count, and a small multi-output tile prefix
 of its descriptor-driven 2D NHWC/OHWI iterator and check those addresses
-alongside the sample MAC. The tile prefix also emits a 4-entry scoreboard
-valid mask and sample-output sum, which is the first result-stream skeleton
-before full psum/writeback buffering.
+alongside the sample MAC. The tile prefix also emits a 4-entry result buffer:
+valid mask, output element indices, output byte offsets, sample output values,
+and sample-output sum. This is the result-stream skeleton before full
+psum/writeback buffering.

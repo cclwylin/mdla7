@@ -365,7 +365,10 @@ module vf_conv_sample_engine #(
     output                        conv_tile_last_input_valid,
     output reg [7:0]              conv_tile_last_window_valid_count,
     output reg [3:0]              conv_tile_scoreboard_valid_mask,
-    output reg signed [31:0]      conv_tile_scoreboard_q_sum
+    output reg signed [31:0]      conv_tile_scoreboard_q_sum,
+    output reg [127:0]            conv_tile_result_out_elem_indices,
+    output reg [127:0]            conv_tile_result_output_byte_offsets,
+    output reg [127:0]            conv_tile_result_q_values
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -652,10 +655,20 @@ module vf_conv_sample_engine #(
         conv_tile_last_window_valid_count = conv_window_valid_count_at(conv_tile_last_out_elem_index);
         conv_tile_scoreboard_valid_mask = 4'd0;
         conv_tile_scoreboard_q_sum = 32'sd0;
+        conv_tile_result_out_elem_indices = 128'd0;
+        conv_tile_result_output_byte_offsets = 128'd0;
+        conv_tile_result_q_values = 128'd0;
         for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
             if (tile_i < scoreboard_tile_output_count) begin
                 conv_tile_scoreboard_valid_mask[tile_i] = 1'b1;
                 conv_tile_scoreboard_q_sum = conv_tile_scoreboard_q_sum + $signed(out_q);
+                conv_tile_result_out_elem_indices[tile_i*32 +: 32] =
+                    conv_out_elem_index + tile_i[31:0];
+                conv_tile_result_output_byte_offsets[tile_i*32 +: 32] =
+                    (conv_out_elem_index + tile_i[31:0]) *
+                    {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
+                conv_tile_result_q_values[tile_i*32 +: 32] =
+                    {{24{out_q[7]}}, out_q};
             end
         end
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin

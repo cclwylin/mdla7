@@ -100,6 +100,9 @@ module Testbench_top_byte_movers;
     wire [7:0] conv_tile_last_window_valid_count;
     wire [3:0] conv_tile_scoreboard_valid_mask;
     wire signed [31:0] conv_tile_scoreboard_q_sum;
+    wire [127:0] conv_tile_result_out_elem_indices;
+    wire [127:0] conv_tile_result_output_byte_offsets;
+    wire [127:0] conv_tile_result_q_values;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -213,6 +216,9 @@ module Testbench_top_byte_movers;
         .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .conv_tile_scoreboard_valid_mask(conv_tile_scoreboard_valid_mask),
         .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
+        .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
+        .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
+        .conv_tile_result_q_values(conv_tile_result_q_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -388,8 +394,12 @@ module Testbench_top_byte_movers;
             !conv_tile_last_input_valid ||
             (conv_tile_last_window_valid_count != 8'd4) ||
             (conv_tile_scoreboard_valid_mask != 4'b0111) ||
-            (conv_tile_scoreboard_q_sum != 32'sd120)) begin
-            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d tile_last_out=%0d tile_valid=%0d tile_count=%0d tile_mask=%04b tile_q_sum=%0d",
+            (conv_tile_scoreboard_q_sum != 32'sd120) ||
+            (conv_tile_result_out_elem_indices[31:0] != 32'd0) ||
+            (conv_tile_result_out_elem_indices[95:64] != 32'd2) ||
+            (conv_tile_result_output_byte_offsets[95:64] != 32'd2) ||
+            ($signed(conv_tile_result_q_values[95:64]) != 32'sd40)) begin
+            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d tile_last_out=%0d tile_valid=%0d tile_count=%0d tile_mask=%04b tile_q_sum=%0d entry0_idx=%0d entry2_idx=%0d entry2_off=%0d entry2_q=%0d",
                      conv_sample_input_valid,
                      conv_sample_input_byte_offset,
                      conv_sample_weight_byte_offset,
@@ -401,7 +411,11 @@ module Testbench_top_byte_movers;
                      conv_tile_last_input_valid,
                      conv_tile_last_window_valid_count,
                      conv_tile_scoreboard_valid_mask,
-                     conv_tile_scoreboard_q_sum);
+                     conv_tile_scoreboard_q_sum,
+                     conv_tile_result_out_elem_indices[31:0],
+                     conv_tile_result_out_elem_indices[95:64],
+                     conv_tile_result_output_byte_offsets[95:64],
+                     $signed(conv_tile_result_q_values[95:64]));
             failures = failures + 1;
         end
 

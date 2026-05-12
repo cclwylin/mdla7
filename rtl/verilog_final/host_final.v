@@ -100,6 +100,9 @@ module host_final #(
     input      [7:0]   conv_tile_last_window_valid_count,
     input      [3:0]   conv_tile_scoreboard_valid_mask,
     input signed [31:0] conv_tile_scoreboard_q_sum,
+    input      [127:0] conv_tile_result_out_elem_indices,
+    input      [127:0] conv_tile_result_output_byte_offsets,
+    input      [127:0] conv_tile_result_q_values,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -152,6 +155,12 @@ module host_final #(
     wire signed [31:0] expected_conv_tile_q_sum =
         $signed({{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]}) *
         $signed({24'd0, expected_conv_tile_count});
+    wire [31:0] expected_conv_tile_last_index = {24'd0, expected_conv_tile_count} - 32'd1;
+    wire [31:0] expected_conv_tile_last_byte_offset =
+        expected_conv_tile_last_index *
+        {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)};
+    wire [31:0] expected_conv_tile_q_value =
+        {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
 
     assign top_done_ready = 1'b1;
 
@@ -473,8 +482,17 @@ module host_final #(
                              (conv_tile_last_input_valid !== cmd_mem[base + 31][16]) ||
                              (conv_tile_last_window_valid_count !== cmd_mem[base + 31][15:8]) ||
                              (conv_tile_scoreboard_valid_mask !== expected_conv_tile_valid_mask) ||
-                             (conv_tile_scoreboard_q_sum !== expected_conv_tile_q_sum))) begin
-                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_mask=%04b expected=%04b tile_q_sum=%0d expected=%0d tile_count=%0d",
+                             (conv_tile_scoreboard_q_sum !== expected_conv_tile_q_sum) ||
+                             (conv_tile_result_out_elem_indices[31:0] !== 32'd0) ||
+                             (conv_tile_result_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_tile_result_q_values[31:0] !== expected_conv_tile_q_value) ||
+                             (conv_tile_result_out_elem_indices[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_last_index) ||
+                             (conv_tile_result_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_last_byte_offset) ||
+                             (conv_tile_result_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_q_value))) begin
+                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_mask=%04b expected=%04b tile_q_sum=%0d expected=%0d tile_first_idx=%0d tile_last_idx=%0d expected=%0d tile_last_off=%0d expected=%0d tile_q0=%0d tile_q_last=%0d expected=%0d tile_count=%0d",
                                      command_index,
                                      conv_sample_input_valid, cmd_mem[base + 3][3],
                                      conv_sample_input_byte_offset, cmd_mem[base + 25],
@@ -490,6 +508,14 @@ module host_final #(
                                      expected_conv_tile_valid_mask,
                                      conv_tile_scoreboard_q_sum,
                                      expected_conv_tile_q_sum,
+                                     conv_tile_result_out_elem_indices[31:0],
+                                     conv_tile_result_out_elem_indices[(expected_conv_tile_count - 8'd1) * 32 +: 32],
+                                     expected_conv_tile_last_index,
+                                     conv_tile_result_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32],
+                                     expected_conv_tile_last_byte_offset,
+                                     $signed(conv_tile_result_q_values[31:0]),
+                                     $signed(conv_tile_result_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]),
+                                     $signed(expected_conv_tile_q_value),
                                      expected_conv_tile_count);
                             test_fail <= 1'b1;
                         end
