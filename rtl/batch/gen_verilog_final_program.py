@@ -1599,7 +1599,12 @@ def int8_pool_output_sample(layer: Layer, out_elem_index: int) -> tuple[bytes, i
     return bytes(sample).ljust(16, b"\x00"), len(values), expected & 0xFF
 
 
-def pool_int8_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int) -> list[int] | None:
+def pool_int8_output_descriptor(
+    layer: Layer,
+    ordinal: int,
+    out_elem_index: int,
+    read_sample_from_l1: bool = False,
+) -> list[int] | None:
     sample = int8_pool_output_sample(layer, out_elem_index)
     if sample is None:
         return None
@@ -1610,7 +1615,7 @@ def pool_int8_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int)
     words[0] = OP_POOL
     words[1] = elem_count
     words[2] = addr
-    words[3] = 1 << 6
+    words[3] = (1 << 6) | ((1 << 11) if read_sample_from_l1 else 0)
     for idx in range(4):
         words[4 + idx] = pack_word(sample_bytes_value[idx * 4:(idx + 1) * 4])
     words[12] = elem_count | (avg_mode << 8)
@@ -1625,13 +1630,38 @@ def pool_int8_output_descriptors(
     ordinal: int,
     max_output_elems: int,
     start_output_elem: int = 0,
+    read_sample_from_l1: bool = False,
+    max_commands: int | None = None,
 ) -> list[list[int]]:
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
     start_output_elem = max(min(start_output_elem, output_elems - 1), 0)
     emit_output_elems = min(max_output_elems, output_elems - start_output_elem)
     descs: list[list[int]] = []
     for out_elem_index in range(start_output_elem, start_output_elem + emit_output_elems):
-        desc = pool_int8_output_descriptor(layer, ordinal + len(descs), out_elem_index)
+        sample = int8_pool_output_sample(layer, out_elem_index)
+        if sample is None:
+            break
+        sample_bytes_value, elem_count, _ = sample
+        if read_sample_from_l1:
+            if (out_elem_index & 0xF) + elem_count > 16:
+                break
+            if max_commands is not None and len(descs) + elem_count + 1 > max_commands:
+                break
+            for sample_idx in range(elem_count):
+                descs.append(
+                    l1_preload_byte_descriptor(
+                        ordinal + len(descs),
+                        out_elem_index + sample_idx,
+                        sample_bytes_value[sample_idx],
+                        layer.index,
+                    )
+                )
+        desc = pool_int8_output_descriptor(
+            layer,
+            ordinal + len(descs),
+            out_elem_index,
+            read_sample_from_l1=read_sample_from_l1,
+        )
         if desc is None:
             break
         descs.append(desc)
@@ -1639,7 +1669,11 @@ def pool_int8_output_descriptors(
 
 
 def pool_final_q_bytes(final_descs: list[list[int]]) -> bytes:
-    return bytes(desc[18] & 0xFF for desc in final_descs)
+    return bytes(
+        desc[18] & 0xFF
+        for desc in final_descs
+        if (desc[0] & 0xF) == OP_POOL and (desc[3] & (1 << 6))
+    )
 
 
 def pool_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
@@ -2104,11 +2138,14 @@ def main() -> int:
             pool_output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if elem_bytes(layer.dtype) == 1 and remaining_commands > 2:
-                max_pool_outputs = min(pool_output_elems, remaining_commands - 2, 512)
+                available_pool_output_cmds = max(remaining_commands - 2, 0)
+                max_pool_outputs = min(pool_output_elems, available_pool_output_cmds, 512)
                 pool_sram_descs = pool_int8_output_descriptors(
                     layer,
                     len(commands) + len(descs),
                     max_output_elems=max_pool_outputs,
+                    read_sample_from_l1=True,
+                    max_commands=available_pool_output_cmds,
                 )
                 generated_pool = pool_final_q_bytes(pool_sram_descs)
                 ref_pool = descriptor_for_layer.program_bytes[

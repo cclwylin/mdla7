@@ -1369,6 +1369,7 @@ module vf_pool_sample_engine #(
     input                         avg_mode,
     input                         fp_mode,
     input                         int16_mode,
+    input                         read_sample_from_l1,
     input                         refcrc_mode,
     input                         sramcrc_mode,
     input      [31:0]             refcrc_expected_count,
@@ -1376,6 +1377,8 @@ module vf_pool_sample_engine #(
     input      [31:0]             out_byte_offset,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
+    input                         l1_resp_valid,
+    input      [127:0]            l1_resp_rdata,
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
@@ -1440,10 +1443,13 @@ module vf_pool_sample_engine #(
     reg [31:0] sramcrc_crc_value;
     reg [31:0] sramcrc_count_value;
     reg [7:0] output_sram [0:MAX_POOL_OUTPUT_SRAM_BYTES-1];
+    reg fetch_req_sent;
+    reg [MAX_ELEMS*8-1:0] active_sample_vec;
     real fp_sum;
     real fp_value;
     real fp_max_value;
     real fp_pool_value;
+    integer fetch_i;
     wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 :
                              (elem_count > MAX_COUNT) ? MAX_COUNT :
                              elem_count;
@@ -1454,7 +1460,8 @@ module vf_pool_sample_engine #(
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
-    assign l1_req_valid = (state == ST_FETCH) || (state == ST_STORE);
+    assign l1_req_valid = ((state == ST_FETCH) && (!read_sample_from_l1 || !fetch_req_sent)) ||
+                          (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_bytes = (state == ST_FETCH) ? ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                                           {24'd0, safe_count}) :
@@ -1509,6 +1516,36 @@ module vf_pool_sample_engine #(
         end
     endfunction
 
+    function [7:0] l1_resp_lane;
+        input integer lane_idx;
+        integer absolute_lane;
+        begin
+            absolute_lane = lane_idx + out_byte_offset[3:0];
+            if (absolute_lane >= 16) begin
+                l1_resp_lane = 8'd0;
+            end else begin
+                case (absolute_lane[3:0])
+                    4'h0: l1_resp_lane = l1_resp_rdata[7:0];
+                    4'h1: l1_resp_lane = l1_resp_rdata[15:8];
+                    4'h2: l1_resp_lane = l1_resp_rdata[23:16];
+                    4'h3: l1_resp_lane = l1_resp_rdata[31:24];
+                    4'h4: l1_resp_lane = l1_resp_rdata[39:32];
+                    4'h5: l1_resp_lane = l1_resp_rdata[47:40];
+                    4'h6: l1_resp_lane = l1_resp_rdata[55:48];
+                    4'h7: l1_resp_lane = l1_resp_rdata[63:56];
+                    4'h8: l1_resp_lane = l1_resp_rdata[71:64];
+                    4'h9: l1_resp_lane = l1_resp_rdata[79:72];
+                    4'ha: l1_resp_lane = l1_resp_rdata[87:80];
+                    4'hb: l1_resp_lane = l1_resp_rdata[95:88];
+                    4'hc: l1_resp_lane = l1_resp_rdata[103:96];
+                    4'hd: l1_resp_lane = l1_resp_rdata[111:104];
+                    4'he: l1_resp_lane = l1_resp_rdata[119:112];
+                    default: l1_resp_lane = l1_resp_rdata[127:120];
+                endcase
+            end
+        end
+    endfunction
+
     always @* begin
         sum = 32'sd0;
         max_value = -32'sd128;
@@ -1522,7 +1559,7 @@ module vf_pool_sample_engine #(
         fp_max_value = -1.0e300;
         for (i = 0; i < MAX_ELEMS; i = i + 1) begin
             if (i < safe_count) begin
-                value = {{24{sample_vec[i*8 + 7]}}, sample_vec[i*8 +: 8]};
+                value = {{24{active_sample_vec[i*8 + 7]}}, active_sample_vec[i*8 +: 8]};
                 sum = sum + value;
                 if (value > max_value)
                     max_value = value;
@@ -1530,7 +1567,7 @@ module vf_pool_sample_engine #(
         end
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
             if (fp_i < safe_fp_count) begin
-                fp_value = fp16_to_real(sample_vec[fp_i*16 +: 16]);
+                fp_value = fp16_to_real(active_sample_vec[fp_i*16 +: 16]);
                 fp_sum = fp_sum + fp_value;
                 if (fp_value > fp_max_value)
                     fp_max_value = fp_value;
@@ -1538,7 +1575,7 @@ module vf_pool_sample_engine #(
         end
         for (i16_i = 0; i16_i < (MAX_ELEMS/2); i16_i = i16_i + 1) begin
             if (i16_i < safe_fp_count) begin
-                i16_value = {{16{sample_vec[i16_i*16 + 15]}}, sample_vec[i16_i*16 +: 16]};
+                i16_value = {{16{active_sample_vec[i16_i*16 + 15]}}, active_sample_vec[i16_i*16 +: 16]};
                 i16_sum = i16_sum + i16_value;
                 if (i16_value > i16_max_value)
                     i16_max_value = i16_value;
@@ -1575,10 +1612,13 @@ module vf_pool_sample_engine #(
             if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
                 refcrc_program_path = "";
             refcrc_fd = 0;
+            fetch_req_sent <= 1'b0;
+            active_sample_vec <= {MAX_ELEMS*8{1'b0}};
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
+                    fetch_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
                         if (refcrc_mode) begin
                             refcrc_crc <= FNV_OFFSET;
@@ -1603,12 +1643,23 @@ module vf_pool_sample_engine #(
                             sramcrc_remaining <= refcrc_expected_count;
                             state <= (refcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
+                            active_sample_vec <= sample_vec;
                             state <= ST_FETCH;
                         end
                     end
                 end
                 ST_FETCH: begin
-                    if (l1_req_ready) begin
+                    if (read_sample_from_l1) begin
+                        if (!fetch_req_sent && l1_req_ready)
+                            fetch_req_sent <= 1'b1;
+                        if (l1_resp_valid) begin
+                            active_sample_vec <= {MAX_ELEMS*8{1'b0}};
+                            for (fetch_i = 0; fetch_i < MAX_ELEMS; fetch_i = fetch_i + 1)
+                                active_sample_vec[fetch_i*8 +: 8] <= l1_resp_lane(fetch_i);
+                            pipe_remaining <= {24'd0, (fp_mode || int16_mode) ? safe_fp_count : safe_count} + 32'd1;
+                            state <= ST_PIPE;
+                        end
+                    end else if (l1_req_ready) begin
                         pipe_remaining <= {24'd0, (fp_mode || int16_mode) ? safe_fp_count : safe_count} + 32'd1;
                         state <= ST_PIPE;
                     end

@@ -85,6 +85,7 @@ module Testbench_host_program;
     wire pool_avg_mode;
     wire pool_fp_mode;
     wire pool_int16_mode;
+    wire pool_read_sample_from_l1;
     wire pool_refcrc_mode;
     wire pool_sramcrc_mode;
     wire [31:0] pool_refcrc_expected_crc;
@@ -278,6 +279,7 @@ module Testbench_host_program;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_read_sample_from_l1(pool_read_sample_from_l1),
         .pool_refcrc_mode(pool_refcrc_mode),
         .pool_sramcrc_mode(pool_sramcrc_mode),
         .pool_refcrc_expected_crc(pool_refcrc_expected_crc),
@@ -466,6 +468,7 @@ module Testbench_host_program;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_read_sample_from_l1(pool_read_sample_from_l1),
         .pool_refcrc_mode(pool_refcrc_mode),
         .pool_sramcrc_mode(pool_sramcrc_mode),
         .pool_refcrc_expected_count(pool_refcrc_expected_count),

@@ -88,6 +88,7 @@ module host_final #(
     output reg         pool_avg_mode,
     output reg         pool_fp_mode,
     output reg         pool_int16_mode,
+    output reg         pool_read_sample_from_l1,
     output reg         pool_refcrc_mode,
     output reg         pool_sramcrc_mode,
     output reg [31:0]  pool_refcrc_expected_crc,
@@ -354,6 +355,7 @@ module host_final #(
             pool_avg_mode <= cmd_mem[base + 12][8];
             pool_fp_mode <= cmd_mem[base + 12][9];
             pool_int16_mode <= cmd_mem[base + 12][11];
+            pool_read_sample_from_l1 <= cmd_mem[base + 3][11];
             pool_refcrc_mode <= cmd_mem[base + 3][9];
             pool_sramcrc_mode <= cmd_mem[base + 3][10];
             pool_refcrc_expected_crc <= cmd_mem[base + 28];
@@ -642,6 +644,7 @@ module host_final #(
             pool_avg_mode <= 1'b0;
             pool_fp_mode <= 1'b0;
             pool_int16_mode <= 1'b0;
+            pool_read_sample_from_l1 <= 1'b0;
             pool_refcrc_mode <= 1'b0;
             pool_sramcrc_mode <= 1'b0;
             pool_refcrc_expected_crc <= 32'd0;

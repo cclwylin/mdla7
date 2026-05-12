@@ -76,6 +76,7 @@ module Testbench_top_byte_movers;
     reg pool_avg_mode;
     reg pool_fp_mode;
     reg pool_int16_mode;
+    reg pool_read_sample_from_l1;
     reg [127:0] pool_sample_vec;
     reg [7:0] pool_elem_count;
     reg [1:0] ewe_op_mode;
@@ -232,6 +233,7 @@ module Testbench_top_byte_movers;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_read_sample_from_l1(pool_read_sample_from_l1),
         .pool_refcrc_mode(1'b0),
         .pool_sramcrc_mode(1'b0),
         .pool_refcrc_expected_count(32'd0),
@@ -426,6 +428,7 @@ module Testbench_top_byte_movers;
         pool_avg_mode = 1'b0;
         pool_fp_mode = 1'b0;
         pool_int16_mode = 1'b0;
+        pool_read_sample_from_l1 = 1'b0;
         pool_sample_vec = 128'd0;
         pool_elem_count = 8'd0;
         ewe_op_mode = 2'd0;

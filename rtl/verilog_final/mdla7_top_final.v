@@ -88,6 +88,7 @@ module mdla7_top_final #(
     input                       pool_avg_mode,
     input                       pool_fp_mode,
     input                       pool_int16_mode,
+    input                       pool_read_sample_from_l1,
     input                       pool_refcrc_mode,
     input                       pool_sramcrc_mode,
     input      [31:0]           pool_refcrc_expected_count,
@@ -282,6 +283,7 @@ module mdla7_top_final #(
     reg pool_avg_mode_q;
     reg pool_fp_mode_q;
     reg pool_int16_mode_q;
+    reg pool_read_sample_from_l1_q;
     reg pool_refcrc_mode_q;
     reg pool_sramcrc_mode_q;
     reg [31:0] pool_refcrc_expected_count_q;
@@ -627,6 +629,7 @@ module mdla7_top_final #(
         .avg_mode(pool_avg_mode_q),
         .fp_mode(pool_fp_mode_q),
         .int16_mode(pool_int16_mode_q),
+        .read_sample_from_l1(pool_read_sample_from_l1_q),
         .refcrc_mode(pool_refcrc_mode_q),
         .sramcrc_mode(pool_sramcrc_mode_q),
         .refcrc_expected_count(pool_refcrc_expected_count_q),
@@ -634,6 +637,8 @@ module mdla7_top_final #(
         .out_byte_offset(pool_out_byte_offset_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
+        .l1_resp_valid(run_pool && l1mesh_resp_valid),
+        .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(pool_l1_req_valid),
         .l1_req_ready(pool_l1_req_ready),
         .l1_req_write(pool_l1_req_write),
@@ -946,6 +951,7 @@ module mdla7_top_final #(
             pool_avg_mode_q <= 1'b0;
             pool_fp_mode_q <= 1'b0;
             pool_int16_mode_q <= 1'b0;
+            pool_read_sample_from_l1_q <= 1'b0;
             pool_refcrc_mode_q <= 1'b0;
             pool_sramcrc_mode_q <= 1'b0;
             pool_refcrc_expected_count_q <= 32'd0;
@@ -1057,6 +1063,7 @@ module mdla7_top_final #(
                         pool_avg_mode_q <= pool_avg_mode;
                         pool_fp_mode_q <= pool_fp_mode;
                         pool_int16_mode_q <= pool_int16_mode;
+                        pool_read_sample_from_l1_q <= pool_read_sample_from_l1;
                         pool_refcrc_mode_q <= pool_refcrc_mode;
                         pool_sramcrc_mode_q <= pool_sramcrc_mode;
                         pool_refcrc_expected_count_q <= pool_refcrc_expected_count;
