@@ -121,6 +121,7 @@ def conv2d_int8_window_sample(
     data: bytes,
     max_count: int = 16,
     start_lane: int = 0,
+    out_elem_index: int = 0,
 ) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int, int, bool, int]:
     """Return one NHWC/OHWI output-pixel sample window for INT8 CONV descriptors."""
     if (
@@ -132,10 +133,14 @@ def conv2d_int8_window_sample(
         act = data[act_off:act_off + min(max_count, max(layer.in_size - start_lane, 0))]
         wgt = data[wgt_off:wgt_off + min(max_count, max(layer.wgt_size - start_lane, 0))]
         elem_count = min(len(act), len(wgt), max_count)
-        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, False, 0, 0, 0, 1, False, 0
+        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, out_elem_index, False, 0, 0, 0, 1, False, 0
 
     act_values = bytearray()
     wgt_values = bytearray()
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+    oc = out_elem_index % max(layer.out_c, 1)
     last_kh = 0
     last_kw = 0
     last_ic = 0
@@ -152,11 +157,14 @@ def conv2d_int8_window_sample(
                     continue
                 if len(act_values) >= max_count:
                     break
-                input_elem = ((kh * layer.in_w + kw) * layer.in_c) + ic
-                weight_elem = (((kh * layer.k_w + kw) * layer.in_c + ic) * layer.out_c)
+                ih = oh + kh
+                iw = ow + kw
+                lane_valid = 0 <= ih < layer.in_h and 0 <= iw < layer.in_w
+                input_elem = ((ih * layer.in_w + iw) * layer.in_c) + ic
+                weight_elem = (((kh * layer.k_w + kw) * layer.in_c + ic) * layer.out_c) + oc
                 input_byte = input_elem
                 weight_byte = weight_elem
-                if input_byte >= layer.in_size or weight_byte >= layer.wgt_size:
+                if (not lane_valid) or input_byte >= layer.in_size or weight_byte >= layer.wgt_size:
                     lane_index += 1
                     continue
                 act_values.append(data[layer.in_off + input_byte])
@@ -177,8 +185,9 @@ def conv2d_int8_window_sample(
 
     elem_count = min(len(act_values), len(wgt_values), max_count)
     valid = elem_count > 0
-    tile_count = min(max(layer.out_w * layer.out_c, 1), 4)
-    last_out_elem = tile_count - 1
+    remaining_outputs = max(layer.out_h * layer.out_w * layer.out_c - out_elem_index, 1)
+    tile_count = min(remaining_outputs, 4)
+    last_out_elem = out_elem_index + tile_count - 1
     last_out_area = max(layer.out_w * layer.out_c, 1)
     last_oh = last_out_elem // last_out_area
     last_ow = (last_out_elem % last_out_area) // max(layer.out_c, 1)
@@ -209,7 +218,7 @@ def conv2d_int8_window_sample(
         last_ic,
         last_input_byte,
         last_weight_byte,
-        0,
+        out_elem_index,
         valid,
         first_input_byte,
         first_weight_byte,
@@ -754,6 +763,7 @@ def int8_conv_sample_descriptor(
     ordinal: int,
     start_lane: int = 0,
     max_count: int = 16,
+    out_elem_index: int = 0,
     psum_flag: int = 0,
     expected_psum: int | None = None,
 ) -> tuple[list[int], int] | None:
@@ -776,7 +786,13 @@ def int8_conv_sample_descriptor(
         tile_count,
         expected_tile_last_valid,
         expected_tile_last_valid_count,
-    ) = conv2d_int8_window_sample(layer, data, max_count=max_count, start_lane=start_lane)
+    ) = conv2d_int8_window_sample(
+        layer,
+        data,
+        max_count=max_count,
+        start_lane=start_lane,
+        out_elem_index=out_elem_index,
+    )
     if elem_count == 0:
         return None
     bias = 0
@@ -854,6 +870,31 @@ def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]
         final_q = clamp_i8(mbqm(clamp_i32(cumulative_acc), 1073741824, 1))
         descs[-1][18] = final_q & 0xFF
     return descs
+
+
+def conv_shadow_readback_descriptor(
+    layer: Layer,
+    ordinal: int,
+    final_desc: list[int],
+) -> list[int] | None:
+    tile_count = final_desc[31] & 0xFF
+    if tile_count == 0:
+        tile_count = 1
+    read_elem_index = min(tile_count, 4) - 1
+    sample = int8_conv_sample_descriptor(
+        layer,
+        ordinal,
+        start_lane=0,
+        max_count=8,
+        out_elem_index=read_elem_index,
+    )
+    if sample is None:
+        return None
+    desc, _ = sample
+    desc[3] |= 1 << 7
+    desc[19] = ((final_desc[18] & 0xFF) if final_desc[18] < 0x80 else (final_desc[18] & 0xFF) - 0x100) & 0xFFFF_FFFF
+    desc[31] = (desc[31] & ~0xFF) | 1
+    return desc
 
 
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
@@ -945,6 +986,14 @@ def main() -> int:
             (desc[12] & ((1 << 8) | (1 << 11))) == 0
         ):
             descs = conv_partial_psum_descriptors(layer, len(commands))
+            if descs:
+                probe_desc = conv_shadow_readback_descriptor(
+                    layer,
+                    len(commands) + len(descs),
+                    descs[-1],
+                )
+                if probe_desc is not None:
+                    descs.append(probe_desc)
         else:
             descs = [desc] if desc is not None else []
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))

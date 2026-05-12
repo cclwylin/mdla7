@@ -236,4 +236,7 @@ word 3 bit 7 asks the host to check that readback against word 19.
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton
-and the writeback/shadow tuple plus shadow memory offsets/q values.
+and the writeback/shadow tuple plus shadow memory offsets/q values. The
+generator also emits a follow-up CONV probe descriptor that reads back the last
+tile output slot from the shadow SRAM and checks the stored q answer through
+word 3 bit 7 / word 19.
