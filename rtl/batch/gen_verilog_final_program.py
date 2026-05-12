@@ -2179,6 +2179,77 @@ def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]
     return descs
 
 
+def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]:
+    multiplier = 1073741824
+    shift = 1
+    input_value = 42
+    out_q = max(-128, min(127, mbqm(input_value, multiplier, shift))) & 0xFF
+    l1_base = 0
+    out_byte_offset = 32
+    expected = bytes([out_q]) + bytes(15)
+    descs: list[list[int]] = []
+
+    for lane in range(16):
+        words = [0] * WORDS_PER_COMMAND
+        words[0] = OP_UDMA
+        words[1] = 1
+        words[2] = (l1_base + lane) & 0x003F_FFFF
+        words[3] = 1 << 13
+        words[4] = 1
+        words[5] = 1
+        words[6] = 0
+        words[19] = layer.index
+        stamp_synth_microblock_metadata(
+            words,
+            layer.index,
+            ordinal + lane,
+            ordinal + lane,
+            SMF_LOAD_A,
+        )
+        descs.append(words)
+
+    requant = [0] * WORDS_PER_COMMAND
+    requant[0] = OP_REQUANT
+    requant[1] = 1
+    requant[2] = l1_base & 0x003F_FFFF
+    requant[3] = 1 << 13
+    requant[4] = input_value & 0xFFFF_FFFF
+    requant[14] = multiplier & 0xFFFF_FFFF
+    requant[15] = shift & 0xFF
+    requant[16] = (-128) & 0xFFFF_FFFF
+    requant[17] = 127
+    requant[18] = out_q
+    requant[19] = layer.index
+    requant[27] = 0
+    stamp_synth_microblock_metadata(
+        requant,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE,
+    )
+    descs.append(requant)
+
+    l1crc = [0] * WORDS_PER_COMMAND
+    l1crc[0] = OP_L1CRC
+    l1crc[1] = len(expected)
+    l1crc[2] = l1_base & 0x003F_FFFF
+    l1crc[3] = 1 << 13
+    l1crc[19] = layer.index
+    l1crc[28] = fnv_bytes(expected)
+    l1crc[29] = len(expected)
+    stamp_synth_microblock_metadata(
+        l1crc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_STORE,
+    )
+    descs.append(l1crc)
+
+    return descs
+
+
 def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
@@ -2405,6 +2476,7 @@ def main() -> int:
         if args.microblock_descriptors:
             descs = synth_microblock_descriptors(layer, len(commands))
             descs.extend(udma_l1_output_sram_crc_probe(layer, len(commands) + len(descs)))
+            descs.extend(requant_l1_output_sram_crc_probe(layer, len(commands) + len(descs)))
             fill_desc = udma_ref_fill_descriptor(layer, len(commands) + len(descs))
             if fill_desc is not None:
                 descs.append(fill_desc)

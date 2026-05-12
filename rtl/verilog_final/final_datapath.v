@@ -2460,10 +2460,14 @@ module vf_udma_engine #(
         ((phase_id == PH_L1_PAYLOAD_READ) || (phase_id == PH_L1_PAYLOAD_WRITE));
     reg payload_token_sent;
     reg final_l1_write_done;
+    reg final_l1_resp_armed;
+    reg [3:0] final_l1_resp_guard;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire start_fire = start_valid && start_ready;
     wire final_l1_write_pending = final_write_mode && !ref_fill_mode && direction_write;
-    wire final_l1_write_fire = final_l1_write_pending && l1_resp_valid && !final_l1_write_done;
+    wire final_l1_write_fire =
+        final_l1_write_pending && payload_token_sent &&
+        final_l1_resp_armed && l1_resp_valid && !final_l1_write_done;
     wire phase_stall =
         (payload_phase_active && !payload_token_sent && !l1_req_ready) ||
         (payload_phase_active && final_l1_write_pending && payload_token_sent && !final_l1_write_done) ||
@@ -2482,7 +2486,7 @@ module vf_udma_engine #(
     integer final_write_i;
     integer sramcrc_i;
 
-    assign l1_req_valid = payload_phase_active && !payload_token_sent;
+    assign l1_req_valid = payload_phase_active && !payload_token_sent && !sramcrc_mode;
     assign l1_req_write = !direction_write;
     assign l1_req_addr = l1_req_base_addr;
     assign l1_req_bytes = bytes;
@@ -2523,6 +2527,8 @@ module vf_udma_engine #(
         if (!rst_n) begin
             payload_token_sent <= 1'b0;
             final_l1_write_done <= 1'b0;
+            final_l1_resp_armed <= 1'b0;
+            final_l1_resp_guard <= 4'd0;
             sramcrc_crc <= FNV_OFFSET;
             sramcrc_count <= 32'd0;
             sramcrc_remaining <= 32'd0;
@@ -2534,6 +2540,8 @@ module vf_udma_engine #(
         end else if (start_fire) begin
             payload_token_sent <= 1'b0;
             final_l1_write_done <= 1'b0;
+            final_l1_resp_armed <= 1'b0;
+            final_l1_resp_guard <= 4'd0;
             if (sramcrc_mode) begin
                 sramcrc_crc <= FNV_OFFSET;
                 sramcrc_count <= 32'd0;
@@ -2563,11 +2571,21 @@ module vf_udma_engine #(
             end
         end else if (payload_token_fire) begin
             payload_token_sent <= 1'b1;
+            if (final_l1_write_pending)
+                final_l1_resp_guard <= 4'd4;
             if (final_write_mode && !ref_fill_mode && !direction_write &&
                 (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
                 output_sram[out_byte_offset] <= input_byte;
+        end else if (final_l1_write_pending && payload_token_sent &&
+                     !final_l1_write_done && (final_l1_resp_guard != 4'd0)) begin
+            final_l1_resp_guard <= final_l1_resp_guard - 4'd1;
+        end else if (final_l1_write_pending && payload_token_sent &&
+                     !final_l1_write_done && (final_l1_resp_guard == 4'd0) && !l1_resp_valid) begin
+            final_l1_resp_armed <= 1'b1;
         end else if (final_l1_write_fire) begin
             final_l1_write_done <= 1'b1;
+            final_l1_resp_armed <= 1'b0;
+            final_l1_resp_guard <= 4'd0;
             for (final_write_i = 0; final_write_i < 16; final_write_i = final_write_i + 1) begin
                 if ((final_write_i < bytes) &&
                     ((out_byte_offset + final_write_i[31:0]) < MAX_UDMA_OUTPUT_SRAM_BYTES)) begin
@@ -2598,6 +2616,8 @@ module vf_udma_engine #(
         end else if (!payload_phase_active) begin
             payload_token_sent <= 1'b0;
             final_l1_write_done <= 1'b0;
+            final_l1_resp_armed <= 1'b0;
+            final_l1_resp_guard <= 4'd0;
         end
     end
 

@@ -434,6 +434,7 @@ module mdla7_top_final #(
     wire l1mesh_req_ready;
     wire l1mesh_busy;
     wire l1mesh_resp_valid;
+    wire l1mesh_resp_read;
     wire [3:0] l1mesh_phase_id;
     wire [31:0] l1mesh_remaining_cycles;
     wire [DATA_WIDTH-1:0] l1mesh_rdata;
@@ -657,7 +658,7 @@ module mdla7_top_final #(
         .sramcrc_expected_count(requant_sramcrc_expected_count_q),
         .out_byte_offset(requant_out_byte_offset_q),
         .l1_req_base_addr(l1mesh_addr_q),
-        .l1_resp_valid(run_requant && l1mesh_resp_valid),
+        .l1_resp_valid(run_requant && l1mesh_resp_valid && l1mesh_resp_read),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(requant_l1_req_valid),
         .l1_req_ready(requant_l1_req_ready),
@@ -695,7 +696,7 @@ module mdla7_top_final #(
         .l1_req_base_addr(l1mesh_addr_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
-        .l1_resp_valid(run_pool && l1mesh_resp_valid),
+        .l1_resp_valid(run_pool && l1mesh_resp_valid && l1mesh_resp_read),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(pool_l1_req_valid),
         .l1_req_ready(pool_l1_req_ready),
@@ -746,7 +747,7 @@ module mdla7_top_final #(
         .a_vec(ewe_a_vec_q),
         .b_vec(ewe_b_vec_q),
         .elem_count(ewe_elem_count_q),
-        .l1_resp_valid(run_ewe && l1mesh_resp_valid),
+        .l1_resp_valid(run_ewe && l1mesh_resp_valid && l1mesh_resp_read),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(ewe_l1_req_valid),
         .l1_req_ready(ewe_l1_req_ready),
@@ -793,7 +794,7 @@ module mdla7_top_final #(
         .l1_req_payload_cycles(udma_l1_req_payload_cycles),
         .l1_req_wdata(udma_l1_req_wdata),
         .l1_req_wstrb(udma_l1_req_wstrb),
-        .l1_resp_valid(run_udma && l1mesh_resp_valid),
+        .l1_resp_valid(run_udma && l1mesh_resp_valid && l1mesh_resp_read),
         .l1_resp_rdata(l1mesh_rdata),
         .dram_req_valid(udma_dram_req_valid),
         .dram_req_write(udma_dram_req_write),
@@ -945,6 +946,7 @@ module mdla7_top_final #(
         .debug_crc(l1mesh_crc),
         .debug_crc_byte_count(l1mesh_crc_count),
         .resp_valid(l1mesh_resp_valid),
+        .resp_read(l1mesh_resp_read),
         .resp_ready(1'b1),
         .resp_rdata(l1mesh_rdata),
         .busy(l1mesh_busy),

@@ -72,6 +72,7 @@ module l1mesh #(
     output reg [31:0]             debug_crc_byte_count,
 
     output                        resp_valid,
+    output                        resp_read,
     input                         resp_ready,
     output reg [DATA_WIDTH-1:0]   resp_rdata,
     output                        busy,
@@ -105,6 +106,7 @@ module l1mesh #(
     reg [31:0] debug_crc_remaining;
     reg [31:0] debug_crc_value;
     reg [31:0] debug_crc_count_value;
+    reg resp_read_q;
     integer debug_crc_i;
 
     /* verilator lint_off UNUSEDSIGNAL */
@@ -223,15 +225,20 @@ module l1mesh #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             resp_rdata <= {DATA_WIDTH{1'b0}};
+            resp_read_q <= 1'b0;
             debug_crc_busy <= 1'b0;
             debug_crc_done <= 1'b0;
             debug_crc <= FNV_OFFSET;
             debug_crc_byte_count <= 32'd0;
             debug_crc_scan_addr <= {ADDR_WIDTH{1'b0}};
             debug_crc_remaining <= 32'd0;
-        end else if (start_fire && !req_write) begin
-            resp_rdata <= debug_read_word(req_addr);
+        end else if (start_fire) begin
+            resp_read_q <= !req_write;
+            if (!req_write)
+                resp_rdata <= debug_read_word(req_addr);
         end else begin
+            if (resp_valid && resp_ready)
+                resp_read_q <= 1'b0;
             debug_crc_done <= 1'b0;
             if (debug_crc_start && !debug_crc_busy) begin
                 debug_crc_busy <= (debug_crc_count != 32'd0);
@@ -336,6 +343,7 @@ module l1mesh #(
     endfunction
 
     assign resp_valid = phase_done;
+    assign resp_read = resp_read_q;
 
     mdla7_synth_phase_engine #(
         .NUM_PHASES(6),
