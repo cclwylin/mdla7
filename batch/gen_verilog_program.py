@@ -791,26 +791,27 @@ def closed_loop_tnps_probe(
     ordinal: int,
     result_dram_off: int,
     max_payload_bytes: int,
+    start_out_byte: int = 0,
 ) -> list[list[int]]:
     byte_count = tnps_contiguous_output_byte_count(
         layer,
-        0,
-        max(1, min(layer.ref_size, max_payload_bytes, 16)),
+        start_out_byte,
+        max(1, min(layer.ref_size - start_out_byte, max_payload_bytes, 16)),
     )
     if byte_count <= 0:
         return []
-    desc = tnps_output_descriptor(layer, ordinal, 0, byte_count)
+    desc = tnps_output_descriptor(layer, ordinal, start_out_byte, byte_count)
     if desc is None:
         return []
     data = descriptor_for_layer.program_bytes
     expected = bytes(
-        data[layer.in_off + tnps_output_source_byte_offset(layer, lane)]
+        data[layer.in_off + tnps_output_source_byte_offset(layer, start_out_byte + lane)]
         for lane in range(byte_count)
     )
     if not expected:
         return []
     src_byte = desc[16]
-    l1_base = 0x30000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_base = 0x30000 + (((layer.index * 0x100) + (start_out_byte * 0x20)) & 0x2FFFF)
     l1_result = l1_base + 0x80
     descs = [
         udma_dram_to_l1_descriptor(
@@ -838,10 +839,30 @@ def closed_loop_tnps_probe(
             layer,
             ordinal + len(descs),
             l1_result,
-            result_dram_off,
+            result_dram_off + start_out_byte,
             expected,
         )
     )
+    return descs
+
+
+def closed_loop_tnps_probes(layer: Layer, ordinal: int, result_dram_off: int,
+                            max_payload_bytes: int, command_budget: int) -> list[list[int]]:
+    descs: list[list[int]] = []
+    start_candidates = closed_loop_output_indices(layer.ref_size, command_budget, 4)
+    for start_out_byte in start_candidates:
+        probe = closed_loop_tnps_probe(
+            layer,
+            ordinal + len(descs),
+            result_dram_off,
+            max_payload_bytes,
+            start_out_byte,
+        )
+        if not probe:
+            continue
+        if len(descs) + len(probe) > command_budget:
+            break
+        descs.extend(probe)
     return descs
 
 
@@ -1030,6 +1051,29 @@ def closed_loop_result_check_descriptors(
         )
         descs.append(l1_probe_desc)
     return descs
+
+
+def closed_loop_output_indices(total_outputs: int, command_budget: int,
+                               commands_per_output: int) -> list[int]:
+    if total_outputs <= 0 or command_budget <= 0 or commands_per_output <= 0:
+        return []
+    max_outputs = max(command_budget // commands_per_output, 0)
+    if max_outputs >= total_outputs:
+        return list(range(total_outputs))
+    if max_outputs <= 0:
+        return []
+    if max_outputs == 1:
+        return [0]
+    span = total_outputs - 1
+    out: list[int] = []
+    seen: set[int] = set()
+    for idx in range(max_outputs):
+        value = round((span * idx) / (max_outputs - 1))
+        value = max(0, min(value, total_outputs - 1))
+        if value not in seen:
+            out.append(value)
+            seen.add(value)
+    return out
 
 
 def is_sram_crc_descriptor(desc: list[int]) -> bool:
@@ -1882,25 +1926,49 @@ def descriptor_payload_bytes(desc: list[int], first_word: int, byte_count: int) 
     return bytes(payload)
 
 
-def closed_loop_conv_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+def closed_loop_conv_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    out_elem_index: int = 0,
+) -> list[list[int]]:
     if layer.op_kind not in OK_CONV or elem_bytes(layer.dtype) != 1:
+        return []
+    group = layer.group or 1
+    if group <= 0 or layer.out_c <= 0 or layer.in_c % group != 0 or layer.out_c % group != 0:
+        return []
+    in_per_group = layer.in_c // group
+    total_lanes = max(layer.k_h or 1, 1) * max(layer.k_w or 1, 1) * max(in_per_group, 1)
+    if total_lanes > 8:
+        return []
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    if out_elem_index < 0 or out_elem_index >= output_elems:
         return []
     data = descriptor_for_layer.program_bytes
     params = int8_conv_params(layer, data)
     if params is not None:
-        final_bias = params.bias[0] + int8_conv_corr(params, layer, 0, 0, 0)
+        out_area = max(layer.out_w * layer.out_c, 1)
+        oh = out_elem_index // out_area
+        ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+        oc = out_elem_index % max(layer.out_c, 1)
+        final_bias = params.bias[oc] + int8_conv_corr(params, layer, oh, ow, oc)
         sample = int8_conv_real_descriptor(
             layer,
             params,
             ordinal,
             start_lane=0,
             max_count=8,
-            out_elem_index=0,
+            out_elem_index=out_elem_index,
             psum_flag=0,
             final_bias=final_bias,
         )
     else:
-        sample = int8_conv_sample_descriptor(layer, ordinal, max_count=8)
+        sample = int8_conv_sample_descriptor(
+            layer,
+            ordinal,
+            max_count=8,
+            out_elem_index=out_elem_index,
+        )
     if sample is None:
         return []
     desc, _ = sample
@@ -1917,7 +1985,7 @@ def closed_loop_conv_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
         return []
     if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + elem_count] != wgt_expected:
         return []
-    l1_base = 0x40000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_base = 0x40000 + ((layer.index * 0x100 + out_elem_index * 0x20) & 0x2FFFF)
     l1_result = l1_base + 0x80
     descs = [
         udma_dram_to_l1_descriptor(
@@ -1953,10 +2021,37 @@ def closed_loop_conv_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
             layer,
             ordinal + len(descs),
             l1_result,
-            result_dram_off,
+            result_dram_off + out_elem_index,
             bytes([desc[18] & 0xFF]),
         )
     )
+    return descs
+
+
+def closed_loop_conv_probes(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    command_budget: int,
+) -> list[list[int]]:
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    indices = closed_loop_output_indices(output_elems, command_budget, 4)
+    descs: list[list[int]] = []
+    for out_elem_index in indices:
+        remaining = command_budget - len(descs)
+        if remaining < 4:
+            break
+        probe = closed_loop_conv_probe(
+            layer,
+            ordinal + len(descs),
+            result_dram_off,
+            out_elem_index=out_elem_index,
+        )
+        if not probe:
+            continue
+        if len(probe) > remaining:
+            break
+        descs.extend(probe)
     return descs
 
 
@@ -2185,16 +2280,17 @@ def int8_pool_source_offsets(layer: Layer, out_elem_index: int) -> list[int] | N
     return offsets if offsets else None
 
 
-def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
-    sample = int8_pool_output_sample(layer, 0)
-    offsets = int8_pool_source_offsets(layer, 0)
+def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int,
+                           out_elem_index: int = 0) -> list[list[int]]:
+    sample = int8_pool_output_sample(layer, out_elem_index)
+    offsets = int8_pool_source_offsets(layer, out_elem_index)
     if sample is None or offsets is None:
         return []
     _, elem_count, expected_q = sample
     if elem_count <= 0 or elem_count > 16 or len(offsets) < elem_count:
         return []
     source_offsets = offsets[:elem_count]
-    l1_base = 0x10000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_base = 0x10000 + (((layer.index * 0x100) + (out_elem_index * 0x20)) & 0x2FFFF)
     l1_result = l1_base + 0x80
     descs: list[list[int]] = []
     for idx, src_off in enumerate(source_offsets):
@@ -2208,7 +2304,8 @@ def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
                 SMF_LOAD_A,
             )
         )
-    desc = pool_int8_output_descriptor(layer, ordinal + len(descs), 0, read_sample_from_l1=True)
+    desc = pool_int8_output_descriptor(
+        layer, ordinal + len(descs), out_elem_index, read_sample_from_l1=True)
     if desc is None:
         return []
     desc[2] = l1_base
@@ -2227,10 +2324,26 @@ def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
             layer,
             ordinal + len(descs),
             l1_result,
-            result_dram_off,
+            result_dram_off + out_elem_index,
             bytes([expected_q]),
         )
     )
+    return descs
+
+
+def closed_loop_pool_probes(layer: Layer, ordinal: int, result_dram_off: int,
+                            command_budget: int) -> list[list[int]]:
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 0)
+    descs: list[list[int]] = []
+    indices = closed_loop_output_indices(output_elems, command_budget, 20)
+    for out_elem_index in indices:
+        probe = closed_loop_pool_probe(
+            layer, ordinal + len(descs), result_dram_off, out_elem_index)
+        if not probe:
+            continue
+        if len(descs) + len(probe) > command_budget:
+            break
+        descs.extend(probe)
     return descs
 
 
@@ -2363,16 +2476,19 @@ def ewe_final_q_bytes(final_descs: list[list[int]]) -> bytes:
     )
 
 
-def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
-    expected = int8_ewe_output_value(layer, 0)
+def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int,
+                          out_elem_index: int = 0) -> list[list[int]]:
+    expected = int8_ewe_output_value(layer, out_elem_index)
     if expected is None:
         return []
-    l1_base = 0x20000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_base = 0x20000 + (((layer.index * 0x100) + (out_elem_index * 0x20)) & 0x2FFFF)
     l1_result = l1_base + 0x80
     descs: list[list[int]] = [
-        udma_dram_to_l1_descriptor(layer, ordinal, layer.in_off, l1_base, 1, SMF_LOAD_A)
+        udma_dram_to_l1_descriptor(
+            layer, ordinal, layer.in_off + out_elem_index, l1_base, 1, SMF_LOAD_A)
     ]
-    desc = int8_ewe_output_descriptor(layer, ordinal + len(descs), 0, read_a_from_l1=True)
+    desc = int8_ewe_output_descriptor(
+        layer, ordinal + len(descs), out_elem_index, read_a_from_l1=True)
     if desc is None:
         return []
     desc[2] = l1_base
@@ -2391,10 +2507,26 @@ def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int) -> l
             layer,
             ordinal + len(descs),
             l1_result,
-            result_dram_off,
+            result_dram_off + out_elem_index,
             bytes([expected]),
         )
     )
+    return descs
+
+
+def closed_loop_ewe_probes(layer: Layer, ordinal: int, result_dram_off: int,
+                           command_budget: int) -> list[list[int]]:
+    output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
+    descs: list[list[int]] = []
+    indices = closed_loop_output_indices(output_elems, command_budget, 5)
+    for out_elem_index in indices:
+        probe = closed_loop_ewe_probe(
+            layer, ordinal + len(descs), result_dram_off, out_elem_index)
+        if not probe:
+            continue
+        if len(descs) + len(probe) > command_budget:
+            break
+        descs.extend(probe)
     return descs
 
 
@@ -3028,29 +3160,33 @@ def main() -> int:
             closed_loop_descs: list[list[int]] = []
             result_dram_off = layer.ref_off
             if layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
-                closed_loop_descs = closed_loop_pool_probe(
+                closed_loop_descs = closed_loop_pool_probes(
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
+                    remaining_commands,
                 )
             elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
-                closed_loop_descs = closed_loop_ewe_probe(
+                closed_loop_descs = closed_loop_ewe_probes(
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
+                    remaining_commands,
                 )
             elif layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
-                closed_loop_descs = closed_loop_tnps_probe(
+                closed_loop_descs = closed_loop_tnps_probes(
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
                     args.max_payload_bytes,
+                    remaining_commands,
                 )
             elif layer.op_kind in OK_CONV and elem_bytes(layer.dtype) == 1:
-                closed_loop_descs = closed_loop_conv_probe(
+                closed_loop_descs = closed_loop_conv_probes(
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
+                    remaining_commands,
                 )
             if closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
                 descs.extend(closed_loop_descs)

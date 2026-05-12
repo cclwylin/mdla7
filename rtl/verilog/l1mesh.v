@@ -326,30 +326,12 @@ module l1mesh #(
 
     function [DATA_WIDTH-1:0] debug_read_word;
         input [ADDR_WIDTH-1:0] byte_addr;
-        reg [31:0] dbg_word_addr;
-        reg [5:0] dbg_bank_global;
-        reg [1:0] dbg_tile_id;
-        reg [3:0] dbg_bank_id;
-        reg [27:0] dbg_local_word_addr;
-        reg [31:0] dbg_tile_word_addr;
+        integer read_i;
         begin
-            dbg_word_addr = {10'd0, byte_addr} / STRB_WIDTH;
-            dbg_bank_global = dbg_word_addr[5:0];
-            dbg_tile_id = dbg_bank_global[5:4];
-            dbg_bank_id = dbg_bank_global[3:0];
-            dbg_local_word_addr = {2'd0, dbg_word_addr[31:6]};
-            dbg_tile_word_addr = {dbg_local_word_addr, dbg_bank_id};
-            if (dbg_tile_word_addr >= TILE_WORDS) begin
-                debug_read_word = {DATA_WIDTH{1'b0}};
-            end else begin
-                case (dbg_tile_id)
-                    2'd0: debug_read_word = u_tile0.mem[dbg_tile_word_addr];
-                    2'd1: debug_read_word = u_tile1.mem[dbg_tile_word_addr];
-                    2'd2: debug_read_word = u_tile2.mem[dbg_tile_word_addr];
-                    2'd3: debug_read_word = u_tile3.mem[dbg_tile_word_addr];
-                    default: debug_read_word = {DATA_WIDTH{1'b0}};
-                endcase
-            end
+            debug_read_word = {DATA_WIDTH{1'b0}};
+            for (read_i = 0; read_i < STRB_WIDTH; read_i = read_i + 1)
+                debug_read_word[read_i*8 +: 8] =
+                    debug_read_byte(byte_addr + read_i[ADDR_WIDTH-1:0]);
         end
     endfunction
 
