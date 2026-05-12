@@ -826,30 +826,30 @@ def int8_conv_sample_descriptor(
 
 
 def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]:
-    first = int8_conv_sample_descriptor(
-        layer,
-        ordinal,
-        start_lane=0,
-        max_count=8,
-        psum_flag=1 << 4,
-    )
-    if first is None:
-        return []
-    first_desc, first_acc = first
-    first_desc[19] = first_acc & 0xFFFF_FFFF
-    second = int8_conv_sample_descriptor(
-        layer,
-        ordinal + 1,
-        start_lane=first_desc[12] & 0xFF,
-        max_count=8,
-        psum_flag=1 << 5,
-        expected_psum=first_acc,
-    )
-    if second is None:
-        return [first_desc]
-    second_desc, second_acc = second
-    second_desc[19] = (first_acc + second_acc) & 0xFFFF_FFFF
-    return [first_desc, second_desc]
+    descs: list[list[int]] = []
+    cumulative_acc = 0
+    start_lane = 0
+    total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * max(layer.in_c, 1)
+    while start_lane < total_lanes:
+        psum_flag = 1 << 4 if not descs else 1 << 5
+        sample = int8_conv_sample_descriptor(
+            layer,
+            ordinal + len(descs),
+            start_lane=start_lane,
+            max_count=8,
+            psum_flag=psum_flag,
+        )
+        if sample is None:
+            break
+        desc, acc = sample
+        elem_count = desc[12] & 0xFF
+        if elem_count == 0:
+            break
+        cumulative_acc += acc
+        desc[19] = cumulative_acc & 0xFFFF_FFFF
+        descs.append(desc)
+        start_lane += elem_count
+    return descs
 
 
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
@@ -929,7 +929,10 @@ def main() -> int:
     ewe_count = 0
     tnps_count = 0
     udma_count = 0
+    command_limit = max(args.max_commands - 1, 0)
     for layer in layers:
+        if len(commands) >= command_limit:
+            break
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
         if (
             args.emit_conv_partial_psum and
@@ -944,6 +947,8 @@ def main() -> int:
         if req_desc is not None:
             descs.append(req_desc)
         for desc in descs:
+            if len(commands) >= command_limit:
+                break
             commands.append(desc)
             if (desc[0] & 0xF) == OP_CONV:
                 conv_count += 1
@@ -957,9 +962,7 @@ def main() -> int:
                 tnps_count += 1
             elif (desc[0] & 0xF) == OP_UDMA:
                 udma_count += 1
-            if len(commands) >= args.max_commands:
-                break
-        if len(commands) >= args.max_commands:
+        if len(commands) >= command_limit:
             break
     commands.append([0] * WORDS_PER_COMMAND)
 
