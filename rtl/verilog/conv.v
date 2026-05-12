@@ -471,6 +471,24 @@ module vf_conv_sample_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] compact_l1_response;
+        input [DATA_WIDTH-1:0] data;
+        input [3:0] lane;
+        input [31:0] byte_count;
+        integer idx;
+        integer src_lane;
+        reg [DATA_WIDTH-1:0] compact;
+        begin
+            compact = {DATA_WIDTH{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                src_lane = lane + idx;
+                if ((idx < byte_count) && (src_lane < DATA_WIDTH/8))
+                    compact[idx*8 +: 8] = data[src_lane*8 +: 8];
+            end
+            compact_l1_response = compact;
+        end
+    endfunction
+
     initial begin
         refcrc_program_path = "";
         refcrc_fd = 0;
@@ -926,7 +944,9 @@ module vf_conv_sample_engine #(
                         if (!act_req_sent && l1_req_ready)
                             act_req_sent <= 1'b1;
                         if (l1_resp_valid) begin
-                            active_act_vec <= l1_resp_rdata[MAX_ELEMS*8-1:0];
+                            active_act_vec <= compact_l1_response(
+                                l1_resp_rdata, l1_req_addr[3:0], sample_bytes
+                            );
                             state <= ST_WGT;
                         end
                     end else if (l1_req_ready) begin
@@ -938,7 +958,9 @@ module vf_conv_sample_engine #(
                         if (!wgt_req_sent && l1_req_ready)
                             wgt_req_sent <= 1'b1;
                         if (l1_resp_valid) begin
-                            active_wgt_vec <= l1_resp_rdata[MAX_ELEMS*8-1:0];
+                            active_wgt_vec <= compact_l1_response(
+                                l1_resp_rdata, l1_req_addr[3:0], sample_bytes
+                            );
                             compute_remaining <= mac_cycles;
                             state <= ST_COMPUTE;
                         end

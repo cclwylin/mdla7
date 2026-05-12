@@ -722,6 +722,8 @@ def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int, byte
     if first_src_byte is None:
         return None
     elem = elem_bytes(layer.dtype)
+    out_elem_index = out_byte_index // max(elem, 1)
+    src_elem_index = first_src_byte // max(elem, 1)
     block = layer.k_h or layer.k_w or 1
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x28) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
@@ -740,6 +742,10 @@ def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int, byte
     words[11] = layer.out_c
     words[12] = block
     words[13] = elem
+    if layer.op_kind == OK_S2SPACE:
+        words[14] = out_elem_index & 0xFFFF_FFFF
+    elif layer.op_kind == OK_D2SPACE:
+        words[15] = src_elem_index & 0xFFFF_FFFF
     words[16] = first_src_byte & 0xFFFF_FFFF
     words[17] = out_byte_index & 0xFFFF_FFFF
     words[18] = 1
@@ -803,6 +809,7 @@ def closed_loop_tnps_probe(
     desc = tnps_output_descriptor(layer, ordinal, start_out_byte, byte_count)
     if desc is None:
         return []
+    byte_count = desc[1]
     data = descriptor_for_layer.program_bytes
     expected = bytes(
         data[layer.in_off + tnps_output_source_byte_offset(layer, start_out_byte + lane)]
@@ -811,14 +818,15 @@ def closed_loop_tnps_probe(
     if not expected:
         return []
     src_byte = desc[16]
-    l1_base = 0x30000 + (((layer.index * 0x100) + (start_out_byte * 0x20)) & 0x2FFFF)
-    l1_result = l1_base + 0x80
+    l1_sample_addr = 0x30000 + (((layer.index * 0x100) + (start_out_byte * 0x20)) & 0x2FFFF)
+    l1_base = (l1_sample_addr - src_byte) & 0x003F_FFFF
+    l1_result = l1_sample_addr + 0x80
     descs = [
         udma_dram_to_l1_descriptor(
             layer,
             ordinal,
             layer.in_off + src_byte,
-            l1_base + src_byte,
+            l1_sample_addr,
             len(expected),
             SMF_LOAD_A,
         )
@@ -849,7 +857,12 @@ def closed_loop_tnps_probe(
 def closed_loop_tnps_probes(layer: Layer, ordinal: int, result_dram_off: int,
                             max_payload_bytes: int, command_budget: int) -> list[list[int]]:
     descs: list[list[int]] = []
-    start_candidates = closed_loop_output_indices(layer.ref_size, command_budget, 4)
+    elem = max(elem_bytes(layer.dtype), 1)
+    output_elems = max(layer.ref_size // elem, 0)
+    start_candidates = [
+        elem_index * elem
+        for elem_index in closed_loop_output_indices(output_elems, command_budget, 4)
+    ]
     for start_out_byte in start_candidates:
         probe = closed_loop_tnps_probe(
             layer,
@@ -2478,9 +2491,10 @@ def ewe_final_q_bytes(final_descs: list[list[int]]) -> bytes:
 
 def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int,
                           out_elem_index: int = 0) -> list[list[int]]:
-    expected = int8_ewe_output_value(layer, out_elem_index)
-    if expected is None:
+    data = descriptor_for_layer.program_bytes
+    if out_elem_index < 0 or out_elem_index >= layer.ref_size:
         return []
+    expected = data[layer.ref_off + out_elem_index]
     l1_base = 0x20000 + (((layer.index * 0x100) + (out_elem_index * 0x20)) & 0x2FFFF)
     l1_result = l1_base + 0x80
     descs: list[list[int]] = [
@@ -2491,6 +2505,7 @@ def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int,
         layer, ordinal + len(descs), out_elem_index, read_a_from_l1=True)
     if desc is None:
         return []
+    desc[18] = expected
     desc[2] = l1_base
     desc[3] |= MICROBLOCK_FLAG
     desc[27] = l1_result
