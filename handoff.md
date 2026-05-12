@@ -1,5 +1,12 @@
 # MDLA7 Handoff
 
+## Project Target
+
+- 最後要做到 FPGA。
+- 用 Fast/Synth mode 驗證 Compile、Function、Performance。
+- Verilog 的 arithmetic 加速用 DPI。
+- Synth 跟 Verilog correlation 誤差不能超過 10%。
+
 Date: 2026-05-12 CST  
 Repo: `/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`  
 Branch: `main`
