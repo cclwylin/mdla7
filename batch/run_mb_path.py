@@ -8,6 +8,7 @@ Usage:
     ./batch/run_mb_path.py --offset 3 --limit 3
     ./batch/run_mb_path.py --rerun-all
     ./batch/run_mb_path.py --fast-only
+    ./batch/run_mb_path.py --L1 cx --engine cx
     ./batch/run_mb_path.py --list
 """
 

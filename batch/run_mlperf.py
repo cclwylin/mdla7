@@ -8,6 +8,7 @@ Usage:
     ./batch/run_mlperf.py --offset 3 --limit 3
     ./batch/run_mlperf.py --rerun-all
     ./batch/run_mlperf.py --fast-only
+    ./batch/run_mlperf.py --L1 cx --engine cx
 """
 
 from __future__ import annotations

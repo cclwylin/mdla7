@@ -40,6 +40,10 @@
 //        Fast = aggregate 16-bank bandwidth estimate (default).
 //        Rtl = dual-4x4 mesh route plus SRAM bank/port scheduling. Port
 //        conflict is reported as L1Mesh KPI, not selected as a separate mode.
+// v10.1: public mode names are unified across L1 and engines:
+//        fast / rtl / cx. CX is a separately reported mode that starts
+//        from the detailed RTL-style timing path so synthesizable datapath
+//        deltas can be tightened incrementally.
 
 #include <systemc>
 #include <array>
@@ -61,9 +65,10 @@ namespace mdla7 {
 enum class L1TimingMode {
     Fast,
     Rtl,
+    Synth,
 
     // Backward-compatible aliases for old command-line scripts. All detailed
-    // L1 conflict modeling now goes through the single RTL mode.
+    // L1 conflict modeling now goes through the RTL/Synth detailed modes.
     FastEstimate = Fast,
     PortConflict = Rtl,
     MeshConflict = Rtl,
@@ -71,24 +76,39 @@ enum class L1TimingMode {
 };
 
 inline bool is_l1_rtl_style(L1TimingMode mode) {
-    return mode == L1TimingMode::Rtl;
+    return mode == L1TimingMode::Rtl || mode == L1TimingMode::Synth;
+}
+
+inline bool is_l1_synth_style(L1TimingMode mode) {
+    return mode == L1TimingMode::Synth;
 }
 
 inline const char* l1_timing_mode_name(L1TimingMode mode) {
-    return is_l1_rtl_style(mode) ? "rtl" : "fast";
+    if (mode == L1TimingMode::Synth) return "cx";
+    return mode == L1TimingMode::Rtl ? "rtl" : "fast";
 }
 
 enum class EngineModel {
-    Analytical,
-    RtlStyle,
+    Fast,
+    Rtl,
+    Synth,
+
+    // Backward-compatible source aliases.
+    Analytical = Fast,
+    RtlStyle = Rtl,
 };
 
 inline bool is_rtl_style(EngineModel model) {
-    return model == EngineModel::RtlStyle;
+    return model == EngineModel::Rtl || model == EngineModel::Synth;
+}
+
+inline bool is_synth_style(EngineModel model) {
+    return model == EngineModel::Synth;
 }
 
 inline const char* engine_model_name(EngineModel model) {
-    return is_rtl_style(model) ? "rtl" : "model";
+    if (model == EngineModel::Synth) return "cx";
+    return model == EngineModel::Rtl ? "rtl" : "fast";
 }
 
 struct RtlPhaseTrace {
@@ -166,12 +186,12 @@ public:
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(L1Mesh);
     L1Mesh(sc_core::sc_module_name nm,
            std::size_t bytes = L1MESH_BYTES,
-           L1TimingMode timing_mode = L1TimingMode::Fast)
+           L1TimingMode timing_mode = L1TimingMode::Rtl)
       : sc_module(nm), timing_mode_(timing_mode), mem(bytes, 0) {
         if (const char* p = std::getenv("MDLA7_L1_PAYLOAD_PROBE")) {
             if (*p) open_payload_probe(p);
@@ -273,6 +293,7 @@ private:
         PAYLOAD_SCHED_CHUNK_BEATS;
     static constexpr unsigned BANK_STRIDE     = PAYLOAD_BEAT_BYTES;
     static constexpr unsigned BYTES_PER_CYCLE = PAYLOAD_BEAT_BYTES; // per-bank SRAM macro
+    static constexpr unsigned SYNTH_L1_PIPE_CYCLES = 3;
     static constexpr double   CORE_CLOCK_GHZ  = 1.9;
     static constexpr double   SRAM_CLOCK_GHZ  = 1.3;
 
@@ -282,6 +303,10 @@ private:
 
     sc_core::sc_time schedule_latency(uint32_t offset, uint32_t bytes,
                                       bool is_read) {
+        if (is_l1_synth_style(timing_mode_)) {
+            return schedule_mesh_latency(offset, bytes, is_read) +
+                   sc_core::sc_time(double(SYNTH_L1_PIPE_CYCLES), sc_core::SC_NS);
+        }
         if (is_l1_rtl_style(timing_mode_))
             return schedule_mesh_latency(offset, bytes, is_read);
         return schedule_fast_latency(bytes);
@@ -294,7 +319,8 @@ private:
 
     void record_rtl_access(sc_core::sc_time begin, sc_core::sc_time done,
                            uint32_t bytes, bool is_read) {
-        if (!is_rtl_style(engine_model) || !in_process())
+        if (!(is_rtl_style(engine_model) || is_l1_rtl_style(timing_mode_)) ||
+            !in_process())
             return;
         const uint64_t begin_ns = uint64_t(begin.to_seconds() * 1e9);
         const uint64_t observed = cycles_between(begin, done);
@@ -311,6 +337,55 @@ private:
         const uint64_t sram_cycles = std::max<uint64_t>(
             1, uint64_t((bytes + PAYLOAD_FAST_WINDOW_BYTES - 1) /
                         PAYLOAD_FAST_WINDOW_BYTES));
+        if (is_synth_style(engine_model) || is_l1_synth_style(timing_mode_)) {
+            RtlPhaseTrace decode;
+            decode.name = "addr_decode";
+            decode.cycles = 1;
+            decode.stall = is_read ? "synth_l1_read_addr" : "synth_l1_write_addr";
+            phases.push_back(decode);
+
+            if (is_l1_rtl_style(timing_mode_)) {
+                const uint64_t pipe_cycles =
+                    is_l1_synth_style(timing_mode_) ? SYNTH_L1_PIPE_CYCLES : 0;
+                const uint64_t route_cycles =
+                    (display > sram_cycles + pipe_cycles + 2)
+                        ? (display - sram_cycles - pipe_cycles - 2)
+                        : 1;
+                RtlPhaseTrace mesh;
+                mesh.name = is_l1_synth_style(timing_mode_) ? "noc_pipe" : "mesh";
+                mesh.cycles = route_cycles;
+                mesh.read_bytes = is_read ? bytes : 0;
+                mesh.write_bytes = is_read ? 0 : bytes;
+                mesh.stall = is_l1_synth_style(timing_mode_)
+                            ? "synth_mesh_route"
+                            : "mesh_route";
+                phases.push_back(mesh);
+                if (pipe_cycles) {
+                    RtlPhaseTrace pipe;
+                    pipe.name = "pipe_reg";
+                    pipe.cycles = pipe_cycles;
+                    pipe.stall = is_read ? "synth_read_pipeline" : "synth_write_pipeline";
+                    phases.push_back(pipe);
+                }
+            }
+
+            RtlPhaseTrace sram;
+            sram.name = "sram_macro";
+            sram.cycles = sram_cycles;
+            sram.read_bytes = is_read ? bytes : 0;
+            sram.write_bytes = is_read ? 0 : bytes;
+            sram.lanes = N_BANKS;
+            sram.stall = is_read ? "synth_sram_read_bank" : "synth_sram_write_bank";
+            phases.push_back(sram);
+
+            RtlPhaseTrace rsp;
+            rsp.name = "resp";
+            rsp.cycles = 1;
+            rsp.stall = is_read ? "synth_read_resp" : "synth_write_ack";
+            phases.push_back(rsp);
+            append_rtl_task(begin_ns, begin_ns + display, phases);
+            return;
+        }
         if (is_l1_rtl_style(timing_mode_)) {
             const uint64_t noc_cycles =
                 (display > sram_cycles + 1) ? (display - sram_cycles - 1) : 1;
@@ -853,7 +928,7 @@ public:
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(L1Manager);
     L1Manager(sc_core::sc_module_name nm, L1Mesh& mesh, Dram& dram)
@@ -1032,6 +1107,38 @@ private:
         const uint64_t route_cycles = display > 1 ? display - 1 : 1;
         const uint32_t bytes = req.charged_bytes();
         std::vector<RtlPhaseTrace> phases;
+        if (is_synth_style(engine_model)) {
+            RtlPhaseTrace fetch;
+            fetch.name = "req_fetch";
+            fetch.cycles = 1;
+            fetch.lanes = req.source;
+            fetch.stall = req.is_write ? "synth_write_req" : "synth_read_req";
+            phases.push_back(fetch);
+
+            RtlPhaseTrace arb;
+            arb.name = "arb";
+            arb.cycles = 1;
+            arb.lanes = req.source;
+            arb.stall = l1 ? "synth_l1_arb" : "synth_dram_arb";
+            phases.push_back(arb);
+
+            RtlPhaseTrace route;
+            route.name = l1 ? "l1_payload" : (!req.is_write ? "dram_read_data" : "dram_write_data");
+            route.cycles = display > 3 ? display - 3 : 1;
+            route.read_bytes = !req.is_write ? bytes : 0;
+            route.write_bytes = req.is_write ? bytes : 0;
+            route.lanes = req.tid;
+            route.stall = l1 ? "synth_l1mesh_payload" : "synth_dram_axi";
+            phases.push_back(route);
+
+            RtlPhaseTrace resp;
+            resp.name = "resp";
+            resp.cycles = 1;
+            resp.stall = req.is_write ? "synth_write_done" : "synth_read_done";
+            phases.push_back(resp);
+            append_rtl_task(begin_ns, begin_ns + display, phases);
+            return;
+        }
         RtlPhaseTrace decode;
         decode.name = "decode";
         decode.cycles = 1;

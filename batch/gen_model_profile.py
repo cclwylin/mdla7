@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 from pathlib import Path
 
@@ -137,6 +138,19 @@ def _link_label(stem: str) -> str:
         if base.startswith(prefix):
             return base[len(prefix):]
     return base
+
+
+def _relative_url(target: Path, base_dir: Path) -> str:
+    return os.path.relpath(target, base_dir).replace(os.sep, "/")
+
+
+def _rewrite_row_links(rows: list[dict[str, object]], html_out: Path) -> None:
+    base_dir = html_out.parent
+    for row in rows:
+        link = row.get("link")
+        if not isinstance(link, str) or not link.startswith("output/"):
+            continue
+        row["link"] = _relative_url(HERE / link, base_dir)
 
 
 def _row_from_metric(stem: str,
@@ -318,6 +332,7 @@ def main() -> None:
         html_out = HERE / html_out
 
     rows = collect_rows(metrics_csvs, args.only_metrics_rows)
+    _rewrite_row_links(rows, html_out)
     rows_json = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     title = args.title
     show_mdla6_cx = not args.hide_mdla6_cx
@@ -340,11 +355,9 @@ def main() -> None:
         if path.parent.resolve() == OUT_DIR.resolve():
             live_csv = path
             break
-    try:
-        live_csv_rel = live_csv.relative_to(HERE).as_posix()
-    except ValueError:
-        live_csv_rel = live_csv.as_posix()
+    live_csv_rel = _relative_url(live_csv.resolve(), html_out.parent)
     live_csv_json = json.dumps(live_csv_rel)
+    output_dir_json = json.dumps(_relative_url(OUT_DIR.resolve(), html_out.parent) + "/")
     only_metric_rows_json = "true" if args.only_metrics_rows else "false"
     html = f"""<!doctype html>
 <html>
@@ -412,6 +425,7 @@ tr:hover td {{ background:#f4f7fb; }}
 <script>
 const EMBEDDED_ROWS = {rows_json};
 const LIVE_CSV = {live_csv_json};
+const OUTPUT_DIR = {output_dir_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
 const SHOW_MDLA6_CX = {show_mdla6_cx_json};
 const SHOW_MB = {show_mb_json};
@@ -606,7 +620,7 @@ async function refreshFromOutput() {{
   try {{
     status.textContent = "checking output/ ...";
     const [dirText, csvText] = await Promise.all([
-      fetch("output/").then(r => r.text()),
+      fetch(OUTPUT_DIR).then(r => r.text()),
       fetch(LIVE_CSV).then(r => r.ok ? r.text() : "").catch(() => "")
     ]);
     const mdla6Cx = csvParse(csvText);
@@ -626,7 +640,7 @@ async function refreshFromOutput() {{
       const conflictMs = mdla6Cx[stem] && mdla6Cx[stem].conflict_ms ? Number(mdla6Cx[stem].conflict_ms) : null;
       const meshMs = mdla6Cx[stem] && mdla6Cx[stem].mesh_ms ? Number(mdla6Cx[stem].mesh_ms) : null;
       try {{
-        const p = await fetch(`output/${{stem}}.profile.json`);
+        const p = await fetch(`${{OUTPUT_DIR}}${{stem}}.profile.json`);
         if (p.ok) {{
           const j = await p.json();
           if (ms === null && j.summary && j.summary.total_cycles !== undefined)
@@ -635,7 +649,7 @@ async function refreshFromOutput() {{
       }} catch (_) {{}}
       next.push({{
         pattern: (mdla6Cx[stem] && mdla6Cx[stem].pattern) || stem,
-        stem, label: shortLinkLabel(stem), link: `output/${{name}}`,
+        stem, label: shortLinkLabel(stem), link: `${{OUTPUT_DIR}}${{name}}`,
         type: transformerType(stem),
         mdla6_cx: (mdla6Cx[stem] && mdla6Cx[stem].mdla6_cx) || "",
         our_ms: ms,
@@ -694,6 +708,7 @@ refreshFromOutput();
 </body>
 </html>
 """
+    html_out.parent.mkdir(parents=True, exist_ok=True)
     html_out.write_text(html)
     print(f"model profile: {html_out}")
 

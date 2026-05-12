@@ -8,6 +8,7 @@ Usage:
     ./batch/run_ethz_v5.py --offset 3 --limit 3
     ./batch/run_ethz_v5.py --rerun-all
     ./batch/run_ethz_v5.py --fast-only
+    ./batch/run_ethz_v5.py --L1 cx --engine cx
 """
 
 from __future__ import annotations

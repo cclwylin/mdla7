@@ -346,36 +346,86 @@ int sc_main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " program.bin [--quiet] [--l1-timing=fast|rtl]"
-                  << " [--engine-model=model|rtl] [--no-microblock]\n";
+                  << " program.bin [--quiet] [--L1=fast|rtl|cx]"
+                  << " [--engine=fast|rtl|cx] [--no-microblock]\n";
         return 2;
     }
     bool quiet = false;
     bool enable_microblocks = true;
-    L1TimingMode l1_timing_mode = L1TimingMode::Fast;
-    EngineModel engine_model = EngineModel::Analytical;
+    L1TimingMode l1_timing_mode = L1TimingMode::Rtl;
+    EngineModel engine_model = EngineModel::Rtl;
+    auto parse_l1_value = [](const std::string& v, L1TimingMode& out) -> bool {
+        if (v == "fast") {
+            out = L1TimingMode::Fast;
+            return true;
+        }
+        if (v == "rtl") {
+            out = L1TimingMode::Rtl;
+            return true;
+        }
+        if (v == "cx" || v == "synth") {
+            out = L1TimingMode::Synth;
+            return true;
+        }
+        // Legacy aliases: the old detailed L1 modes now map to RTL.
+        if (v == "conflict" || v == "mesh" || v == "mesh-opt") {
+            out = L1TimingMode::Rtl;
+            return true;
+        }
+        return false;
+    };
+    auto parse_engine_value = [](const std::string& v, EngineModel& out) -> bool {
+        if (v == "fast" || v == "model" || v == "analytical") {
+            out = EngineModel::Fast;
+            return true;
+        }
+        if (v == "rtl" || v == "rtl-style") {
+            out = EngineModel::Rtl;
+            return true;
+        }
+        if (v == "cx" || v == "synth") {
+            out = EngineModel::Synth;
+            return true;
+        }
+        return false;
+    };
+    auto value_after_equals = [](const std::string& arg,
+                                 const char* prefix,
+                                 std::string& value) -> bool {
+        const std::string p(prefix);
+        if (arg.rfind(p, 0) != 0) return false;
+        value = arg.substr(p.size());
+        return true;
+    };
     for (int ai = 2; ai < argc; ++ai) {
         const std::string arg = argv[ai];
+        std::string value;
         if (arg == "--quiet") {
             quiet = true;
-        } else if (arg == "--l1-timing=fast" || arg == "--l1-fast") {
+        } else if ((value_after_equals(arg, "--L1=", value) ||
+                    value_after_equals(arg, "--l1=", value) ||
+                    value_after_equals(arg, "--l1-timing=", value)) &&
+                   parse_l1_value(value, l1_timing_mode)) {
+            // Parsed above.
+        } else if (arg == "--l1-fast") {
             l1_timing_mode = L1TimingMode::Fast;
-        } else if (arg == "--l1-timing=rtl" || arg == "--l1-rtl" ||
-                   arg == "--l1-timing=conflict" || arg == "--l1-conflict" ||
-                   arg == "--l1-timing=mesh" || arg == "--l1-mesh" ||
-                   arg == "--l1-timing=mesh-opt" || arg == "--l1-mesh-opt") {
+        } else if (arg == "--l1-rtl" ||
+                   arg == "--l1-conflict" || arg == "--l1-mesh" ||
+                   arg == "--l1-mesh-opt") {
             l1_timing_mode = L1TimingMode::Rtl;
+        } else if (arg == "--l1-cx" || arg == "--l1-synth") {
+            l1_timing_mode = L1TimingMode::Synth;
         } else if (arg == "--no-microblock" || arg == "--disable-microblock") {
             enable_microblocks = false;
-        } else if (arg == "--engine-model=model" || arg == "--engine-model=analytical") {
-            engine_model = EngineModel::Analytical;
-        } else if (arg == "--engine-model=rtl" || arg == "--engine-model=rtl-style") {
-            engine_model = EngineModel::RtlStyle;
+        } else if ((value_after_equals(arg, "--engine=", value) ||
+                    value_after_equals(arg, "--engine-model=", value)) &&
+                   parse_engine_value(value, engine_model)) {
+            // Parsed above.
         } else {
             std::cerr << "unknown option: " << arg << "\n"
                       << "usage: " << argv[0]
-                      << " program.bin [--quiet] [--l1-timing=fast|rtl]"
-                      << " [--engine-model=model|rtl] [--no-microblock]\n";
+                      << " program.bin [--quiet] [--L1=fast|rtl|cx]"
+                      << " [--engine=fast|rtl|cx] [--no-microblock]\n";
             return 2;
         }
     }
@@ -11067,7 +11117,7 @@ int sc_main(int argc, char* argv[]) {
         {"pool",    cyc(sys.pool   .busy_time),       &sys.pool   .tasks, &sys.pool.rtl_phase_tasks},
         {"tnps",    cyc(sys.tnps   .busy_time),       &sys.tnps   .tasks, &sys.tnps.rtl_phase_tasks},
     };
-    if (is_rtl_style(engine_model)) {
+    if (is_rtl_style(engine_model) || is_l1_rtl_style(l1_timing_mode)) {
         engines.push_back({"l1mgr",  cyc(sys.l1mgr .busy_time), &sys.l1mgr .tasks, &sys.l1mgr .rtl_phase_tasks});
         engines.push_back({"l1mesh", cyc(sys.l1mesh.busy_time), &sys.l1mesh.tasks, &sys.l1mesh.rtl_phase_tasks});
     }
@@ -11153,6 +11203,7 @@ int sc_main(int argc, char* argv[]) {
         pf << "    \"layers\": " << N << ",\n";
         pf << "    \"pass\": " << pass << ", \"fail\": " << fail << ",\n";
         pf << "    \"total_cycles\": " << total_cycles << ",\n";
+        pf << "    \"l1_timing\": \"" << l1_timing_mode_name(l1_timing_mode) << "\",\n";
         pf << "    \"engine_model\": \"" << engine_model_name(engine_model) << "\",\n";
         pf << "    \"dram_read_bytes\": "  << total_dram_r << ",\n";
         pf << "    \"dram_write_bytes\": " << total_dram_w << ",\n";

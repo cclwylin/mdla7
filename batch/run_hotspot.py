@@ -22,6 +22,7 @@ Usage:
     ./batch/run_hotspot.py --offset 3 --limit 3
     ./batch/run_hotspot.py --rerun-all
     ./batch/run_hotspot.py --fast-only
+    ./batch/run_hotspot.py --L1 cx --engine cx
 """
 
 from __future__ import annotations
@@ -61,6 +62,10 @@ _reexec_in_venv()
 
 from run_mdla6_pattern import (  # noqa: E402
     _artefact_paths,
+    _mode_paths,
+    _normalise_engine,
+    _normalise_l1,
+    _mode_suffix,
     _report_exists_for,
     run_one,
 )
@@ -70,7 +75,7 @@ def _refresh_hotspot_profile_index(csv_path: Path) -> None:
     try:
         subprocess.run(
             [sys.executable, str(MODEL_PROFILE_PY),
-             "--html-out", "profile_hotspot.html",
+             "--html-out", "output/profile/profile_hotspot.html",
              "--title", "MDLA7 Hotspot Profiles",
              "--metrics-csv", str(csv_path),
              "--only-metrics-rows",
@@ -146,12 +151,41 @@ def main() -> None:
     ap.add_argument("--rerun-all", action="store_true",
                     help="ignore prior --csv-out cache and re-run everything")
     ap.add_argument("--fast-only", action="store_true",
-                    help="run only fast mode; leave conflict/mesh CSV fields empty")
+                    help="run fast L1/engine mode only unless --engine is set")
+    ap.add_argument("--L1", "--l1", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="L1Mesh timing mode for the primary run")
+    ap.add_argument("--l1-timing", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth", "conflict", "mesh", "mesh-opt"),
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--engine", dest="engine_model",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="engine timing model for the sweep")
+    ap.add_argument("--engine-model", dest="engine_model",
+                    choices=("fast", "model", "analytical", "rtl", "rtl-style", "cx", "synth"),
+                    help=argparse.SUPPRESS)
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-slice .bin files in output/ after the sweep")
     ap.add_argument("--list", action="store_true",
                     help="list selected Hotspot slices and exit")
     args = ap.parse_args()
+    engine_explicit = any(
+        arg == name or arg.startswith(f"{name}=")
+        for arg in sys.argv[1:]
+        for name in ("--engine", "--engine-model")
+    )
+    if args.fast_only:
+        args.l1_timing = "fast"
+        if not engine_explicit:
+            args.engine_model = "fast"
+    args.l1_timing = _normalise_l1(args.l1_timing)
+    args.engine_model = _normalise_engine(args.engine_model)
+    if args.l1_timing != "fast":
+        args.fast_only = True
+    suffix = _mode_suffix(args.l1_timing, args.engine_model)
+    if suffix and Path(args.csv_out) == DEFAULT_CSV_OUT:
+        args.csv_out = str(DEFAULT_CSV_OUT.with_name(
+            f"{DEFAULT_CSV_OUT.stem}.{suffix}{DEFAULT_CSV_OUT.suffix}"))
 
     OUT_DIR.mkdir(exist_ok=True)
     model_dir = Path(args.model_dir)
@@ -205,12 +239,17 @@ def main() -> None:
             w.writeheader()
             w.writerows(merged)
 
+    engine_label = ""
+    if args.l1_timing != "fast" or args.engine_model != "fast":
+        engine_label = f", L1={args.l1_timing}, engine={args.engine_model}"
     print(f"==== MDLA7 Hotspot regression: {len(patterns)} slices "
-          f"(from {model_dir.relative_to(REPO_ROOT)}) ====", flush=True)
+          f"(from {model_dir.relative_to(REPO_ROOT)}{engine_label}) ====", flush=True)
     rows_out = []
     t_total = time.time()
     for i, pat in enumerate(patterns, 1):
-        if pat in prior_ok and _report_exists_for(pat, model_dir):
+        if pat in prior_ok and _report_exists_for(
+                pat, model_dir, engine_model=args.engine_model,
+                l1_timing=args.l1_timing):
             cached = prior_ok[pat]
             cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
             cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
@@ -244,7 +283,8 @@ def main() -> None:
                         f"running {stage}...")
 
         _, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
-            pat, model_dir, progress=_progress, fast_only=args.fast_only)
+            pat, model_dir, progress=_progress, fast_only=args.fast_only,
+            engine_model=args.engine_model, l1_timing=args.l1_timing)
         elapsed = time.time() - t0
         ms_str = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         conflict_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
@@ -269,9 +309,20 @@ def main() -> None:
 
         if not args.keep_bin:
             model_path = model_dir / f"{pat}.tflite"
-            for bin_path in (_artefact_paths(model_path)["prog"],
-                             OUT_DIR / f"{pat}.conflict.bin",
-                             OUT_DIR / f"{pat}.mesh.bin"):
+            suffix = _mode_suffix(args.l1_timing, args.engine_model)
+            if not suffix:
+                bin_paths = (
+                    _artefact_paths(model_path)["prog"],
+                    OUT_DIR / f"{pat}.conflict.bin",
+                    OUT_DIR / f"{pat}.mesh.bin",
+                )
+            else:
+                bin_paths = (
+                    _mode_paths(model_path, suffix)["prog"],
+                    _mode_paths(model_path, f"{suffix}.conflict")["prog"],
+                    _mode_paths(model_path, f"{suffix}.mesh")["prog"],
+                )
+            for bin_path in bin_paths:
                 try:
                     if bin_path.exists():
                         bin_path.unlink()
@@ -284,7 +335,8 @@ def main() -> None:
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
     total_s = time.time() - t_total
     if args.fast_only:
-        print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
+        primary_label = _mode_suffix(args.l1_timing, args.engine_model) or "fast"
+        print(f"\n==== summary: {primary_label} {n_fast}/{len(rows_out)} ran, "
               f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
               flush=True)
     else:
@@ -295,7 +347,7 @@ def main() -> None:
               flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_hotspot_profile_index(csv_path)
-    print(f"html: {HERE / 'profile_hotspot.html'}", flush=True)
+    print(f"html: {OUT_DIR / 'profile' / 'profile_hotspot.html'}", flush=True)
 
 
 if __name__ == "__main__":

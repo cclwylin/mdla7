@@ -15,8 +15,9 @@ Usage:
   ./run_model.py --list                # list bundled models
   ./run_model.py --all                 # try every INT8 model
   ./run_model.py --layer N             # legacy: run only one CONV layer
-  ./run_model.py <pattern> --fast-only # alias for --l1-timing fast
-  ./run_model.py <pattern> --l1-timing rtl
+  ./run_model.py <pattern> --fast-only # alias for --L1 fast
+  ./run_model.py <pattern> --L1 rtl --engine rtl
+  ./run_model.py <pattern> --L1 cx --engine cx
 """
 
 from __future__ import annotations
@@ -62,10 +63,31 @@ def _artefact_paths(model: Path) -> dict[str, Path]:
         "html":  OUTPUT_DIR / f"{stem}.html",
     }
 
+
+def _mode_paths(model: Path, l1_timing: str = "fast",
+                engine_model: str = "fast") -> dict[str, Path]:
+    if l1_timing == "fast" and engine_model == "fast":
+        return _artefact_paths(model)
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    suffixes: list[str] = []
+    if l1_timing != "fast":
+        suffixes.append(f"L1-{l1_timing}")
+    if engine_model != "fast":
+        suffixes.append(engine_model)
+    stem = f"{model.stem}.{'.'.join(suffixes)}"
+    return {
+        "prog":  OUTPUT_DIR / f"{stem}.bin",
+        "prof":  OUTPUT_DIR / f"{stem}.profile.json",
+        "csv":   OUTPUT_DIR / f"{stem}.profile.csv",
+        "gantt": OUTPUT_DIR / f"{stem}.profile.png",
+        "html":  OUTPUT_DIR / f"{stem}.html",
+    }
+
+
 def _refresh_model_profile_index() -> None:
     try:
         subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
-                        "--html-out", "profile_mdla6_pattern.html",
+                        "--html-out", "output/profile/profile_mdla6_pattern.html",
                         "--title", "MDLA7 MDLA6 Pattern Profiles",
                         "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
@@ -195,6 +217,36 @@ def run(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 
+def normalize_l1_mode(value: str) -> str:
+    if value in ("conflict", "mesh", "mesh-opt"):
+        return "rtl"
+    if value == "synth":
+        return "cx"
+    if value not in ("fast", "rtl", "cx"):
+        raise ValueError(f"unknown L1 mode: {value}")
+    return value
+
+
+def normalize_engine_mode(value: str) -> str:
+    if value in ("model", "analytical"):
+        return "fast"
+    if value == "rtl-style":
+        return "rtl"
+    if value == "synth":
+        return "cx"
+    if value not in ("fast", "rtl", "cx"):
+        raise ValueError(f"unknown engine mode: {value}")
+    return value
+
+
+def _arg_was_set(*names: str) -> bool:
+    for arg in sys.argv[1:]:
+        for name in names:
+            if arg == name or arg.startswith(f"{name}="):
+                return True
+    return False
+
+
 def check_python_deps():
     """numpy + (tflite-runtime OR tensorflow) needed by extract_conv.py."""
     # Suppress TF logger spam during the import probe.
@@ -278,12 +330,12 @@ def extract(model: Path, layer: int = 0, verbose: bool = True) -> tuple[bool, st
     return (True, "")
 
 
-def simulate(verbose: bool = True, l1_timing: str = "fast") -> tuple[bool, float, str]:
+def simulate(verbose: bool = True, l1_timing: str = "rtl") -> tuple[bool, float, str]:
     if verbose:
         print("[step 3/3] simulate on Mdla7System")
     t0 = time.time()
     r = subprocess.run(
-        [str(TEST_BIN), str(BLOB_PATH), f"--l1-timing={l1_timing}"],
+        [str(TEST_BIN), str(BLOB_PATH), f"--L1={l1_timing}"],
         capture_output=True, text=True,
     )
     elapsed = time.time() - t0
@@ -297,7 +349,7 @@ def simulate(verbose: bool = True, l1_timing: str = "fast") -> tuple[bool, float
     return (r.returncode == 0 and "PASS" in out, elapsed, last)
 
 
-def run_one(model: Path, layer: int = 0, l1_timing: str = "fast") -> bool:
+def run_one(model: Path, layer: int = 0, l1_timing: str = "rtl") -> bool:
     if layer == 0:
         print(f"\n========  {model.relative_to(REPO_ROOT)}  ========")
     if not model.exists():
@@ -314,21 +366,23 @@ def run_one(model: Path, layer: int = 0, l1_timing: str = "fast") -> bool:
     return ok
 
 
-def compile_and_run(model: Path, l1_timing: str = "fast",
-                    engine_model: str = "model") -> bool:
+def compile_and_run(model: Path, l1_timing: str = "rtl",
+                    engine_model: str = "rtl") -> bool:
     """Default flow: compile entire model → one program.bin → one sc_start.
 
     Exercises the real Host → CommandEngine → CONV/UDMA dispatch chain.
     Artefacts (.bin / .profile.json / .csv / .png / .html) land under
     output/<model_stem>.* so multiple models don't clobber each other.
     """
+    l1_timing = normalize_l1_mode(l1_timing)
+    engine_model = normalize_engine_mode(engine_model)
     if not model.exists():
         print(f"\n========  {model}  ========")
         print(f"  → SKIP  (not found: {model})")
         return False
 
     BUILD_DIR.mkdir(exist_ok=True)
-    paths = _artefact_paths(model)
+    paths = _mode_paths(model, l1_timing=l1_timing, engine_model=engine_model)
     prog_path  = paths["prog"]
     prof_path  = paths["prof"]
     gantt_path = paths["gantt"]
@@ -362,8 +416,8 @@ def compile_and_run(model: Path, l1_timing: str = "fast",
     emit(f"[step 3/3] simulate Mdla7System ({engine_model})")
     t0 = time.time()
     r = subprocess.run(
-        [str(MODEL_BIN), str(prog_path), "--quiet", f"--l1-timing={l1_timing}",
-         f"--engine-model={engine_model}"],
+        [str(MODEL_BIN), str(prog_path), "--quiet", f"--L1={l1_timing}",
+         f"--engine={engine_model}"],
         capture_output=True, text=True,
     )
     elapsed = time.time() - t0
@@ -2206,7 +2260,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     return paths["html"]
 
 
-def run_all_layers(model: Path, l1_timing: str = "fast") -> bool:
+def run_all_layers(model: Path, l1_timing: str = "rtl") -> bool:
     """Run every CONV_2D layer in the model independently and aggregate."""
     print(f"\n========  {model.relative_to(REPO_ROOT)}  (all CONV_2D layers)  ========")
     if not model.exists():
@@ -2275,18 +2329,28 @@ def main():
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="Keep .bin and .profile.json intermediates "
                          "(default: deleted on successful run; .csv/.png/.html stay)")
-    ap.add_argument("--l1-timing", choices=("fast", "rtl", "conflict", "mesh", "mesh-opt"), default="fast",
-                    help="L1Mesh timing mode: fast aggregate estimate (default) or RTL mesh+port KPI model. "
-                         "Legacy conflict/mesh/mesh-opt aliases map to rtl.")
-    ap.add_argument("--engine-model", choices=("model", "rtl"), default="model",
-                    help="Engine timing model for EWE/POOL/TNPS: analytical model or RTL-style model")
+    ap.add_argument("--L1", "--l1", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="L1Mesh timing mode: fast aggregate estimate, RTL detailed mesh/port KPI, or cx mode")
+    ap.add_argument("--l1-timing", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth", "conflict", "mesh", "mesh-opt"),
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--engine", dest="engine_model",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="Engine timing model: fast analytical, RTL-style, or cx mode")
+    ap.add_argument("--engine-model", dest="engine_model",
+                    choices=("fast", "model", "analytical", "rtl", "rtl-style", "cx", "synth"),
+                    help=argparse.SUPPRESS)
     ap.add_argument("--fast-only", action="store_true",
-                    help="alias for --l1-timing fast, matching sweep runners")
+                    help="alias for --L1 fast --engine fast unless --engine is set")
     args = ap.parse_args()
+    engine_explicit = _arg_was_set("--engine", "--engine-model")
     if args.fast_only:
         args.l1_timing = "fast"
-    elif args.l1_timing in ("conflict", "mesh", "mesh-opt"):
-        args.l1_timing = "rtl"
+        if not engine_explicit:
+            args.engine_model = "fast"
+    args.l1_timing = normalize_l1_mode(args.l1_timing)
+    args.engine_model = normalize_engine_mode(args.engine_model)
     global _keep_intermediate
     _keep_intermediate = bool(args.keep_intermediate)
 

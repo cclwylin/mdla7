@@ -33,6 +33,7 @@ Usage:
     ./batch/run_mdla6_pattern.py                    # default: cache prior ok
     ./batch/run_mdla6_pattern.py --rerun-all        # force re-test all rows
     ./batch/run_mdla6_pattern.py --fast-only        # run fast mode only
+    ./batch/run_mdla6_pattern.py --L1 cx --engine cx
     ./batch/run_mdla6_pattern.py --csv-in  <path>   # override input
     ./batch/run_mdla6_pattern.py --csv-out <path>   # override output cache
     ./batch/run_mdla6_pattern.py --filter mobilenet # substring filter
@@ -96,7 +97,7 @@ _BANNER_HINTS = ("ALL RIGHTS RESERVED", "Accellera", "Copyright (c)",
 def _refresh_model_profile_index() -> None:
     try:
         subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
-                        "--html-out", "profile_mdla6_pattern.html",
+                        "--html-out", "output/profile/profile_mdla6_pattern.html",
                         "--title", "MDLA7 MDLA6 Pattern Profiles",
                         "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
@@ -129,11 +130,56 @@ def _normalise_pattern(pat: str) -> str:
     return pat
 
 
-def _report_exists_for(pattern: str, model_dir: Path, engine_model: str = "model") -> bool:
+def _normalise_engine(engine_model: str) -> str:
+    if engine_model in ("model", "analytical"):
+        return "fast"
+    if engine_model == "rtl-style":
+        return "rtl"
+    if engine_model == "synth":
+        return "cx"
+    if engine_model not in ("fast", "rtl", "cx"):
+        raise ValueError(f"unknown engine mode: {engine_model}")
+    return engine_model
+
+
+def _normalise_l1(l1_timing: str) -> str:
+    if l1_timing in ("conflict", "mesh", "mesh-opt"):
+        return "rtl"
+    if l1_timing == "synth":
+        return "cx"
+    if l1_timing not in ("fast", "rtl", "cx"):
+        raise ValueError(f"unknown L1 mode: {l1_timing}")
+    return l1_timing
+
+
+def _mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
+    l1_timing = _normalise_l1(l1_timing)
+    engine_model = _normalise_engine(engine_model)
+    suffixes: list[str] = []
+    if l1_timing != "fast":
+        suffixes.append(f"L1-{l1_timing}")
+    if engine_model != "fast":
+        suffixes.append(engine_model)
+    return ".".join(suffixes)
+
+
+def _arg_was_set(*names: str) -> bool:
+    for arg in sys.argv[1:]:
+        for name in names:
+            if arg == name or arg.startswith(f"{name}="):
+                return True
+    return False
+
+
+def _report_exists_for(pattern: str, model_dir: Path, engine_model: str = "fast",
+                       l1_timing: str = "fast") -> bool:
+    l1_timing = _normalise_l1(l1_timing)
+    engine_model = _normalise_engine(engine_model)
     canonical = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
-    if engine_model != "model":
-        return _mode_paths(model_path, engine_model)["html"].exists()
+    suffix = _mode_suffix(l1_timing, engine_model)
+    if suffix:
+        return _mode_paths(model_path, suffix)["html"].exists()
     return _artefact_paths(model_path)["html"].exists()
 
 
@@ -265,12 +311,13 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
 
 
 def _simulate_one(bin_path: Path, l1_timing: str,
-                  engine_model: str = "model") -> tuple[float | None, str, str]:
+                  engine_model: str = "fast") -> tuple[float | None, str, str]:
     """Run mdla7_model_runner once. Returns (ms, status, stdout)."""
+    engine_model = _normalise_engine(engine_model)
     try:
         sr = subprocess.run(
             [str(MODEL_RUNNER), str(bin_path), "--quiet",
-             f"--l1-timing={l1_timing}", f"--engine-model={engine_model}"],
+             f"--L1={l1_timing}", f"--engine={engine_model}"],
             capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
@@ -297,16 +344,24 @@ def _simulate_one(bin_path: Path, l1_timing: str,
 def run_one(pattern: str, model_dir: Path, progress=None,
             fast_only: bool = False,
             skip_html: bool = False,
-            engine_model: str = "model") -> tuple[str, float | None, float | None, float | None, str, str, str]:
+            engine_model: str = "rtl",
+            l1_timing: str = "rtl") -> tuple[str, float | None, float | None, float | None, str, str, str]:
     """Compile + simulate one model; optionally skip conflict/mesh."""
+    l1_timing = _normalise_l1(l1_timing)
+    engine_model = _normalise_engine(engine_model)
+    if l1_timing != "fast":
+        fast_only = True
     canonical  = _normalise_pattern(pattern)
     model_path = model_dir / f"{canonical}.tflite"
     if not model_path.exists():
         return pattern, None, None, None, f"missing-tflite: {model_path.name}", "", ""
-    paths = _artefact_paths(model_path) if engine_model == "model" else _mode_paths(model_path, engine_model)
+    suffix = _mode_suffix(l1_timing, engine_model)
+    paths = _artefact_paths(model_path) if not suffix else _mode_paths(model_path, suffix)
     bin_path = paths["prog"]
-    conflict_paths = _mode_paths(model_path, "conflict" if engine_model == "model" else f"{engine_model}.conflict")
-    mesh_paths = _mode_paths(model_path, "mesh" if engine_model == "model" else f"{engine_model}.mesh")
+    conflict_suffix = "conflict" if engine_model == "fast" else f"{engine_model}.conflict"
+    mesh_suffix = "mesh" if engine_model == "fast" else f"{engine_model}.mesh"
+    conflict_paths = _mode_paths(model_path, conflict_suffix)
+    mesh_paths = _mode_paths(model_path, mesh_suffix)
 
     # ---- compile ----
     if progress:
@@ -326,10 +381,13 @@ def run_one(pattern: str, model_dir: Path, progress=None,
 
     # ---- simulate: fast report path ----
     if progress:
-        progress("simulate fast" if engine_model == "model" else f"simulate {engine_model}-fast")
-    ms, status, fast_stdout = _simulate_one(bin_path, "fast", engine_model=engine_model)
+        if l1_timing == "fast" and engine_model == "fast":
+            progress("simulate fast")
+        else:
+            progress(f"simulate L1-{l1_timing}/{engine_model}")
+    ms, status, fast_stdout = _simulate_one(bin_path, l1_timing, engine_model=engine_model)
 
-    fast_html = OUT_DIR / f"{canonical}.fast.html" if engine_model == "model" else paths["html"]
+    fast_html = OUT_DIR / f"{canonical}.fast.html" if not suffix else paths["html"]
     if not skip_html:
         if progress:
             progress("html fast")
@@ -447,7 +505,19 @@ def main():
     ap.add_argument("--rerun-all", action="store_true",
                     help="ignore prior --csv-out cache and re-run everything")
     ap.add_argument("--fast-only", action="store_true",
-                    help="run only fast mode; leave conflict/mesh CSV fields empty")
+                    help="run fast L1/engine mode only unless --engine is set")
+    ap.add_argument("--L1", "--l1", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="L1Mesh timing mode for the primary run")
+    ap.add_argument("--l1-timing", dest="l1_timing",
+                    choices=("fast", "rtl", "cx", "synth", "conflict", "mesh", "mesh-opt"),
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--engine", dest="engine_model",
+                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
+                    help="engine timing model for the sweep")
+    ap.add_argument("--engine-model", dest="engine_model",
+                    choices=("fast", "model", "analytical", "rtl", "rtl-style", "cx", "synth"),
+                    help=argparse.SUPPRESS)
     ap.add_argument("--include-excluded", action="store_true",
                     help="include patterns excluded from the default sweep")
     ap.add_argument("--limit", type=int, default=0,
@@ -455,6 +525,19 @@ def main():
     ap.add_argument("--offset", type=int, default=0,
                     help="skip the first N selected patterns before applying --limit")
     args = ap.parse_args()
+    engine_explicit = _arg_was_set("--engine", "--engine-model")
+    if args.fast_only:
+        args.l1_timing = "fast"
+        if not engine_explicit:
+            args.engine_model = "fast"
+    args.l1_timing = _normalise_l1(args.l1_timing)
+    args.engine_model = _normalise_engine(args.engine_model)
+    if args.l1_timing != "fast":
+        args.fast_only = True
+    suffix = _mode_suffix(args.l1_timing, args.engine_model)
+    if suffix and Path(args.csv_out) == DEFAULT_CSV_OUT:
+        args.csv_out = str(DEFAULT_CSV_OUT.with_name(
+            f"{DEFAULT_CSV_OUT.stem}.{suffix}{DEFAULT_CSV_OUT.suffix}"))
 
     OUT_DIR.mkdir(exist_ok=True)
     csv_in = Path(args.csv_in)
@@ -541,14 +624,19 @@ def main():
             w.writeheader()
             w.writerows(merged)
 
+    mode_label = ""
+    if args.l1_timing != "fast" or args.engine_model != "fast":
+        mode_label = f", L1={args.l1_timing}, engine={args.engine_model}"
     print(f"==== MDLA6 pattern regression: {len(rows_in)} patterns "
-          f"(from {csv_in.name}) ====", flush=True)
+          f"(from {csv_in.name}{mode_label}) ====", flush=True)
     rows_out = []
     t_total = time.time()
     for i, (pat, mdla6_cx) in enumerate(rows_in, 1):
         # Reuse prior ok result if available and its per-model HTML already
         # exists. Older cache rows predate the report, so they re-run once.
-        if pat in prior_ok and _report_exists_for(pat, Path(args.model_dir)):
+        if pat in prior_ok and _report_exists_for(
+                pat, Path(args.model_dir), engine_model=args.engine_model,
+                l1_timing=args.l1_timing):
             cached = prior_ok[pat]
             cached_ms = cached.get("mdla7_ms", "")
             cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
@@ -583,7 +671,8 @@ def main():
                         f"{'—':>10s}      ({elapsed:5.1f}s)  running {stage}...")
 
         pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
-            pat, Path(args.model_dir), progress=_progress, fast_only=args.fast_only)
+            pat, Path(args.model_dir), progress=_progress, fast_only=args.fast_only,
+            engine_model=args.engine_model, l1_timing=args.l1_timing)
         elapsed = time.time() - t0
         ms_str  = f"{ms:>10.3f} ms" if ms is not None else f"{'—':>10s}    "
         cms_str = (f"{conflict_ms:>10.3f} ms" if conflict_ms is not None
@@ -607,9 +696,20 @@ def main():
         _checkpoint(rows_out)            # durable after each row
         if not args.keep_bin:
             canonical = _normalise_pattern(pat)
-            for bin_path in (OUT_DIR / f"{canonical}.bin",
-                             OUT_DIR / f"{canonical}.conflict.bin",
-                             OUT_DIR / f"{canonical}.mesh.bin"):
+            suffix = _mode_suffix(args.l1_timing, args.engine_model)
+            if not suffix:
+                bin_paths = (
+                    OUT_DIR / f"{canonical}.bin",
+                    OUT_DIR / f"{canonical}.conflict.bin",
+                    OUT_DIR / f"{canonical}.mesh.bin",
+                )
+            else:
+                bin_paths = (
+                    OUT_DIR / f"{canonical}.{suffix}.bin",
+                    OUT_DIR / f"{canonical}.{suffix}.conflict.bin",
+                    OUT_DIR / f"{canonical}.{suffix}.mesh.bin",
+                )
+            for bin_path in bin_paths:
                 try:
                     if bin_path.exists():
                         bin_path.unlink()
@@ -623,7 +723,8 @@ def main():
     total_s = time.time() - t_total
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r["mdla7_ms"])
     if args.fast_only:
-        print(f"\n==== summary: fast {n_ok}/{len(rows_out)} ran "
+        primary_label = _mode_suffix(args.l1_timing, args.engine_model) or "fast"
+        print(f"\n==== summary: {primary_label} {n_ok}/{len(rows_out)} ran "
               f"({n_fail} skipped/failed),"
               f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     else:
@@ -633,7 +734,7 @@ def main():
               f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()
-    print(f"html: {HERE / 'profile_mdla6_pattern.html'}", flush=True)
+    print(f"html: {OUT_DIR / 'profile' / 'profile_mdla6_pattern.html'}", flush=True)
 
 
 if __name__ == "__main__":
