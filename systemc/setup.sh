@@ -44,6 +44,6 @@ PY
 
 cat <<EOF
 
-next: cd systemc && python3 run_model.py mobilenet_v1
-      (run_model.py auto-re-execs into $VENV/bin/python; no need to activate.)
+next: cd .. && ./batch/run_systemc.py --filter ethz --model-filter mobilenet --limit 1
+      (run_systemc.py auto-re-execs into $VENV/bin/python; no need to activate.)
 EOF

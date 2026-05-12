@@ -1,4 +1,4 @@
-# MDLA7 SystemC simulator — Python dependencies for run_model.py / extract_conv.py
+# MDLA7 SystemC simulator — Python dependencies for run_systemc.py / extract_conv.py
 #
 # Install with:
 #     pip install -r systemc/requirements.txt
