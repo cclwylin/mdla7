@@ -37,8 +37,10 @@ GEN_STATS_RE = re.compile(
     r"(?:\s+sramcrc=([0-9]+))?"
     r"(?:\s+refbytes=([0-9]+))?"
     r"(?:\s+srambytes=([0-9]+))?"
+    r"(?:\s+finalcrc=([0-9]+))?"
+    r"(?:\s+finalbytes=([0-9]+))?"
 )
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 
@@ -200,6 +202,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Fail if total refB coverage is below this value.")
     ap.add_argument("--min-sram-bytes", type=int, default=0,
                     help="Fail if total sramB coverage is below this value.")
+    ap.add_argument("--require-final-output-crc", action="store_true",
+                    help="Fail a generated program if it has no final-layer SRAM/L1 CRC coverage.")
+    ap.add_argument("--min-final-bytes", type=int, default=0,
+                    help="Fail if total final-layer SRAM/L1 CRC bytes are below this value.")
     ap.add_argument("--emit-conv-partial-psum", action="store_true",
                     help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
     ap.add_argument("--conv-sram-window-commands", type=int, default=0,
@@ -218,7 +224,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int, int, int, int]:
+def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]:
     words: list[int] = []
     for line in hex_path.read_text(encoding="ascii").splitlines():
         line = line.strip()
@@ -236,6 +242,8 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
     sramcrc = 0
     refbytes = 0
     srambytes = 0
+    finalcrc = 0
+    finalbytes = 0
     for off in range(0, len(words), WORDS_PER_COMMAND):
         op = words[off] & 0xF
         if op == 0:
@@ -246,15 +254,24 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 6:
             udma += 1
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 7:
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 1:
             conv += 1
             if words[off + 3] & (1 << 9):
@@ -263,16 +280,25 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 2:
             requant += 1
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 3:
             ewe += 1
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
         elif op == 4:
             pool += 1
             if words[off + 3] & (1 << 9):
@@ -281,7 +307,10 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-    return count, conv, pool, requant, ewe, tnps, udma, refcrc, sramcrc, refbytes, srambytes
+                if words[off + 3] & (1 << 12):
+                    finalcrc += 1
+                    finalbytes += words[off + 29]
+    return count, conv, pool, requant, ewe, tnps, udma, refcrc, sramcrc, refbytes, srambytes, finalcrc, finalbytes
 
 
 def main(argv: list[str]) -> int:
@@ -307,8 +336,8 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog_final] cache: {display(args.cache_file, repo_root)}")
     if args.rerun_all:
         print("[run_verilog_final] cache_mode: rerun-all")
-    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma refcrc sramcrc     refB    sramB  done  wall_s")
-    print("-------------------------------------------------------------------------------------------------------------------------------------")
+    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma refcrc sramcrc final      refB    sramB   finalB  done  wall_s")
+    print("-----------------------------------------------------------------------------------------------------------------------------------------------------")
 
     passed = 0
     failed = 0
@@ -318,6 +347,8 @@ def main(argv: list[str]) -> int:
     total_sramcrc = 0
     total_refbytes = 0
     total_srambytes = 0
+    total_finalcrc = 0
+    total_finalbytes = 0
     build_done = args.no_build
     cache = load_cache(args.cache_file)
     cache_entries = cache.setdefault("entries", {})
@@ -352,18 +383,22 @@ def main(argv: list[str]) -> int:
             sramcrc_count = int(cached.get("sramcrc") or 0)
             refcrc_bytes = int(cached.get("refbytes") or 0)
             sramcrc_bytes = int(cached.get("srambytes") or 0)
+            finalcrc_count = int(cached.get("finalcrc") or 0)
+            finalcrc_bytes = int(cached.get("finalbytes") or 0)
             done = int(cached.get("done") or 0)
             total_refcrc += refcrc_count
             total_sramcrc += sramcrc_count
             total_refbytes += refcrc_bytes
             total_srambytes += sramcrc_bytes
+            total_finalcrc += finalcrc_count
+            total_finalbytes += finalcrc_bytes
             if status == "SKIP":
                 skipped += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {0.0:7.2f}")
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {0.0:7.2f}")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
         gen_cmd = [
@@ -395,15 +430,17 @@ def main(argv: list[str]) -> int:
             sramcrc_count = int(stats_match.group(9) or 0)
             refcrc_bytes = int(stats_match.group(10) or 0)
             sramcrc_bytes = int(stats_match.group(11) or 0)
+            finalcrc_count = int(stats_match.group(12) or 0)
+            finalcrc_bytes = int(stats_match.group(13) or 0)
         else:
             (
                 command_count, conv_count, pool_count, requant_count, ewe_count,
                 tnps_count, udma_count, refcrc_count, sramcrc_count,
-                refcrc_bytes, sramcrc_bytes,
+                refcrc_bytes, sramcrc_bytes, finalcrc_count, finalcrc_bytes,
             ) = count_commands(hex_path)
         if command_count == 0:
             skipped += 1
-            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0      0       0        0        0     0    0.00")
+            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0      0       0     0        0        0        0     0    0.00")
             print("     reason: no final command")
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -423,6 +460,8 @@ def main(argv: list[str]) -> int:
                     "sramcrc": 0,
                     "refbytes": 0,
                     "srambytes": 0,
+                    "finalcrc": 0,
+                    "finalbytes": 0,
                     "done": 0,
                 }
                 save_cache(args.cache_file, cache)
@@ -431,6 +470,8 @@ def main(argv: list[str]) -> int:
         total_sramcrc += sramcrc_count
         total_refbytes += refcrc_bytes
         total_srambytes += sramcrc_bytes
+        total_finalcrc += finalcrc_count
+        total_finalbytes += finalcrc_bytes
 
         cmd = [str(smoke), "--test", "host", "--program", str(hex_path), "--ref-program", str(bin_path)]
         if build_done:
@@ -444,7 +485,7 @@ def main(argv: list[str]) -> int:
             passed += 1
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} PASS "
-                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {done:5d} {wall:7.2f}"
+                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d} {done:5d} {wall:7.2f}"
             )
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -464,6 +505,8 @@ def main(argv: list[str]) -> int:
                     "sramcrc": sramcrc_count,
                     "refbytes": refcrc_bytes,
                     "srambytes": sramcrc_bytes,
+                    "finalcrc": finalcrc_count,
+                    "finalbytes": finalcrc_bytes,
                     "done": done,
                     "wall_s": wall,
                 }
@@ -478,14 +521,18 @@ def main(argv: list[str]) -> int:
                 reason = f"TIMEOUT after {args.timeout:.1f}s"
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL "
-                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {refcrc_bytes:8d} {sramcrc_bytes:8d}   n/a  {wall:7.2f}"
+                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {sramcrc_count:7d} {finalcrc_count:5d} {refcrc_bytes:8d} {sramcrc_bytes:8d} {finalcrc_bytes:8d}   n/a  {wall:7.2f}"
             )
             print(f"     reason: {reason}")
+        if args.require_final_output_crc and command_count != 0 and finalcrc_count == 0:
+            failed += 1
+            print("     reason: no final-layer SRAM/L1 CRC coverage")
 
     print(f"[run_verilog_final] summary: pass={passed} fail={failed} skip={skipped} total={len(bins)}")
     print(
         f"[run_verilog_final] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
-        f"refB={total_refbytes} sramB={total_srambytes}"
+        f"finalcrc={total_finalcrc} refB={total_refbytes} sramB={total_srambytes} "
+        f"finalB={total_finalbytes}"
     )
     if total_refcrc == 0 and total_sramcrc == 0 and not args.emit_conv_partial_psum:
         print(
@@ -506,6 +553,12 @@ def main(argv: list[str]) -> int:
         print(
             f"[run_verilog_final] coverage_fail: sramB={total_srambytes} "
             f"below min_sram_bytes={args.min_sram_bytes}"
+        )
+    if args.min_final_bytes > 0 and total_finalbytes < args.min_final_bytes:
+        failed += 1
+        print(
+            f"[run_verilog_final] coverage_fail: finalB={total_finalbytes} "
+            f"below min_final_bytes={args.min_final_bytes}"
         )
     if cache_hits:
         print(f"[run_verilog_final] cache_hits: {cache_hits}")

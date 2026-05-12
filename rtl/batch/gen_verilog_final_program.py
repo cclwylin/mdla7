@@ -769,6 +769,14 @@ def l1mesh_crc_probe_descriptor(ordinal: int, start_addr: int, ref_bytes: bytes)
     return words
 
 
+def is_sram_crc_descriptor(desc: list[int]) -> bool:
+    op = desc[0] & 0xF
+    return (
+        (op == OP_L1CRC and bool(desc[3] & (1 << 10))) or
+        (op in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and bool(desc[3] & (1 << 10)))
+    )
+
+
 def l1_preload_byte_descriptor(ordinal: int, byte_addr: int, byte_value: int, source_layer: int = 0) -> list[int]:
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
@@ -2074,7 +2082,10 @@ def main() -> int:
     sramcrc_count = 0
     refcrc_bytes = 0
     sramcrc_bytes = 0
+    finalcrc_count = 0
+    finalcrc_bytes = 0
     command_limit = max(args.max_commands - 1, 0)
+    last_layer_index = layers[-1].index if layers else -1
     for layer in layers:
         if len(commands) >= command_limit:
             break
@@ -2332,6 +2343,10 @@ def main() -> int:
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
+        if layer.index == last_layer_index:
+            for desc in descs:
+                if is_sram_crc_descriptor(desc):
+                    desc[3] |= 1 << 12
         for desc in descs:
             if len(commands) >= command_limit:
                 break
@@ -2351,12 +2366,18 @@ def main() -> int:
             if (desc[0] & 0xF) == OP_L1CRC:
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
+                if desc[3] & (1 << 12):
+                    finalcrc_count += 1
+                    finalcrc_bytes += desc[29]
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
             if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
+                if desc[3] & (1 << 12):
+                    finalcrc_count += 1
+                    finalcrc_bytes += desc[29]
         if len(commands) >= command_limit:
             break
     commands.append([0] * WORDS_PER_COMMAND)
@@ -2375,7 +2396,8 @@ def main() -> int:
         f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
         f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count} "
         f"refcrc={refcrc_count} sramcrc={sramcrc_count} "
-        f"refbytes={refcrc_bytes} srambytes={sramcrc_bytes}"
+        f"refbytes={refcrc_bytes} srambytes={sramcrc_bytes} "
+        f"finalcrc={finalcrc_count} finalbytes={finalcrc_bytes}"
     )
     return 0
 
