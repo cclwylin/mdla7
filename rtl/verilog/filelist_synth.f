@@ -1,5 +1,11 @@
 rtl/verilog/common.v
 rtl/verilog/l1manager.v
 rtl/verilog/l1mesh.v
-rtl/verilog/datapath.v
+rtl/verilog/conv.v
+rtl/verilog/requant.v
+rtl/verilog/pool.v
+rtl/verilog/ewe.v
+rtl/verilog/udma.v
+rtl/verilog/tnps.v
+rtl/verilog/route.v
 rtl/verilog/mdla7_top.v

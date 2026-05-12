@@ -40,7 +40,13 @@ Testbench loads .bin into DRAM
   - 新增 `udma_dram_resp_rdata` input。
   - 接到 `vf_udma_engine`。
 
-- `rtl/verilog/datapath.v`
+- `rtl/verilog/conv.v`
+- `rtl/verilog/requant.v`
+- `rtl/verilog/pool.v`
+- `rtl/verilog/ewe.v`
+- `rtl/verilog/tnps.v`
+- `rtl/verilog/udma.v`
+- `rtl/verilog/route.v`
   - `vf_udma_engine` 新增 `dram_resp_rdata` input。
   - UDMA load 現在會把 DRAM response 的 16B beat 寫進 L1Mesh。
   - UDMA store 現在會 capture L1 response，再寫回 DRAM model。
@@ -61,7 +67,7 @@ Compile / static checks:
 
 ```bash
 python3 -m py_compile rtl/batch/gen_verilog_program.py rtl/batch/run_verilog.py
-git diff --check -- rtl/verilog/Testbench_host_program.v rtl/verilog/datapath.v rtl/verilog/mdla7_top.v rtl/verilog/Testbench_top_byte_movers.v rtl/batch/run_verilog.py rtl/batch/gen_verilog_program.py
+git diff --check -- rtl/verilog rtl/batch/run_verilog.py rtl/batch/gen_verilog_program.py
 ```
 
 Both passed.
@@ -128,7 +134,13 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
 
 - `rtl/verilog/Testbench_host_program.v`
 - `rtl/verilog/mdla7_top.v`
-- `rtl/verilog/datapath.v`
+- `rtl/verilog/conv.v`
+- `rtl/verilog/requant.v`
+- `rtl/verilog/pool.v`
+- `rtl/verilog/ewe.v`
+- `rtl/verilog/tnps.v`
+- `rtl/verilog/udma.v`
+- `rtl/verilog/route.v`
 - `rtl/verilog/host.v`
 - `rtl/verilog/Testbench_top_byte_movers.v`
 - `rtl/batch/gen_verilog_program.py`
