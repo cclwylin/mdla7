@@ -112,6 +112,11 @@ For closed-loop dataflow regression through the batch runner, use:
 The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
 `finalB` count bytes that completed the shared path through UDMA, L1, an engine,
 UDMA store-back, DRAM reload, and L1CRC.
+By default, when a synth profile is available, the runner passes that
+`total_cycles` value into the generated closed-loop program as a UDMA load
+performance target. This keeps `verilog_final_cycles` comparable to
+`synth_cycles` while the checked payload remains a compact correctness probe.
+Use `--no-closed-loop-perf-target` to report only the compact probe latency.
 Every descriptor emitted in this mode is a microblock descriptor: UDMA load,
 CONV/TNPS/POOL/EWE compute, UDMA store, UDMA reload, and L1CRC final check all
 carry bit13 plus stream metadata flags.

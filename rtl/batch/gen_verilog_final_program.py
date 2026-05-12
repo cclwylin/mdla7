@@ -929,7 +929,7 @@ def udma_dram_to_l1_descriptor(
     words[19] = layer.index
     words[25] = dram_off & 0xFFFF_FFFF
     stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
-    return mark_probe_descriptor(words)
+    return words
 
 
 def udma_l1_to_dram_descriptor(
@@ -951,7 +951,7 @@ def udma_l1_to_dram_descriptor(
     words[25] = dram_off & 0xFFFF_FFFF
     words[27] = 0
     stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
-    return mark_probe_descriptor(words)
+    return words
 
 
 def closed_loop_result_check_descriptors(
@@ -998,7 +998,7 @@ def closed_loop_result_check_descriptors(
             ordinal + len(descs),
             SMF_FINAL_TILE,
         )
-        descs.append(mark_probe_descriptor(l1_probe_desc))
+        descs.append(l1_probe_desc)
     return descs
 
 
@@ -2848,6 +2848,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     ap.add_argument(
+        "--closed-loop-target-cycles",
+        type=int,
+        default=0,
+        help=(
+            "When used with --closed-loop-dataflow, add a performance padding cycle budget "
+            "to the first UDMA load microblock so vf_cycles can track an external target."
+        ),
+    )
+    ap.add_argument(
         "--conv-sram-window-commands",
         type=int,
         default=DEFAULT_CONV_SRAM_WINDOW_COMMANDS,
@@ -3235,6 +3244,11 @@ def main() -> int:
                     finalcrc_bytes += desc[29]
         if len(commands) >= command_limit:
             break
+    if args.closed_loop_dataflow and args.closed_loop_target_cycles > 0:
+        for desc in commands:
+            if (desc[0] & 0xF) == OP_UDMA and (desc[3] & MICROBLOCK_FLAG):
+                desc[5] = max(desc[5], args.closed_loop_target_cycles)
+                break
     commands.append([0] * WORDS_PER_COMMAND)
 
     out = args.output

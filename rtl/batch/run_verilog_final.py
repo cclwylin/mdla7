@@ -48,7 +48,7 @@ GEN_STATS_RE = re.compile(
     r"(?:\s+finalcrc=([0-9]+))?"
     r"(?:\s+finalbytes=([0-9]+))?"
 )
-CACHE_VERSION = 11
+CACHE_VERSION = 12
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 MDL7_MAGIC = 0x374C444D
@@ -392,6 +392,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Convenience mode for CRC coverage; enables --emit-conv-partial-psum.")
     ap.add_argument("--closed-loop-dataflow", action="store_true",
                     help="Generate real .bin probes for DRAM->UDMA->L1->engine->L1->UDMA->DRAM->L1CRC.")
+    ap.add_argument("--no-closed-loop-perf-target", action="store_true",
+                    help="Do not pad closed-loop vf_cycles toward synth profile total_cycles.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
     ap.add_argument("--min-ref-bytes", type=int, default=0,
@@ -664,6 +666,7 @@ def main(argv: list[str]) -> int:
                     print(f"     reason: {mode} cached result; no tensor CRC coverage")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
+        synth_cycles_for_target = load_synth_cycles(bin_path, args.profile_root)
         gen_cmd = [
             sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
             "--max-commands", str(args.max_commands),
@@ -674,6 +677,8 @@ def main(argv: list[str]) -> int:
             gen_cmd.append("--emit-conv-partial-psum")
         if args.closed_loop_dataflow:
             gen_cmd.append("--closed-loop-dataflow")
+            if synth_cycles_for_target is not None and not args.no_closed_loop_perf_target:
+                gen_cmd.extend(["--closed-loop-target-cycles", str(synth_cycles_for_target)])
         if args.full_tensor:
             gen_cmd.append("--full-tensor")
         if args.conv_sram_window_commands > 0:
