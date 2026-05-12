@@ -1369,6 +1369,29 @@ def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None
     return words
 
 
+def pool_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.op_kind not in OK_POOL or layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return None
+    ref_bytes = data[layer.ref_off:layer.ref_off + layer.ref_size]
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x08) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_POOL
+    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = 1 << 9
+    words[12] = (1 if layer.op_kind == 2 else 0) << 8
+    words[19] = layer.index
+    words[25] = layer.ref_off & 0xFFFF_FFFF
+    words[26] = layer.ref_size & 0xFFFF_FFFF
+    words[27] = (layer.ref_size - 1) & 0xFFFF_FFFF
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    words[30] = (layer.out_c & 0xFFFF) | ((layer.out_h & 0xFFFF) << 16)
+    words[31] = layer.out_w & 0xFFFF
+    return words
+
+
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
     elem = elem_bytes(layer.dtype)
     if layer.op_kind not in OK_CONV or elem != 1 or layer.in_size == 0 or layer.wgt_size == 0:
@@ -1553,6 +1576,10 @@ def main() -> int:
                     descs.append(probe_desc)
         else:
             descs = [desc] if desc is not None else []
+        if args.emit_conv_partial_psum and layer.op_kind in OK_POOL:
+            pool_crc_desc = pool_full_ref_crc_descriptor(layer, len(commands) + len(descs))
+            if pool_crc_desc is not None:
+                descs.append(pool_crc_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -1572,10 +1599,10 @@ def main() -> int:
                 tnps_count += 1
             elif (desc[0] & 0xF) == OP_UDMA:
                 udma_count += 1
-            if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 9)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
-            if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 10)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:

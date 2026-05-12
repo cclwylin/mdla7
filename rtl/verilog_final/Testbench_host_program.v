@@ -69,6 +69,10 @@ module Testbench_host_program;
     wire pool_avg_mode;
     wire pool_fp_mode;
     wire pool_int16_mode;
+    wire pool_refcrc_mode;
+    wire [31:0] pool_refcrc_expected_crc;
+    wire [31:0] pool_refcrc_expected_count;
+    wire [31:0] pool_refcrc_ref_off;
     wire [127:0] pool_sample_vec;
     wire [7:0] pool_elem_count;
     wire [1:0] ewe_op_mode;
@@ -127,6 +131,8 @@ module Testbench_host_program;
     wire signed [31:0] pool_out;
     wire signed [7:0] pool_out_q;
     wire [63:0] pool_fp_bits;
+    wire [31:0] pool_refcrc_crc;
+    wire [31:0] pool_refcrc_count;
     wire signed [31:0] ewe_out;
     wire signed [7:0] ewe_out_q;
     wire [63:0] ewe_fp_bits;
@@ -210,6 +216,10 @@ module Testbench_host_program;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_refcrc_mode(pool_refcrc_mode),
+        .pool_refcrc_expected_crc(pool_refcrc_expected_crc),
+        .pool_refcrc_expected_count(pool_refcrc_expected_count),
+        .pool_refcrc_ref_off(pool_refcrc_ref_off),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -270,6 +280,8 @@ module Testbench_host_program;
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
+        .pool_refcrc_crc(pool_refcrc_crc),
+        .pool_refcrc_count(pool_refcrc_count),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
         .ewe_fp_bits(ewe_fp_bits),
@@ -349,6 +361,9 @@ module Testbench_host_program;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_refcrc_mode(pool_refcrc_mode),
+        .pool_refcrc_expected_count(pool_refcrc_expected_count),
+        .pool_refcrc_ref_off(pool_refcrc_ref_off),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -411,6 +426,8 @@ module Testbench_host_program;
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
+        .pool_refcrc_crc(pool_refcrc_crc),
+        .pool_refcrc_count(pool_refcrc_count),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
         .ewe_fp_bits(ewe_fp_bits)

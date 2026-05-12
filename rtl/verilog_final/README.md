@@ -137,6 +137,10 @@ Current converter behavior:
   generator takes up to 8 activation half-floats and 8 weight half-floats,
   computes the expected double-precision sample MAC, and `host_final.v` checks
   the Verilog FP sample result.
+- POOL op kinds `2/3`: emitted as sample descriptors in default mode. With
+  `--crc-coverage`, the generator also emits a compact full-ref CRC descriptor;
+  `vf_pool_sample_engine` walks the golden tensor bytes in Verilog through
+  `+FINAL_REF_PROGRAM`, and `host_final.v` checks the CRC/count.
 - INT16/hybrid CONV op kinds `0/1/6`: emitted as CONV INT16 sample descriptors.
   The generator takes up to 8 signed 16-bit activation values and 8 signed
   16-bit weight values, computes the expected sample MAC accumulator, and

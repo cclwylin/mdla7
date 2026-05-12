@@ -259,6 +259,12 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             ewe += 1
         elif op == 4:
             pool += 1
+            if words[off + 3] & (1 << 9):
+                refcrc += 1
+                refbytes += words[off + 29]
+            if words[off + 3] & (1 << 10):
+                sramcrc += 1
+                srambytes += words[off + 29]
     return count, conv, pool, requant, ewe, tnps, udma, refcrc, sramcrc, refbytes, srambytes
 
 

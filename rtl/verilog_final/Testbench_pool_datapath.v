@@ -36,6 +36,9 @@ module Testbench_pool_datapath;
         .avg_mode(avg_mode),
         .fp_mode(fp_mode),
         .int16_mode(int16_mode),
+        .refcrc_mode(1'b0),
+        .refcrc_expected_count(32'd0),
+        .refcrc_ref_off(32'd0),
         .sample_vec(sample_vec),
         .elem_count(elem_count),
         .l1_req_valid(l1_req_valid),
@@ -50,7 +53,9 @@ module Testbench_pool_datapath;
         .remaining_cycles(remaining_cycles),
         .pool_out(pool_out),
         .out_q(out_q),
-        .fp_pool_bits(fp_pool_bits)
+        .fp_pool_bits(fp_pool_bits),
+        .refcrc_crc(),
+        .refcrc_count()
     );
 
     task clear_vec;

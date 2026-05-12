@@ -1303,6 +1303,9 @@ module vf_pool_sample_engine #(
     input                         avg_mode,
     input                         fp_mode,
     input                         int16_mode,
+    input                         refcrc_mode,
+    input      [31:0]             refcrc_expected_count,
+    input      [31:0]             refcrc_ref_off,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
     output                        l1_req_valid,
@@ -1317,7 +1320,9 @@ module vf_pool_sample_engine #(
     output reg [31:0]             remaining_cycles,
     output reg signed [31:0]      pool_out,
     output signed [7:0]           out_q,
-    output reg [63:0]             fp_pool_bits
+    output reg [63:0]             fp_pool_bits,
+    output reg [31:0]             refcrc_crc,
+    output reg [31:0]             refcrc_count
 );
     localparam [3:0] PH_CFG_DECODE   = 4'd1;
     localparam [3:0] PH_WINDOW_FETCH = 4'd2;
@@ -1330,6 +1335,9 @@ module vf_pool_sample_engine #(
     localparam [2:0] ST_PIPE  = 3'd2;
     localparam [2:0] ST_STORE = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
+    localparam [2:0] ST_REFCRC = 3'd5;
+    localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
+    localparam [31:0] FNV_PRIME = 32'd16777619;
     localparam [7:0] MAX_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
@@ -1338,6 +1346,11 @@ module vf_pool_sample_engine #(
     integer i;
     integer fp_i;
     integer i16_i;
+    integer refcrc_i;
+    integer refcrc_fd;
+    integer refcrc_byte;
+    integer refcrc_seek_rc;
+    reg [1023:0] refcrc_program_path;
     reg signed [31:0] value;
     reg signed [31:0] sum;
     reg signed [31:0] max_value;
@@ -1348,6 +1361,9 @@ module vf_pool_sample_engine #(
     reg signed [31:0] i16_max_value;
     reg signed [31:0] i16_avg_value;
     reg signed [31:0] signed_i16_count;
+    reg [31:0] refcrc_remaining;
+    reg [31:0] refcrc_crc_value;
+    reg [31:0] refcrc_count_value;
     real fp_sum;
     real fp_value;
     real fp_max_value;
@@ -1369,6 +1385,14 @@ module vf_pool_sample_engine #(
                           (fp_mode ? 32'd8 : (int16_mode ? 32'd4 : 32'd1));
     assign l1_req_payload_cycles = 32'd2;
     assign out_q = pool_out[7:0];
+
+    function [31:0] fnv_byte;
+        input [31:0] crc;
+        input [7:0] byte_value;
+        begin
+            fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
 
     function real pow2_int;
         input integer exponent;
@@ -1456,6 +1480,7 @@ module vf_pool_sample_engine #(
             ST_FETCH: begin phase_id = PH_WINDOW_FETCH; remaining_cycles = l1_req_payload_cycles; end
             ST_PIPE: begin phase_id = PH_REDUCE_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
+            ST_REFCRC: begin phase_id = PH_REDUCE_PIPE; remaining_cycles = refcrc_remaining; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -1465,12 +1490,35 @@ module vf_pool_sample_engine #(
         if (!rst_n) begin
             state <= ST_IDLE;
             pipe_remaining <= 32'd0;
+            refcrc_crc <= FNV_OFFSET;
+            refcrc_count <= 32'd0;
+            refcrc_remaining <= 32'd0;
+            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
+                refcrc_program_path = "";
+            refcrc_fd = 0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
-                    if (start_valid && start_ready)
-                        state <= ST_FETCH;
+                    if (start_valid && start_ready) begin
+                        if (refcrc_mode) begin
+                            refcrc_crc <= FNV_OFFSET;
+                            refcrc_count <= 32'd0;
+                            refcrc_crc_value = FNV_OFFSET;
+                            refcrc_count_value = 32'd0;
+                            refcrc_remaining <= refcrc_expected_count;
+                            if (refcrc_fd != 0) begin
+                                $fclose(refcrc_fd);
+                                refcrc_fd = 0;
+                            end
+                            refcrc_fd = $fopen(refcrc_program_path, "rb");
+                            if (refcrc_fd != 0)
+                                refcrc_seek_rc = $fseek(refcrc_fd, refcrc_ref_off, 0);
+                            state <= (refcrc_expected_count == 32'd0) ? ST_DONE : ST_REFCRC;
+                        end else begin
+                            state <= ST_FETCH;
+                        end
+                    end
                 end
                 ST_FETCH: begin
                     if (l1_req_ready) begin
@@ -1487,6 +1535,37 @@ module vf_pool_sample_engine #(
                 ST_STORE: begin
                     if (l1_req_ready)
                         state <= ST_DONE;
+                end
+                ST_REFCRC: begin
+                    if ((refcrc_remaining != 32'd0) && (refcrc_fd != 0)) begin
+                        refcrc_crc_value = refcrc_crc;
+                        refcrc_count_value = refcrc_count;
+                        for (refcrc_i = 0; refcrc_i < 16; refcrc_i = refcrc_i + 1) begin
+                            if (refcrc_i < refcrc_remaining) begin
+                                refcrc_byte = $fgetc(refcrc_fd);
+                                if (refcrc_byte >= 0) begin
+                                    refcrc_crc_value = fnv_byte(refcrc_crc_value, refcrc_byte[7:0]);
+                                    refcrc_count_value = refcrc_count_value + 32'd1;
+                                end
+                            end
+                        end
+                        refcrc_crc <= refcrc_crc_value;
+                        refcrc_count <= refcrc_count_value;
+                        if (refcrc_remaining <= 32'd16) begin
+                            refcrc_remaining <= 32'd0;
+                            $fclose(refcrc_fd);
+                            refcrc_fd = 0;
+                            state <= ST_DONE;
+                        end else begin
+                            refcrc_remaining <= refcrc_remaining - 32'd16;
+                        end
+                    end else begin
+                        if (refcrc_fd != 0) begin
+                            $fclose(refcrc_fd);
+                            refcrc_fd = 0;
+                        end
+                        state <= ST_DONE;
+                    end
                 end
                 ST_DONE: begin
                     if (done_ready)

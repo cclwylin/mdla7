@@ -207,6 +207,9 @@ module Testbench_top_byte_movers;
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
+        .pool_refcrc_mode(1'b0),
+        .pool_refcrc_expected_count(32'd0),
+        .pool_refcrc_ref_off(32'd0),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -269,6 +272,8 @@ module Testbench_top_byte_movers;
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
+        .pool_refcrc_crc(),
+        .pool_refcrc_count(),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
         .ewe_fp_bits(ewe_fp_bits)
