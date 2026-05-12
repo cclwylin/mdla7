@@ -195,8 +195,8 @@ def make_closed_loop_program(obj_root: Path) -> tuple[Path, Path]:
 
 def repo_paths() -> tuple[Path, Path]:
     script = Path(__file__).resolve()
-    rtl_dir = script.parents[1]
-    return rtl_dir.parent, rtl_dir
+    repo_root = script.parents[1]
+    return repo_root, repo_root / "rtl"
 
 
 def find_cxx_stdlib_include() -> Path | None:

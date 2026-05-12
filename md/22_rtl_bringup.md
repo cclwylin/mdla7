@@ -9,7 +9,7 @@
 | `synth` | SystemC synth timing / microblock model | `systemc/` |
 | `verilog` | real hardware Verilog control + datapath | `rtl/verilog/` |
 
-舊的 `rtl/synth` control shell 和 `rtl/batch/run_verilog_ctrl.py` 已移除。
+舊的 `rtl/synth` control shell 和 `batch/run_verilog_ctrl.py` 已移除。
 後續不要再建立 `verilog_ctrl` / `verilog_final` 分支目錄。
 
 ## 22.1 Verilog 目標
@@ -56,9 +56,9 @@ Testbench loads .bin into DRAM
 Batch tools:
 
 ```bash
-./rtl/batch/gen_verilog_program.py
-./rtl/batch/run_verilog_smoke.py
-./rtl/batch/run_verilog.py
+./batch/gen_verilog_program.py
+./batch/run_verilog_smoke.py
+./batch/run_verilog.py
 ```
 
 ## 22.3 Smoke
@@ -66,7 +66,7 @@ Batch tools:
 Run all major Verilog smoke tests:
 
 ```bash
-./rtl/batch/run_verilog_smoke.py \
+./batch/run_verilog_smoke.py \
   --test conv --test requant --test pool --test ewe --test tnps \
   --test route --test top --test host --test closed_loop
 ```
@@ -74,7 +74,7 @@ Run all major Verilog smoke tests:
 Closed-loop-only smoke:
 
 ```bash
-./rtl/batch/run_verilog_smoke.py --test closed_loop
+./batch/run_verilog_smoke.py --test closed_loop
 ```
 
 A passing closed-loop smoke means the descriptor path exercised:
@@ -88,19 +88,19 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
 Small regression:
 
 ```bash
-./rtl/batch/run_verilog.py --filter slice
+./batch/run_verilog.py --filter slice
 ```
 
 Single pattern:
 
 ```bash
-./rtl/batch/run_verilog.py --filter deeplab_v3_plus_float_L64 --rerun-all
+./batch/run_verilog.py --filter deeplab_v3_plus_float_L64 --rerun-all
 ```
 
 Closed-loop dataflow:
 
 ```bash
-./rtl/batch/run_verilog.py --filter slice --closed-loop-dataflow
+./batch/run_verilog.py --filter slice --closed-loop-dataflow
 ```
 
 Useful report columns:

@@ -24,7 +24,7 @@ New hardware work belongs here. The legacy `rtl/synth` control shell and
 Smoke tests:
 
 ```sh
-./rtl/batch/run_verilog_smoke.py
+./batch/run_verilog_smoke.py
 ```
 
 Current smoke coverage:
@@ -48,7 +48,7 @@ Current smoke coverage:
 Closed-loop dataflow smoke:
 
 ```sh
-./rtl/batch/run_verilog_smoke.py --test closed_loop
+./batch/run_verilog_smoke.py --test closed_loop
 ```
 
 This test auto-generates its compact descriptor stream and reference DRAM image
@@ -71,9 +71,9 @@ stream:
 An MDL7 `.bin` can be converted to this descriptor stream:
 
 ```sh
-./rtl/batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
+./batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
   -o rtl/verilog/dped_float_L1.verilog.hex
-./rtl/batch/run_verilog_smoke.py --test host \
+./batch/run_verilog_smoke.py --test host \
   --program rtl/verilog/dped_float_L1.verilog.hex
 ```
 
@@ -81,10 +81,10 @@ To generate real `.bin` probes that explicitly exercise the shared closed-loop
 path, add `--closed-loop-dataflow`:
 
 ```sh
-./rtl/batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
+./batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
   -o rtl/obj/verilog/programs/dped_float_L1.closed_loop.verilog.hex \
   --closed-loop-dataflow
-./rtl/batch/run_verilog_smoke.py --test host \
+./batch/run_verilog_smoke.py --test host \
   --program rtl/obj/verilog/programs/dped_float_L1.closed_loop.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/dped_float_L1.bin
 ```
@@ -98,15 +98,15 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
 For small byte-moving regression batches, use:
 
 ```sh
-./rtl/batch/run_verilog.py --filter slice --limit 10
-./rtl/batch/run_verilog.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
+./batch/run_verilog.py --filter slice --limit 10
+./batch/run_verilog.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
 ```
 
 For closed-loop dataflow regression through the batch runner, use:
 
 ```sh
-./rtl/batch/run_verilog.py --filter slice --closed-loop-dataflow
-./rtl/batch/run_verilog.py --filter dped_float_L1.bin --closed-loop-dataflow
+./batch/run_verilog.py --filter slice --closed-loop-dataflow
+./batch/run_verilog.py --filter dped_float_L1.bin --closed-loop-dataflow
 ```
 
 The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
@@ -129,7 +129,7 @@ L1 vector to the POOL datapath.
 To spend more commands on oversized INT8 CONV output SRAM windows:
 
 ```sh
-./rtl/batch/run_verilog.py --filter slice --rerun-all \
+./batch/run_verilog.py --filter slice --rerun-all \
   --crc-coverage --require-crc-coverage \
   --conv-sram-window-commands 1024 --conv-sram-window-count 5 \
   --min-sram-bytes 1024
@@ -379,7 +379,7 @@ that the host compares with word 28. Word 3 bit 10 selects the output SRAM image
 walker: final writeback bytes are stored by output byte offset, word 27 gives
 the SRAM start offset, and the datapath scans word 29 bytes from that image to
 produce the CRC compared with word 28.
-`rtl/batch/gen_verilog_program.py --emit-conv-partial-psum` can
+`batch/gen_verilog_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton

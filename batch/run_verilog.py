@@ -78,8 +78,8 @@ class BinInfo:
 
 def repo_paths() -> tuple[Path, Path]:
     script = Path(__file__).resolve()
-    rtl_dir = script.parents[1]
-    return rtl_dir.parent, rtl_dir
+    repo_root = script.parents[1]
+    return repo_root, repo_root / "rtl"
 
 
 def display(path: Path, base: Path) -> str:
@@ -536,8 +536,8 @@ def main(argv: list[str]) -> int:
     repo_root: Path = args.repo_root
     rtl_dir: Path = args.rtl_dir
     cwd = Path.cwd()
-    gen = rtl_dir / "batch" / "gen_verilog_program.py"
-    smoke = rtl_dir / "batch" / "run_verilog_smoke.py"
+    gen = repo_root / "batch" / "gen_verilog_program.py"
+    smoke = repo_root / "batch" / "run_verilog_smoke.py"
     program_dir = rtl_dir / "obj" / "verilog" / "programs"
     program_dir.mkdir(parents=True, exist_ok=True)
     args.cache_file = args.cache_file.resolve()
