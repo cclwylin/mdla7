@@ -1,13 +1,13 @@
-# MDLA7 Verilog Final Datapath
+# MDLA7 Verilog
 
-This directory is reserved for the full Verilog datapath simulator path.
+This directory is the real hardware Verilog path. It contains the control path,
+L1 fabric, byte movers, and datapath bring-up blocks.
 
 Simulator naming:
 
 - `fast`: analytical SystemC model.
 - `synth`: SystemC synth timing model.
-- `verilog_ctrl`: current Verilator control/timing shell under `rtl/synth`.
-- `verilog_final`: Verilator path being built for true Verilog datapath.
+- `verilog`: Verilator hardware path with control and datapath.
 
 Scope for this path:
 
@@ -17,14 +17,13 @@ Scope for this path:
 - Add placement-aware route timing inputs so L1Mesh latency reflects physical
   tile/bank placement instead of only simplified address-derived hops.
 
-The existing `rtl/synth` tree remains the `verilog_ctrl` regression target.
-Do not add new full datapath logic there except for compatibility fixes needed
-to keep the control-path regression running.
+Do not split new work into separate `verilog_ctrl` / `verilog_final` trees.
+New hardware work belongs here.
 
 Smoke tests:
 
 ```sh
-./rtl/batch/run_verilog_final_smoke.py
+./rtl/batch/run_verilog_smoke.py
 ```
 
 Current smoke coverage:
@@ -39,8 +38,8 @@ Current smoke coverage:
 - `route`: placement-aware L1Mesh route-cycle estimator.
 - `contention`: L1Manager 2-deep input FIFO backpressure across UDMA,
   REQUANT, EWE, POOL, and TNPS requesters into L1Mesh service.
-- `top`: `mdla7_top_final` integration for CONV/REQUANT/POOL/EWE/UDMA/TNPS.
-- `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top_final`.
+- `top`: `mdla7_top` integration for CONV/REQUANT/POOL/EWE/UDMA/TNPS.
+- `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top`.
 - `closed_loop`: generated host program that verifies
   `DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM`
   with a final UDMA reload and L1CRC check for each engine.
@@ -48,44 +47,44 @@ Current smoke coverage:
 Closed-loop dataflow smoke:
 
 ```sh
-./rtl/batch/run_verilog_final_smoke.py --test closed_loop
+./rtl/batch/run_verilog_smoke.py --test closed_loop
 ```
 
 This test auto-generates its compact descriptor stream and reference DRAM image
-under `rtl/obj/verilog_final/programs/`. It covers POOL, TNPS, EWE, and CONV as
+under `rtl/obj/verilog/programs/`. It covers POOL, TNPS, EWE, and CONV as
 separate closed loops:
 
 ```text
 DRAM -> UDMA -> L1 -> engine -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
 ```
 
-`host_final.v` is the first program-driven path for `verilog_final`. It uses a
+`host.v` is the first program-driven path for `verilog`. It uses a
 simple 32-word descriptor format and has a built-in default
 CONV -> REQUANT -> POOL -> EWE -> UDMA -> TNPS program. It can also load a hex descriptor
 stream:
 
 ```sh
-./rtl/obj/verilog_final/host/VTestbench_host_program +FINAL_PROGRAM=path/to/program.hex
+./rtl/obj/verilog/host/VTestbench_host_program +VERILOG_PROGRAM=path/to/program.hex
 ```
 
 An MDL7 `.bin` can be converted to this descriptor stream:
 
 ```sh
-./rtl/batch/gen_verilog_final_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
-  -o rtl/verilog_final/dped_float_L1.final.hex
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/verilog_final/dped_float_L1.final.hex
+./rtl/batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
+  -o rtl/verilog/dped_float_L1.verilog.hex
+./rtl/batch/run_verilog_smoke.py --test host \
+  --program rtl/verilog/dped_float_L1.verilog.hex
 ```
 
 To generate real `.bin` probes that explicitly exercise the shared closed-loop
 path, add `--closed-loop-dataflow`:
 
 ```sh
-./rtl/batch/gen_verilog_final_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
-  -o rtl/obj/verilog_final/programs/dped_float_L1.closed_loop.final.hex \
+./rtl/batch/gen_verilog_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
+  -o rtl/obj/verilog/programs/dped_float_L1.closed_loop.verilog.hex \
   --closed-loop-dataflow
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/obj/verilog_final/programs/dped_float_L1.closed_loop.final.hex \
+./rtl/batch/run_verilog_smoke.py --test host \
+  --program rtl/obj/verilog/programs/dped_float_L1.closed_loop.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/dped_float_L1.bin
 ```
 
@@ -98,21 +97,21 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
 For small byte-moving regression batches, use:
 
 ```sh
-./rtl/batch/run_verilog_final.py --filter slice --limit 10
-./rtl/batch/run_verilog_final.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
+./rtl/batch/run_verilog.py --filter slice --limit 10
+./rtl/batch/run_verilog.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
 ```
 
 For closed-loop dataflow regression through the batch runner, use:
 
 ```sh
-./rtl/batch/run_verilog_final.py --filter slice --closed-loop-dataflow
-./rtl/batch/run_verilog_final.py --filter dped_float_L1.bin --closed-loop-dataflow
+./rtl/batch/run_verilog.py --filter slice --closed-loop-dataflow
+./rtl/batch/run_verilog.py --filter dped_float_L1.bin --closed-loop-dataflow
 ```
 
 The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
 `finalB` count bytes that completed the shared path through UDMA, L1, an engine,
 UDMA store-back, DRAM reload, and L1CRC.
-By default, `verilog_final_cycles` counts only cycles spent by the generated
+By default, `verilog_cycles` counts only cycles spent by the generated
 load/compute/store/reload/check descriptors. It does not pad the run to match a
 synth profile. `--closed-loop-perf-target` is available only as an explicit
 calibration/debug mode.
@@ -129,19 +128,19 @@ L1 vector to the POOL datapath.
 To spend more commands on oversized INT8 CONV output SRAM windows:
 
 ```sh
-./rtl/batch/run_verilog_final.py --filter slice --rerun-all \
+./rtl/batch/run_verilog.py --filter slice --rerun-all \
   --crc-coverage --require-crc-coverage \
   --conv-sram-window-commands 1024 --conv-sram-window-count 5 \
   --min-sram-bytes 1024
 ```
 
 Generated descriptor hex files and Verilator build directories are kept under
-`rtl/obj/verilog_final/`.
+`rtl/obj/verilog/`.
 
 Generated descriptors cap sample-path payload timing at 1MB by default so large
-TNPS/UDMA layers do not dominate early `verilog_final` regressions while the path
+TNPS/UDMA layers do not dominate early `verilog` regressions while the path
 is still checking sample correctness. Pass `--max-payload-bytes 0` to
-`gen_verilog_final_program.py` to disable the cap for timing experiments.
+`gen_verilog_program.py` to disable the cap for timing experiments.
 
 The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`,
 `udma`, `refcrc`, `sramcrc`, `refB`, and `sramB` counts per `.bin`, so slice
@@ -181,7 +180,7 @@ and compares its FNV CRC/count against the same golden tensor prefix. This is
 the first slice-regression path where correctness is anchored on shared L1
 residency rather than only per-engine checker SRAM.
 word 25 carries `ref_off`, words 28/29 carry the expected CRC/count, and the
-final datapath opens the original `.bin` through `+FINAL_REF_PROGRAM`, seeks to
+final datapath opens the original `.bin` through `+VERILOG_REF_PROGRAM`, seeks to
 `ref_off`, walks the full tensor bytes in Verilog, and updates the same FNV
 CRC/count registers; the runner reports those bytes in `refB`. If a window does
 not match its golden slice, the generator skips that window and still emits the
@@ -195,7 +194,7 @@ Current converter behavior:
   TNPS output SRAM image, and checks that image with the SRAM CRC/count walker.
 - INT8 CONV op kinds `0/1/6`: emitted as CONV sample descriptors. The generator
   takes up to 16 activation bytes and 16 weight bytes from the `.bin`, computes
-  the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
+  the expected MBQM-clamped INT8 output, and `host.v` checks the Verilog
   MAC result. With `--emit-conv-partial-psum`, layers that fit the command budget
   emit all output elements, write the output SRAM image, and check an SRAM-walker
   CRC against the full golden ref tensor. Larger layers emit validated
@@ -204,7 +203,7 @@ Current converter behavior:
   ref tensor walker.
 - FP16/float CONV op kinds `0/1/6`: emitted as CONV FP sample descriptors. The
   generator takes up to 8 activation half-floats and 8 weight half-floats,
-  computes the expected double-precision sample MAC, and `host_final.v` checks
+  computes the expected double-precision sample MAC, and `host.v` checks
   the Verilog FP sample result.
 - POOL op kinds `2/3`: emitted as sample descriptors in default mode. With
   `--crc-coverage`, INT8 POOL layers also emit a validated output SRAM prefix
@@ -217,27 +216,27 @@ Current converter behavior:
 - INT16/hybrid CONV op kinds `0/1/6`: emitted as CONV INT16 sample descriptors.
   The generator takes up to 8 signed 16-bit activation values and 8 signed
   16-bit weight values, computes the expected sample MAC accumulator, and
-  `host_final.v` checks the Verilog INT16 sample result.
+  `host.v` checks the Verilog INT16 sample result.
 - INT8 CONV also emits a REQUANT sample descriptor using the same raw accumulator
-  so `vf_requant_sample_engine` is exercised through `mdla7_top_final`. With
+  so `vf_requant_sample_engine` is exercised through `mdla7_top`. With
   `--crc-coverage`, accepted INT8 CONV final accumulators are also replayed
   through REQUANT descriptors, the REQUANT datapath writes q bytes into its own
   output SRAM image, and a REQUANT SRAM walker checks CRC/count against the
   matched golden tensor slice as `sramcrc`.
 - INT8 AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL sample descriptors.
   The generator takes up to 16 input bytes from the `.bin`, computes the expected
-  max or integer average, and `host_final.v` checks the Verilog pool result.
+  max or integer average, and `host.v` checks the Verilog pool result.
 - FP16/float AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL FP sample
   descriptors. The generator takes up to 8 input half-floats, computes the
-  expected double-precision avg/max sample, and `host_final.v` checks the
+  expected double-precision avg/max sample, and `host.v` checks the
   Verilog FP pool result.
 - INT16/hybrid AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL INT16 sample
   descriptors. The generator takes up to 8 signed 16-bit input values, computes
-  the expected avg/max sample, and `host_final.v` checks the Verilog INT16 pool
+  the expected avg/max sample, and `host.v` checks the Verilog INT16 pool
   result.
 - INT8 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE sample descriptors.
   The generator takes up to 16 bytes from input and weight/parameter payloads,
-  computes the expected sum of clamped lane outputs, and `host_final.v` checks
+  computes the expected sum of clamped lane outputs, and `host.v` checks
   the Verilog EWE vector result. With `--crc-coverage`, INT8 EWE layers also
   emit one-output quantized descriptors using the 48-byte EWE quant parameter
   block. The EWE datapath writes those q bytes into its output SRAM image, then
@@ -246,11 +245,11 @@ Current converter behavior:
 - FP16/float EWE ADD/MUL/SUB/LOGISTIC op kinds `7/10/11/27`: emitted as EWE FP sample
   descriptors. The generator takes up to 8 input half-floats and 8
   weight/parameter half-floats for binary ops, computes the expected
-  double-precision lane-sum, and `host_final.v` checks the Verilog FP EWE
+  double-precision lane-sum, and `host.v` checks the Verilog FP EWE
   result. LOGISTIC is unary and uses input A only.
 - INT16 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE INT16 sample
   descriptors. The generator takes up to 8 signed 16-bit values from input and
-  weight/parameter payloads, computes the expected lane-sum, and `host_final.v`
+  weight/parameter payloads, computes the expected lane-sum, and `host.v`
   checks the Verilog INT16 EWE result.
 - `RESHAPE` / `CONCAT` / `TRANSPOSE` / `SLICE` / materialized byte movers:
   emitted as UDMA-style byte-moving descriptors for now. With `--crc-coverage`,
@@ -259,7 +258,7 @@ Current converter behavior:
   the UDMA SRAM CRC/count walker.
 
 The generator has an experimental `--enable-meta-tnps` option for
-TRANSPOSE/SLICE/SPLIT metadata decoding, but `mdla7_top_final` still needs
+TRANSPOSE/SLICE/SPLIT metadata decoding, but `mdla7_top` still needs
 rank/shape/permutation ports before that mode becomes a normal regression path.
 
 Conv datapath status:
@@ -271,7 +270,7 @@ Conv datapath status:
   it maps output element + kernel position + input channel into NHWC input,
   weight, and output byte offsets with stride, dilation, padding, and element
   byte width.
-- `vf_conv_sample_engine` connects that primitive to `mdla7_top_final`, issues
+- `vf_conv_sample_engine` connects that primitive to `mdla7_top`, issues
   activation/weight/output L1Mesh tokens, and is now reachable from generated
   `.bin` descriptors.
 - INT8 CONV carries a 4-entry psum skeleton for partial-K bring-up: descriptor
@@ -374,12 +373,12 @@ word 3 bit 7 asks the host to check that readback against word 19. Final
 writeback bytes also update a rolling FNV CRC and byte count; word 3 bit 8 asks
 the host to check those against words 28/29. Word 3 bit 9 selects the compact
 full-ref walker: word 25 gives `ref_off`, word 29 gives the byte count, and the
-datapath reads the original `.bin` via `+FINAL_REF_PROGRAM` to produce the CRC
+datapath reads the original `.bin` via `+VERILOG_REF_PROGRAM` to produce the CRC
 that the host compares with word 28. Word 3 bit 10 selects the output SRAM image
 walker: final writeback bytes are stored by output byte offset, word 27 gives
 the SRAM start offset, and the datapath scans word 29 bytes from that image to
 produce the CRC compared with word 28.
-`rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
+`rtl/batch/gen_verilog_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton

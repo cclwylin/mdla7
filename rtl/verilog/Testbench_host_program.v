@@ -26,8 +26,10 @@ module vf_dram_model #(
 
     initial begin
         program_path = "";
-        if (!$value$plusargs("FINAL_REF_PROGRAM=%s", program_path))
-            program_path = "";
+        if (!$value$plusargs("VERILOG_REF_PROGRAM=%s", program_path)) begin
+            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", program_path))
+                program_path = "";
+        end
         fd = 0;
         resp_rdata = {DATA_WIDTH{1'b0}};
         for (init_i = 0; init_i < MAX_DRAM_BYTES; init_i = init_i + 1) begin
@@ -314,7 +316,7 @@ module Testbench_host_program;
         .resp_rdata(udma_dram_resp_rdata)
     );
 
-    host_final u_host (
+    host u_host (
         .clk(clk),
         .rst_n(rst_n),
         .desc_valid(desc_valid),
@@ -524,7 +526,7 @@ module Testbench_host_program;
         .measured_cycle_count(measured_cycle_count)
     );
 
-    mdla7_top_final u_top (
+    mdla7_top u_top (
         .clk(clk),
         .rst_n(rst_n),
         .desc_valid(desc_valid),
@@ -746,19 +748,19 @@ module Testbench_host_program;
         end
 
         if (!test_done) begin
-            $display("FAIL: verilog_final host program timeout issued=%0d done=%0d busy=%0d active_op=%0d layer=%0d mb=%0d slot=%0d flags=%02x phase=%0d remaining=%0d block_busy=%09b block_done=%09b",
+            $display("FAIL: verilog host program timeout issued=%0d done=%0d busy=%0d active_op=%0d layer=%0d mb=%0d slot=%0d flags=%02x phase=%0d remaining=%0d block_busy=%09b block_done=%09b",
                      issued_count, done_count, busy, active_op_class,
                      active_layer_id, active_microblock_id, active_stream_slot,
                      active_stream_meta_flags, active_phase_id,
                      active_remaining_cycles, block_busy, block_done_valid);
         end else if (test_fail) begin
-            $display("FAIL: verilog_final host program host reported failure issued=%0d done=%0d",
+            $display("FAIL: verilog host program host reported failure issued=%0d done=%0d",
                      issued_count, done_count);
         end else if ((issued_count == 32'd0) || (issued_count != done_count)) begin
-            $display("FAIL: verilog_final host program counts issued=%0d done=%0d",
+            $display("FAIL: verilog host program counts issued=%0d done=%0d",
                      issued_count, done_count);
         end else begin
-            $display("PASS: verilog_final host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d vf_cycles=%0d",
+            $display("PASS: verilog host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d verilog_cycles=%0d",
                      issued_count, done_count, measured_cycle_count);
         end
         $finish;

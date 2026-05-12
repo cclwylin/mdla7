@@ -53,9 +53,9 @@ module Testbench_route_timing;
         expect_route(4'd4, 22'h0002a0, 32'd7);
 
         if (failures == 0)
-            $display("PASS: verilog_final placement-aware route timing");
+            $display("PASS: verilog placement-aware route timing");
         else
-            $display("FAIL: verilog_final placement-aware route timing failures=%0d", failures);
+            $display("FAIL: verilog placement-aware route timing failures=%0d", failures);
         $finish;
     end
 endmodule

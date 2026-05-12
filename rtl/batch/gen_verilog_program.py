@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a verilog_final host descriptor hex stream from an MDL7 .bin image."""
+"""Generate a verilog host descriptor hex stream from an MDL7 .bin image."""
 
 from __future__ import annotations
 
@@ -2883,7 +2883,7 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "When used with --closed-loop-dataflow, add a performance padding cycle budget "
-            "to the first UDMA load microblock so vf_cycles can track an external target."
+            "to the first UDMA load microblock so verilog cycles can track an external target."
         ),
     )
     ap.add_argument(
@@ -3284,7 +3284,7 @@ def main() -> int:
 
     out = args.output
     if out is None:
-        out = args.program.with_suffix(".verilog_final.hex")
+        out = args.program.with_suffix(".verilog.hex")
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="ascii") as f:
         for desc in commands:
@@ -3292,7 +3292,7 @@ def main() -> int:
                 f.write(f"{word & 0xFFFF_FFFF:08x}\n")
 
     print(
-        f"[gen_verilog_final_program] wrote {out} "
+        f"[gen_verilog_program] wrote {out} "
         f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
         f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count} "
         f"refcrc={refcrc_count} sramcrc={sramcrc_count} "

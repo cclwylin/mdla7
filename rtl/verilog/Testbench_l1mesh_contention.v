@@ -218,11 +218,11 @@ module Testbench_l1mesh_contention;
             (tnps_accepted >= 2) &&
             (blocked_seen == 5'b11111) &&
             (mesh_responses >= 10)) begin
-            $display("PASS: verilog_final L1Manager/L1Mesh multi-source contention udma=%0d requant=%0d ewe=%0d pool=%0d tnps=%0d responses=%0d",
+            $display("PASS: verilog L1Manager/L1Mesh multi-source contention udma=%0d requant=%0d ewe=%0d pool=%0d tnps=%0d responses=%0d",
                      udma_accepted, requant_accepted, ewe_accepted,
                      pool_accepted, tnps_accepted, mesh_responses);
         end else begin
-            $display("FAIL: verilog_final L1Manager/L1Mesh multi-source contention udma=%0d requant=%0d ewe=%0d pool=%0d tnps=%0d blocked=%05b responses=%0d mgr_busy=%0d mesh_busy=%0d",
+            $display("FAIL: verilog L1Manager/L1Mesh multi-source contention udma=%0d requant=%0d ewe=%0d pool=%0d tnps=%0d blocked=%05b responses=%0d mgr_busy=%0d mesh_busy=%0d",
                      udma_accepted, requant_accepted, ewe_accepted,
                      pool_accepted, tnps_accepted, blocked_seen,
                      mesh_responses, mgr_busy, mesh_busy);

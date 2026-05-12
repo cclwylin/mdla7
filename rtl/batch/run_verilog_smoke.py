@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the verilog_final block-level smoke tests."""
+"""Build and run the verilog block-level smoke tests."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def make_closed_loop_program(obj_root: Path) -> tuple[Path, Path]:
     """Generate a compact DRAM->UDMA->L1->engine->L1->UDMA->DRAM smoke."""
     program_dir = obj_root / "programs"
     ref_path = program_dir / "closed_loop_all_ref.bin"
-    program_path = program_dir / "closed_loop_all_engines.final.hex"
+    program_path = program_dir / "closed_loop_all_engines.verilog.hex"
 
     ref_bytes = bytearray(1024)
     ref_bytes[0:16] = bytes([1, 5, 2, 3, 9, 8, 7, 6, 0, 0, 0, 0, 0, 0, 0, 0])
@@ -261,9 +261,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--cxx-stdlib-include", type=Path, default=None)
     ap.add_argument("--program", type=Path, default=None,
-                    help="hex descriptor stream passed to the host smoke test as +FINAL_PROGRAM")
+                    help="hex descriptor stream passed to the host smoke test as +VERILOG_PROGRAM")
     ap.add_argument("--ref-program", type=Path, default=None,
-                    help="original MDL7 .bin passed to the host smoke test as +FINAL_REF_PROGRAM")
+                    help="original MDL7 .bin passed to the host smoke test as +VERILOG_REF_PROGRAM")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     return ap.parse_args(argv)
 
@@ -272,16 +272,16 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     repo_root: Path = args.repo_root
     rtl_dir: Path = args.rtl_dir
-    final_dir = rtl_dir / "verilog_final"
-    filelist = final_dir / "filelist_system_tb.f"
+    verilog_dir = rtl_dir / "verilog"
+    filelist = verilog_dir / "filelist_system_tb.f"
     verilator = args.verilator.resolve() if args.verilator != Path("verilator") else args.verilator
     selected = set(args.test or [name for name, _ in TESTS])
     cxx_include = args.cxx_stdlib_include or find_cxx_stdlib_include()
-    obj_root = rtl_dir / "obj" / "verilog_final"
+    obj_root = rtl_dir / "obj" / "verilog"
     obj_root.mkdir(parents=True, exist_ok=True)
 
-    print(f"[verilog_final_smoke] host: {platform.system()} {platform.machine()}")
-    print(f"[verilog_final_smoke] tests: {','.join(name for name, _ in TESTS if name in selected)}")
+    print(f"[verilog_smoke] host: {platform.system()} {platform.machine()}")
+    print(f"[verilog_smoke] tests: {','.join(name for name, _ in TESTS if name in selected)}")
 
     failures: list[str] = []
     for name, top in TESTS:
@@ -300,11 +300,10 @@ def main(argv: list[str]) -> int:
             if cxx_include is not None:
                 cmd.extend(["-CFLAGS", f"-isystem {cxx_include}"])
             cmd.extend([
-                "-Irtl/synth",
-                "-Irtl/verilog_final",
+                "-Irtl/verilog",
                 "-f",
                 str(filelist),
-                str(final_dir / f"{top}.v"),
+                str(verilog_dir / f"{top}.v"),
                 "--top-module",
                 top,
                 "--Mdir",
@@ -321,19 +320,19 @@ def main(argv: list[str]) -> int:
         if name == "closed_loop":
             program, ref_program = make_closed_loop_program(obj_root)
         if top == "Testbench_host_program" and program is not None:
-            sim_cmd.append(f"+FINAL_PROGRAM={program}")
+            sim_cmd.append(f"+VERILOG_PROGRAM={program}")
         if top == "Testbench_host_program" and ref_program is not None:
-            sim_cmd.append(f"+FINAL_REF_PROGRAM={ref_program}")
+            sim_cmd.append(f"+VERILOG_REF_PROGRAM={ref_program}")
         rc, output = run(sim_cmd, repo_root, quiet=False)
         if rc != 0 or "PASS:" not in output or "FAIL:" in output:
             failures.append(f"{name}: simulation failed")
 
     if failures:
-        print("[verilog_final_smoke] FAIL")
+        print("[verilog_smoke] FAIL")
         for failure in failures:
             print(f"  {failure}")
         return 1
-    print("[verilog_final_smoke] PASS")
+    print("[verilog_smoke] PASS")
     return 0
 
 

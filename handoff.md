@@ -6,7 +6,7 @@ Branch: `main`
 
 ## Current Direction
 
-`verilog_final` 正在往真正 dataflow 走：
+`verilog` 正在往真正 dataflow 走：
 
 ```text
 Testbench loads .bin into DRAM
@@ -21,7 +21,7 @@ Testbench loads .bin into DRAM
 
 重要原則：
 
-- `.bin` 由 Testbench DRAM model 透過 `+FINAL_REF_PROGRAM` 讀入。
+- `.bin` 由 Testbench DRAM model 透過 `+VERILOG_REF_PROGRAM` 讀入。
 - Engine 不應該偷開檔，也不應該靠 Python 展開成大量 per-byte / per-output descriptor 來假裝 full tensor。
 - `--full-tensor` 目前只能當 legacy/debug coverage path；後續 full datapath 要用 compact descriptor + DRAM/L1/engine traversal。
 
@@ -29,39 +29,39 @@ Testbench loads .bin into DRAM
 
 完成 first true byte-moving dataflow slice：
 
-- `rtl/verilog_final/Testbench_host_program.v`
+- `rtl/verilog/Testbench_host_program.v`
   - 新增 writable `vf_dram_model`。
-  - DRAM model 從 `+FINAL_REF_PROGRAM` 讀 `.bin`。
+  - DRAM model 從 `+VERILOG_REF_PROGRAM` 讀 `.bin`。
   - Reads 先查 writable override memory，沒有 override 才 fallback 到 `.bin` file bytes。
   - Writes 用 `req_wdata` / `req_wstrb` 寫入 DRAM model backing store。
   - 接上 top UDMA DRAM request/response wires。
 
-- `rtl/verilog_final/mdla7_top_final.v`
+- `rtl/verilog/mdla7_top.v`
   - 新增 `udma_dram_resp_rdata` input。
   - 接到 `vf_udma_engine`。
 
-- `rtl/verilog_final/final_datapath.v`
+- `rtl/verilog/datapath.v`
   - `vf_udma_engine` 新增 `dram_resp_rdata` input。
   - UDMA load 現在會把 DRAM response 的 16B beat 寫進 L1Mesh。
   - UDMA store 現在會 capture L1 response，再寫回 DRAM model。
 
-- `rtl/verilog_final/Testbench_top_byte_movers.v`
+- `rtl/verilog/Testbench_top_byte_movers.v`
   - 補齊 new top DRAM response/request ports 的 dummy connection。
 
 Also present from previous steps:
 
-- `verilog_final` top has microblock control path.
+- `verilog` top has microblock control path.
 - L1 response has skid/tag path: source, tid, rdata, read valid.
-- Host final reports `vf_cycles`.
-- `run_verilog_final.py` report columns include coverage, synth cycles, verilog final cycles, ratio, wall time.
+- Host reports `verilog_cycles`.
+- `run_verilog.py` report columns include coverage, synth cycles, verilog cycles, ratio, wall time.
 
 ## Verified
 
 Compile / static checks:
 
 ```bash
-python3 -m py_compile rtl/batch/gen_verilog_final_program.py rtl/batch/run_verilog_final.py
-git diff --check -- rtl/verilog_final/Testbench_host_program.v rtl/verilog_final/final_datapath.v rtl/verilog_final/mdla7_top_final.v rtl/verilog_final/Testbench_top_byte_movers.v rtl/batch/run_verilog_final.py rtl/batch/gen_verilog_final_program.py
+python3 -m py_compile rtl/batch/gen_verilog_program.py rtl/batch/run_verilog.py
+git diff --check -- rtl/verilog/Testbench_host_program.v rtl/verilog/datapath.v rtl/verilog/mdla7_top.v rtl/verilog/Testbench_top_byte_movers.v rtl/batch/run_verilog.py rtl/batch/gen_verilog_program.py
 ```
 
 Both passed.
@@ -69,29 +69,29 @@ Both passed.
 UDMA DRAM-to-L1 smoke:
 
 ```bash
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/obj/verilog_final/programs/udma_dram_to_l1_smoke.final.hex \
+./rtl/batch/run_verilog_smoke.py --test host \
+  --program rtl/obj/verilog/programs/udma_dram_to_l1_smoke.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin --no-build
 ```
 
 Passed:
 
 ```text
-PASS: verilog_final host-driven ... issued=2 done=2 vf_cycles=87
+PASS: verilog host-driven ... issued=2 done=2 verilog_cycles=87
 ```
 
 UDMA DRAM -> L1 -> DRAM -> L1 roundtrip smoke:
 
 ```bash
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/obj/verilog_final/programs/udma_dram_l1_store_roundtrip.final.hex \
+./rtl/batch/run_verilog_smoke.py --test host \
+  --program rtl/obj/verilog/programs/udma_dram_l1_store_roundtrip.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
 ```
 
 Passed:
 
 ```text
-PASS: verilog_final host-driven ... issued=4 done=4 vf_cycles=260
+PASS: verilog host-driven ... issued=4 done=4 verilog_cycles=260
 ```
 
 This proves the current UDMA/L1/DRAM byte-moving path:
@@ -100,7 +100,7 @@ This proves the current UDMA/L1/DRAM byte-moving path:
 DRAM(.bin) -> UDMA -> L1 -> UDMA -> DRAM -> UDMA -> L1
 ```
 
-Target final dataflow:
+Target verilog dataflow:
 
 ```text
 DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
@@ -126,44 +126,44 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
 
 ## Important Files
 
-- `rtl/verilog_final/Testbench_host_program.v`
-- `rtl/verilog_final/mdla7_top_final.v`
-- `rtl/verilog_final/final_datapath.v`
-- `rtl/verilog_final/host_final.v`
-- `rtl/verilog_final/Testbench_top_byte_movers.v`
-- `rtl/batch/gen_verilog_final_program.py`
-- `rtl/batch/run_verilog_final.py`
-- `rtl/batch/run_verilog_final_smoke.py`
+- `rtl/verilog/Testbench_host_program.v`
+- `rtl/verilog/mdla7_top.v`
+- `rtl/verilog/datapath.v`
+- `rtl/verilog/host.v`
+- `rtl/verilog/Testbench_top_byte_movers.v`
+- `rtl/batch/gen_verilog_program.py`
+- `rtl/batch/run_verilog.py`
+- `rtl/batch/run_verilog_smoke.py`
 
 ## Commands
 
-Run final smoke:
+Run verilog smoke:
 
 ```bash
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/obj/verilog_final/programs/udma_dram_l1_store_roundtrip.final.hex \
+./rtl/batch/run_verilog_smoke.py --test host \
+  --program rtl/obj/verilog/programs/udma_dram_l1_store_roundtrip.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
 ```
 
 Run regression:
 
 ```bash
-./rtl/batch/run_verilog_final.py --filter slice
-./rtl/batch/run_verilog_final.py --filter ethz
+./rtl/batch/run_verilog.py --filter slice
+./rtl/batch/run_verilog.py --filter ethz
 ```
 
 If Verilator output is stale:
 
 ```bash
-rm -rf rtl/obj/verilog_final/host
+rm -rf rtl/obj/verilog/host
 ```
 
 ## Warnings
 
 - Workspace is dirty; several unrelated files were already modified before this handoff. Do not revert user changes.
-- Smoke `.final.hex` files under `rtl/obj/verilog_final/programs/` are generated local artifacts.
+- Smoke `.verilog.hex` files under `rtl/obj/verilog/programs/` are generated local artifacts.
 - `--full-tensor` exists, but should not become the final architecture. Use compact descriptors plus Verilog-side traversal.
-- `run_verilog_ctrl.py` and `run_verilog_final.py` are separate flows. `verilog_ctrl` is control/timing compare; `verilog_final` is the path for true datapath.
+- `rtl/verilog` is now the single hardware Verilog tree. Do not create a new `verilog_ctrl` / `verilog_final` split for future work.
 
 ## Recent Commits
 

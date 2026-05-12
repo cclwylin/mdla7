@@ -496,9 +496,9 @@ module Testbench_conv_datapath;
         expect_addr("stride dilation int16 window", 1'b1, 32'd130, 32'd62, 32'd38);
 
         if (failures == 0)
-            $display("PASS: verilog_final conv int8 MAC datapath and 2D address walk");
+            $display("PASS: verilog conv int8 MAC datapath and 2D address walk");
         else
-            $display("FAIL: verilog_final conv datapath failures=%0d", failures);
+            $display("FAIL: verilog conv datapath failures=%0d", failures);
         $finish;
     end
 endmodule

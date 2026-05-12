@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-module host_final #(
+module host #(
     parameter MAX_COMMANDS = 4096
 ) (
     input              clk,
@@ -595,7 +595,11 @@ module host_final #(
         cmd_mem[256] = {28'd0, OP_DONE};
 
         program_path = "";
-        if ($value$plusargs("FINAL_PROGRAM=%s", program_path))
+        if (!$value$plusargs("VERILOG_PROGRAM=%s", program_path)) begin
+            if (!$value$plusargs("FINAL_PROGRAM=%s", program_path))
+                program_path = "";
+        end
+        if (program_path != "")
             $readmemh(program_path, cmd_mem);
     end
 
@@ -762,7 +766,7 @@ module host_final #(
                     if (!probe_descriptor_mode)
                         measured_cycle_count <= measured_cycle_count + 32'd1;
                     if (watchdog == 32'd5000000) begin
-                        $display("HOST_FINAL_FAIL: timeout cmd=%0d op=%0d active=%0d phase=%0d remaining=%0d top_busy=%0d block_busy=%09b block_done=%09b",
+                        $display("HOST_VERILOG_FAIL: timeout cmd=%0d op=%0d active=%0d phase=%0d remaining=%0d top_busy=%0d block_busy=%09b block_done=%09b",
                                  command_index, desc_op_class, active_op_class,
                                  active_phase_id, active_remaining_cycles, top_busy,
                                  block_busy, block_done_valid);
@@ -771,7 +775,7 @@ module host_final #(
                         state <= ST_DONE;
                     end else if (top_done_valid) begin
                         if (placement_route_cycles == 32'd0) begin
-                            $display("HOST_FINAL_FAIL: zero route cycles cmd=%0d op=%0d",
+                            $display("HOST_VERILOG_FAIL: zero route cycles cmd=%0d op=%0d",
                                      command_index, desc_op_class);
                             test_fail <= 1'b1;
                         end
@@ -779,7 +783,7 @@ module host_final #(
                             (active_microblock_id !== desc_microblock_id) ||
                             (active_stream_slot !== desc_stream_slot) ||
                             (active_stream_meta_flags !== desc_stream_meta_flags)) begin
-                            $display("HOST_FINAL_FAIL: metadata mismatch cmd=%0d layer=%0d/%0d mb=%0d/%0d slot=%0d/%0d flags=%02x/%02x",
+                            $display("HOST_VERILOG_FAIL: metadata mismatch cmd=%0d layer=%0d/%0d mb=%0d/%0d slot=%0d/%0d flags=%02x/%02x",
                                      command_index,
                                      active_layer_id, desc_layer_id,
                                      active_microblock_id, desc_microblock_id,
@@ -798,7 +802,7 @@ module host_final #(
                                 expected_microblock_final_count <= expected_microblock_final_count + 32'd1;
                             if ((desc_stream_slot !== desc_microblock_id[7:0]) ||
                                 ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) == 8'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock control cmd=%0d op=%0d layer=%0d mb=%0d slot=%0d flags=%02x",
+                                $display("HOST_VERILOG_FAIL: microblock control cmd=%0d op=%0d layer=%0d mb=%0d slot=%0d flags=%02x",
                                          command_index, desc_op_class, desc_layer_id,
                                          desc_microblock_id, desc_stream_slot,
                                          desc_stream_meta_flags);
@@ -811,19 +815,19 @@ module host_final #(
                                  (desc_op_class == OP_TNPS)) &&
                                 ((desc_stream_meta_flags & SMF_COMPUTE) == 8'd0) &&
                                 !cmd_mem[base + 3][10]) begin
-                                $display("HOST_FINAL_FAIL: microblock compute flag cmd=%0d op=%0d flags=%02x",
+                                $display("HOST_VERILOG_FAIL: microblock compute flag cmd=%0d op=%0d flags=%02x",
                                          command_index, desc_op_class, desc_stream_meta_flags);
                                 test_fail <= 1'b1;
                             end
                             if ((desc_op_class == OP_UDMA) &&
                                 ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_STORE)) == 8'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock udma flag cmd=%0d flags=%02x",
+                                $display("HOST_VERILOG_FAIL: microblock udma flag cmd=%0d flags=%02x",
                                          command_index, desc_stream_meta_flags);
                                 test_fail <= 1'b1;
                             end
                             if (microblock_load_count !== expected_microblock_load_count +
                                 (((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0) ? 32'd1 : 32'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock load count cmd=%0d got=%0d expected=%0d",
+                                $display("HOST_VERILOG_FAIL: microblock load count cmd=%0d got=%0d expected=%0d",
                                          command_index, microblock_load_count,
                                          expected_microblock_load_count +
                                          (((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0) ? 32'd1 : 32'd0));
@@ -831,7 +835,7 @@ module host_final #(
                             end
                             if (microblock_compute_count !== expected_microblock_compute_count +
                                 (((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0) ? 32'd1 : 32'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock compute count cmd=%0d got=%0d expected=%0d",
+                                $display("HOST_VERILOG_FAIL: microblock compute count cmd=%0d got=%0d expected=%0d",
                                          command_index, microblock_compute_count,
                                          expected_microblock_compute_count +
                                          (((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0) ? 32'd1 : 32'd0));
@@ -839,7 +843,7 @@ module host_final #(
                             end
                             if (microblock_store_count !== expected_microblock_store_count +
                                 (((desc_stream_meta_flags & SMF_STORE) != 8'd0) ? 32'd1 : 32'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock store count cmd=%0d got=%0d expected=%0d",
+                                $display("HOST_VERILOG_FAIL: microblock store count cmd=%0d got=%0d expected=%0d",
                                          command_index, microblock_store_count,
                                          expected_microblock_store_count +
                                          (((desc_stream_meta_flags & SMF_STORE) != 8'd0) ? 32'd1 : 32'd0));
@@ -847,7 +851,7 @@ module host_final #(
                             end
                             if (microblock_final_count !== expected_microblock_final_count +
                                 (((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0) ? 32'd1 : 32'd0)) begin
-                                $display("HOST_FINAL_FAIL: microblock final count cmd=%0d got=%0d expected=%0d",
+                                $display("HOST_VERILOG_FAIL: microblock final count cmd=%0d got=%0d expected=%0d",
                                          command_index, microblock_final_count,
                                          expected_microblock_final_count +
                                          (((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0) ? 32'd1 : 32'd0));
@@ -857,7 +861,7 @@ module host_final #(
                         if ((desc_op_class == OP_L1CRC) &&
                             ((l1mesh_crc !== cmd_mem[base + 28]) ||
                              (l1mesh_crc_count !== cmd_mem[base + 29]))) begin
-                            $display("HOST_FINAL_FAIL: L1Mesh crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d addr=%0d",
+                            $display("HOST_VERILOG_FAIL: L1Mesh crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d addr=%0d",
                                      command_index, l1mesh_crc,
                                      cmd_mem[base + 28],
                                      l1mesh_crc_count,
@@ -867,14 +871,14 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_fp_mode &&
                             (conv_fp_sum_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
-                            $display("HOST_FINAL_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
+                            $display("HOST_VERILOG_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
                                      command_index, conv_fp_sum_bits,
                                      {cmd_mem[base + 17], cmd_mem[base + 16]});
                             test_fail <= 1'b1;
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_int16_mode &&
                             (conv_int16_acc_out !== $signed(cmd_mem[base + 18]))) begin
-                            $display("HOST_FINAL_FAIL: CONV INT16 sample cmd=%0d acc=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV INT16 sample cmd=%0d acc=%0d expected=%0d",
                                      command_index, conv_int16_acc_out,
                                      $signed(cmd_mem[base + 18]));
                             test_fail <= 1'b1;
@@ -884,7 +888,7 @@ module host_final #(
                             !cmd_mem[base + 3][10] &&
                             !cmd_mem[base + 3][6] &&
                             (conv_out_q !== cmd_mem[base + 18][7:0])) begin
-                            $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, conv_acc_out, conv_scaled_out,
                                      conv_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
@@ -917,7 +921,7 @@ module host_final #(
                               expected_conv_tile_acc_value) ||
                              (conv_tile_result_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_tile_q_value))) begin
-                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_mask=%04b expected=%04b tile_q_sum=%0d expected=%0d tile_first_idx=%0d tile_last_idx=%0d expected=%0d tile_last_off=%0d expected=%0d tile_acc0=%0d tile_acc_last=%0d expected=%0d tile_q0=%0d tile_q_last=%0d expected=%0d tile_count=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_mask=%04b expected=%04b tile_q_sum=%0d expected=%0d tile_first_idx=%0d tile_last_idx=%0d expected=%0d tile_last_off=%0d expected=%0d tile_acc0=%0d tile_acc_last=%0d expected=%0d tile_q0=%0d tile_q_last=%0d expected=%0d tile_count=%0d",
                                      command_index,
                                      conv_sample_input_valid, cmd_mem[base + 3][3],
                                      conv_sample_input_byte_offset, cmd_mem[base + 25],
@@ -956,7 +960,7 @@ module host_final #(
                              (conv_psum_acc_values[31:0] !== expected_conv_psum_acc_value) ||
                              (conv_psum_acc_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_psum_acc_value))) begin
-                            $display("HOST_FINAL_FAIL: CONV psum cmd=%0d mask=%04b expected=%04b psum0=%0d psum_last=%0d expected=%0d first=%0d accum=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV psum cmd=%0d mask=%04b expected=%04b psum0=%0d psum_last=%0d expected=%0d first=%0d accum=%0d",
                                      command_index,
                                      conv_psum_valid_mask,
                                      expected_conv_tile_valid_mask,
@@ -974,7 +978,7 @@ module host_final #(
                             (!conv_shadow_read_valid ||
                              (conv_shadow_read_output_byte_offset !== cmd_mem[base + 27]) ||
                              (conv_shadow_read_q_value !== cmd_mem[base + 19]))) begin
-                            $display("HOST_FINAL_FAIL: CONV shadow read cmd=%0d valid=%0d off=%0d expected=%0d q=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV shadow read cmd=%0d valid=%0d off=%0d expected=%0d q=%0d expected=%0d",
                                      command_index,
                                      conv_shadow_read_valid,
                                      conv_shadow_read_output_byte_offset,
@@ -989,7 +993,7 @@ module host_final #(
                             cmd_mem[base + 3][8] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]))) begin
-                            $display("HOST_FINAL_FAIL: CONV shadow crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV shadow crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
                                      command_index,
                                      conv_shadow_crc,
                                      cmd_mem[base + 28],
@@ -1003,7 +1007,7 @@ module host_final #(
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
                              (cmd_mem[base + 1] !== cmd_mem[base + 29]) ||
                              (cmd_mem[base + 29] == 32'd0))) begin
-                            $display("HOST_FINAL_FAIL: CONV compact refcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d desc_bytes=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV compact refcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d desc_bytes=%0d",
                                      command_index,
                                      conv_shadow_crc,
                                      cmd_mem[base + 28],
@@ -1017,7 +1021,7 @@ module host_final #(
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
                              (cmd_mem[base + 29] == 32'd0))) begin
-                            $display("HOST_FINAL_FAIL: CONV output SRAM crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d start=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV output SRAM crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d start=%0d",
                                      command_index,
                                      conv_shadow_crc,
                                      cmd_mem[base + 28],
@@ -1054,7 +1058,7 @@ module host_final #(
                               expected_conv_tile_q_value) ||
                              (conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32] !==
                               expected_conv_tile_q_value))) begin
-                            $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d mem_mask=%04x mem_last_slot=%0d mem_off_last=%0d mem_q_last=%0d",
+                            $display("HOST_VERILOG_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d mem_mask=%04x mem_last_slot=%0d mem_off_last=%0d mem_q_last=%0d",
                                      command_index,
                                      conv_writeback_valid_mask,
                                      expected_conv_tile_valid_mask,
@@ -1076,7 +1080,7 @@ module host_final #(
                         if ((desc_op_class == OP_REQUANT) && requant_sramcrc_mode &&
                             ((requant_sramcrc_crc !== requant_sramcrc_expected_crc) ||
                              (requant_sramcrc_count !== requant_sramcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: REQUANT sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: REQUANT sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
                                      command_index, requant_sramcrc_crc,
                                      requant_sramcrc_expected_crc,
                                      requant_sramcrc_count,
@@ -1086,7 +1090,7 @@ module host_final #(
                         if ((desc_op_class == OP_UDMA) && udma_sramcrc_mode &&
                             ((udma_sramcrc_crc !== udma_sramcrc_expected_crc) ||
                              (udma_sramcrc_count !== udma_sramcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: UDMA sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: UDMA sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
                                      command_index, udma_sramcrc_crc,
                                      udma_sramcrc_expected_crc,
                                      udma_sramcrc_count,
@@ -1095,7 +1099,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
                             (requant_out_q !== cmd_mem[base + 18][7:0])) begin
-                            $display("HOST_FINAL_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, requant_scaled_out,
                                      requant_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
@@ -1103,7 +1107,7 @@ module host_final #(
                         if ((desc_op_class == OP_POOL) && (pool_refcrc_mode || pool_sramcrc_mode) &&
                             ((pool_refcrc_crc !== pool_refcrc_expected_crc) ||
                              (pool_refcrc_count !== pool_refcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: POOL crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d sram=%0d",
+                            $display("HOST_VERILOG_FAIL: POOL crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d sram=%0d",
                                      command_index, pool_refcrc_crc,
                                      pool_refcrc_expected_crc,
                                      pool_refcrc_count, pool_refcrc_expected_count,
@@ -1112,7 +1116,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
                             (pool_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
-                            $display("HOST_FINAL_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
+                            $display("HOST_VERILOG_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
                                      command_index, pool_fp_bits,
                                      {cmd_mem[base + 17], cmd_mem[base + 16]},
                                      pool_avg_mode);
@@ -1120,7 +1124,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
                             (pool_out !== $signed(cmd_mem[base + 18]))) begin
-                            $display("HOST_FINAL_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
+                            $display("HOST_VERILOG_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
                                      $signed(cmd_mem[base + 18]),
                                      pool_avg_mode);
@@ -1128,7 +1132,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
-                            $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
+                            $display("HOST_VERILOG_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
                                      $signed(cmd_mem[base + 18][7:0]),
                                      pool_avg_mode);
@@ -1137,7 +1141,7 @@ module host_final #(
                         if ((desc_op_class == OP_EWE) && ewe_sramcrc_mode &&
                             ((ewe_sramcrc_crc !== ewe_sramcrc_expected_crc) ||
                              (ewe_sramcrc_count !== ewe_sramcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: EWE sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: EWE sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
                                      command_index, ewe_sramcrc_crc,
                                      ewe_sramcrc_expected_crc,
                                      ewe_sramcrc_count,
@@ -1146,7 +1150,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
                             (ewe_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
-                            $display("HOST_FINAL_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
+                            $display("HOST_VERILOG_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
                                      command_index, ewe_fp_bits,
                                      {cmd_mem[base + 17], cmd_mem[base + 16]},
                                      ewe_op_mode);
@@ -1154,7 +1158,7 @@ module host_final #(
                         end
                         if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
                             (ewe_out !== $signed(cmd_mem[base + 18]))) begin
-                            $display("HOST_FINAL_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
+                            $display("HOST_VERILOG_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
                                      command_index, ewe_out, ewe_out_q,
                                      $signed(cmd_mem[base + 18]),
                                      ewe_op_mode);
@@ -1163,7 +1167,7 @@ module host_final #(
                         if ((desc_op_class == OP_TNPS) && tnps_sramcrc_mode &&
                             ((tnps_sramcrc_crc !== tnps_sramcrc_expected_crc) ||
                              (tnps_sramcrc_count !== tnps_sramcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: TNPS sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_VERILOG_FAIL: TNPS sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
                                      command_index, tnps_sramcrc_crc,
                                      tnps_sramcrc_expected_crc,
                                      tnps_sramcrc_count,
@@ -1175,7 +1179,7 @@ module host_final #(
                              ((cmd_mem[base + 18] != 32'd0) &&
                               ((tnps_sample_src_byte_offset != cmd_mem[base + 16]) ||
                                (tnps_sample_dst_byte_offset != cmd_mem[base + 17]))))) begin
-                            $display("HOST_FINAL_FAIL: TNPS sample cmd=%0d valid=%0d src=%0d dst=%0d",
+                            $display("HOST_VERILOG_FAIL: TNPS sample cmd=%0d valid=%0d src=%0d dst=%0d",
                                      command_index, tnps_sample_valid,
                                      tnps_sample_src_byte_offset,
                                      tnps_sample_dst_byte_offset);

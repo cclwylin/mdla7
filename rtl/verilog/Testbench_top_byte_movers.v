@@ -162,7 +162,7 @@ module Testbench_top_byte_movers;
 
     always #5 clk = ~clk;
 
-    mdla7_top_final u_top (
+    mdla7_top u_top (
         .clk(clk),
         .rst_n(rst_n),
         .desc_valid(desc_valid),
@@ -860,9 +860,9 @@ module Testbench_top_byte_movers;
         end
 
         if (failures == 0)
-            $display("PASS: verilog_final top integration CONV/REQUANT/POOL/EWE/UDMA/TNPS");
+            $display("PASS: verilog top integration CONV/REQUANT/POOL/EWE/UDMA/TNPS");
         else
-            $display("FAIL: verilog_final top integration failures=%0d", failures);
+            $display("FAIL: verilog top integration failures=%0d", failures);
         $finish;
     end
 endmodule

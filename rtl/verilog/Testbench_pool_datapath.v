@@ -229,9 +229,9 @@ module Testbench_pool_datapath;
         int16_mode = 1'b0;
 
         if (failures == 0)
-            $display("PASS: verilog_final pool datapath");
+            $display("PASS: verilog pool datapath");
         else
-            $display("FAIL: verilog_final pool datapath failures=%0d", failures);
+            $display("FAIL: verilog pool datapath failures=%0d", failures);
         $finish;
     end
 endmodule

@@ -142,9 +142,9 @@ module Testbench_requant_datapath;
         run_case("round pot", 32'sd11, 8'sd11);
 
         if (failures == 0)
-            $display("PASS: verilog_final requant datapath");
+            $display("PASS: verilog requant datapath");
         else
-            $display("FAIL: verilog_final requant datapath failures=%0d", failures);
+            $display("FAIL: verilog requant datapath failures=%0d", failures);
         $finish;
     end
 endmodule

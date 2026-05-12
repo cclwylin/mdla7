@@ -246,9 +246,9 @@ module Testbench_ewe_datapath;
         int16_mode = 1'b0;
 
         if (failures == 0)
-            $display("PASS: verilog_final EWE vector datapath");
+            $display("PASS: verilog EWE vector datapath");
         else
-            $display("FAIL: verilog_final EWE vector datapath failures=%0d", failures);
+            $display("FAIL: verilog EWE vector datapath failures=%0d", failures);
         $finish;
     end
 endmodule

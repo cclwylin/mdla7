@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run verilog_final host-driven byte-moving programs from MDL7 .bin files."""
+"""Run verilog host-driven byte-moving programs from MDL7 .bin files."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ FILTER_ALIASES = {
     "hotspot": "Hotspot",
 }
 PASS_RE = re.compile(
-    r"PASS: verilog_final host-driven .* issued=([0-9]+) done=([0-9]+)"
-    r"(?:\s+vf_cycles=([0-9]+))?"
+    r"PASS: verilog host-driven .* issued=([0-9]+) done=([0-9]+)"
+    r"(?:\s+(?:verilog_cycles|vf_cycles)=([0-9]+))?"
 )
-FAIL_RE = re.compile(r"(HOST_FINAL_FAIL:.*|FAIL: verilog_final host program.*)")
+FAIL_RE = re.compile(r"(HOST_VERILOG_FAIL:.*|FAIL: verilog host program.*)")
 SIM_FINISH_RE = re.compile(
     r"Verilator:\s+\$finish at\s+([0-9]+(?:\.[0-9]+)?)\s*([munpf]?s)",
     re.IGNORECASE,
@@ -54,7 +54,7 @@ DEFAULT_MAX_COMMANDS = 4096
 MDL7_MAGIC = 0x374C444D
 PROGRAM_COL_WIDTH = 34
 SYNTH_CLOCK_HZ = 1_900_000_000.0
-VERILOG_FINAL_CLOCK_HZ = 100_000_000.0
+VERILOG_CLOCK_HZ = 100_000_000.0
 
 TIME_UNIT_TO_MS = {
     "s": 1000.0,
@@ -248,7 +248,7 @@ def parse_verilog_cycles(output: str) -> int | None:
     ms = parse_verilog_ms(output)
     if ms is None:
         return None
-    return int(round((ms / 1000.0) * VERILOG_FINAL_CLOCK_HZ))
+    return int(round((ms / 1000.0) * VERILOG_CLOCK_HZ))
 
 
 def has_tensor_crc(refcrc: int, sramcrc: int, finalcrc: int) -> bool:
@@ -393,7 +393,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--closed-loop-dataflow", action="store_true",
                     help="Generate real .bin probes for DRAM->UDMA->L1->engine->L1->UDMA->DRAM->L1CRC.")
     ap.add_argument("--closed-loop-perf-target", action="store_true",
-                    help="Pad closed-loop vf_cycles toward synth profile total_cycles for calibration/debug only.")
+                    help="Pad closed-loop verilog cycles toward synth profile total_cycles for calibration/debug only.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
     ap.add_argument("--min-ref-bytes", type=int, default=0,
@@ -417,8 +417,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--rerun-all", action="store_true",
                     help="Ignore cached PASS/SKIP results and rerun every matched .bin.")
     ap.add_argument("--cache-file", type=Path,
-                    default=rtl_dir / "obj" / "verilog_final" / "cache.json",
-                    help="Regression cache JSON. Default: rtl/obj/verilog_final/cache.json")
+                    default=rtl_dir / "obj" / "verilog" / "cache.json",
+                    help="Regression cache JSON. Default: rtl/obj/verilog/cache.json")
     ap.add_argument("--profile-root", type=Path, default=repo_root / "batch" / "output",
                     help="Profile directory for synth_ms. Default: batch/output")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
@@ -536,9 +536,9 @@ def main(argv: list[str]) -> int:
     repo_root: Path = args.repo_root
     rtl_dir: Path = args.rtl_dir
     cwd = Path.cwd()
-    gen = rtl_dir / "batch" / "gen_verilog_final_program.py"
-    smoke = rtl_dir / "batch" / "run_verilog_final_smoke.py"
-    program_dir = rtl_dir / "obj" / "verilog_final" / "programs"
+    gen = rtl_dir / "batch" / "gen_verilog_program.py"
+    smoke = rtl_dir / "batch" / "run_verilog_smoke.py"
+    program_dir = rtl_dir / "obj" / "verilog" / "programs"
     program_dir.mkdir(parents=True, exist_ok=True)
     args.cache_file = args.cache_file.resolve()
     args.profile_root = args.profile_root.resolve()
@@ -547,21 +547,21 @@ def main(argv: list[str]) -> int:
     if args.limit > 0:
         bins = bins[: args.limit]
     if not bins:
-        print("[run_verilog_final] ERROR: no .bin matched", file=sys.stderr)
+        print("[run_verilog] ERROR: no .bin matched", file=sys.stderr)
         return 2
 
-    print(f"[run_verilog_final] matched: {len(bins)}")
-    print(f"[run_verilog_final] program_dir: {display(program_dir, repo_root)}")
-    print(f"[run_verilog_final] cache: {display(args.cache_file, repo_root)}")
-    print(f"[run_verilog_final] profile_root: {display(args.profile_root, repo_root)}")
+    print(f"[run_verilog] matched: {len(bins)}")
+    print(f"[run_verilog] program_dir: {display(program_dir, repo_root)}")
+    print(f"[run_verilog] cache: {display(args.cache_file, repo_root)}")
+    print(f"[run_verilog] profile_root: {display(args.profile_root, repo_root)}")
     mode = run_mode(args)
-    print(f"[run_verilog_final] mode: {mode}")
+    print(f"[run_verilog] mode: {mode}")
     if args.rerun_all:
-        print("[run_verilog_final] cache_mode: rerun-all")
+        print("[run_verilog] cache_mode: rerun-all")
     print(
         f"{'idx':>3}  {fmt_program_name('program')} {'class':<6} {'tout':>6} {'ans':<6} {'cov':<7} "
-        f"{'synth_ms':>10} {'synth_cycles':>12} {'verilog_final_cycles':>20} "
-        f"{'vf/synth':>9} {'wall_s':>8}"
+        f"{'synth_ms':>10} {'synth_cycles':>12} {'verilog_cycles':>20} "
+        f"{'v/synth':>9} {'wall_s':>8}"
     )
     print("-" * (3 + 2 + PROGRAM_COL_WIDTH + 1 + 6 + 1 + 6 + 1 + 6 + 1 + 7 + 1 + 10 + 1 + 12 + 1 + 20 + 1 + 9 + 1 + 8))
 
@@ -588,7 +588,7 @@ def main(argv: list[str]) -> int:
         cache["entries"] = cache_entries
     runner_mtime_ns = Path(__file__).resolve().stat().st_mtime_ns
     generator_mtime_ns = gen.stat().st_mtime_ns if gen.exists() else 0
-    source_mtime_ns = latest_tree_mtime_ns(rtl_dir / "verilog_final")
+    source_mtime_ns = latest_tree_mtime_ns(rtl_dir / "verilog")
     for idx, bin_path in enumerate(bins, 1):
         rel_bin = display(bin_path, repo_root)
         info = classify_bin(bin_path)
@@ -623,7 +623,7 @@ def main(argv: list[str]) -> int:
             synth_ms = synth_ms if isinstance(synth_ms, float) else None
             synth_cycles = cached.get("synth_cycles")
             synth_cycles = synth_cycles if isinstance(synth_cycles, int) else None
-            verilog_cycles = cached.get("verilog_final_cycles")
+            verilog_cycles = cached.get("verilog_cycles")
             verilog_cycles = verilog_cycles if isinstance(verilog_cycles, int) else None
             done = int(cached.get("done") or 0)
             total_refcrc += refcrc_count
@@ -665,7 +665,7 @@ def main(argv: list[str]) -> int:
                     mode = "sample-only" if args.sample_descriptors else "microblock-control"
                     print(f"     reason: {mode} cached result; no tensor CRC coverage")
             continue
-        hex_path = program_dir / f"{bin_path.stem}.final.hex"
+        hex_path = program_dir / f"{bin_path.stem}.verilog.hex"
         synth_cycles_for_target = load_synth_cycles(bin_path, args.profile_root)
         gen_cmd = [
             sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
@@ -750,7 +750,7 @@ def main(argv: list[str]) -> int:
                     "finalbytes": 0,
                     "synth_cycles": synth_cycles,
                     "synth_ms": synth_ms,
-                    "verilog_final_cycles": None,
+                    "verilog_cycles": None,
                     "done": 0,
                 }
                 save_cache(args.cache_file, cache)
@@ -819,8 +819,8 @@ def main(argv: list[str]) -> int:
                     "finalbytes": finalcrc_bytes,
                     "synth_ms": synth_ms,
                     "synth_cycles": synth_cycles,
-                    "verilog_final_ms": verilog_ms,
-                    "verilog_final_cycles": verilog_cycles,
+                    "verilog_ms": verilog_ms,
+                    "verilog_cycles": verilog_cycles,
                     "done": done,
                     "wall_s": wall,
                 }
@@ -845,51 +845,51 @@ def main(argv: list[str]) -> int:
             failed += 1
             print("     reason: no final-layer SRAM/L1 CRC coverage")
     print(
-        f"[run_verilog_final] summary: pass={passed} fail={failed} "
+        f"[run_verilog] summary: pass={passed} fail={failed} "
         f"skip={skipped} sample_only={sample_only} total={len(bins)}"
     )
     print(
-        f"[run_verilog_final] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
+        f"[run_verilog] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
         f"finalcrc={total_finalcrc} refB={total_refbytes} sramB={total_srambytes} "
         f"finalB={total_finalbytes}"
     )
     print(
-        "[run_verilog_final] compare: "
+        "[run_verilog] compare: "
         f"comparable={comparable}/{passed + failed} "
         f"synth_total_ms={fmt_ms(synth_total if comparable else None)} "
         f"synth_total_cycles={fmt_cycles(synth_cycle_total if comparable else None)} "
-        f"verilog_final_total_cycles={fmt_cycles(verilog_cycle_total if comparable else None)} "
-        f"vf/synth={fmt_ratio(verilog_cycle_total if comparable else None, synth_cycle_total if comparable else None)}"
+        f"verilog_total_cycles={fmt_cycles(verilog_cycle_total if comparable else None)} "
+        f"v/synth={fmt_ratio(verilog_cycle_total if comparable else None, synth_cycle_total if comparable else None)}"
     )
     if total_refcrc == 0 and total_sramcrc == 0 and not args.emit_conv_partial_psum and not args.closed_loop_dataflow:
         mode_hint = "legacy sample-path" if args.sample_descriptors else "microblock-control"
         print(
-            "[run_verilog_final] coverage_hint: CRC coverage is generated by "
+            "[run_verilog] coverage_hint: CRC coverage is generated by "
             f"--crc-coverage; current mode is {mode_hint} without tensor CRC."
         )
     if args.require_crc_coverage and total_refcrc == 0 and total_sramcrc == 0:
         failed += 1
-        print("[run_verilog_final] coverage_fail: required CRC coverage, but no CRC descriptors ran")
+        print("[run_verilog] coverage_fail: required CRC coverage, but no CRC descriptors ran")
     if args.min_ref_bytes > 0 and total_refbytes < args.min_ref_bytes:
         failed += 1
         print(
-            f"[run_verilog_final] coverage_fail: refB={total_refbytes} "
+            f"[run_verilog] coverage_fail: refB={total_refbytes} "
             f"below min_ref_bytes={args.min_ref_bytes}"
         )
     if args.min_sram_bytes > 0 and total_srambytes < args.min_sram_bytes:
         failed += 1
         print(
-            f"[run_verilog_final] coverage_fail: sramB={total_srambytes} "
+            f"[run_verilog] coverage_fail: sramB={total_srambytes} "
             f"below min_sram_bytes={args.min_sram_bytes}"
         )
     if args.min_final_bytes > 0 and total_finalbytes < args.min_final_bytes:
         failed += 1
         print(
-            f"[run_verilog_final] coverage_fail: finalB={total_finalbytes} "
+            f"[run_verilog] coverage_fail: finalB={total_finalbytes} "
             f"below min_final_bytes={args.min_final_bytes}"
         )
     if cache_hits:
-        print(f"[run_verilog_final] cache_hits: {cache_hits}")
+        print(f"[run_verilog] cache_hits: {cache_hits}")
     return 0 if failed == 0 else 1
 
 

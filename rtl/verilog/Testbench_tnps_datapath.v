@@ -92,9 +92,9 @@ module Testbench_tnps_datapath;
         expect_d2s(32'd15, 32'd15);
 
         if (failures == 0)
-            $display("PASS: verilog_final TNPS datapath address mapping");
+            $display("PASS: verilog TNPS datapath address mapping");
         else
-            $display("FAIL: verilog_final TNPS datapath address mapping failures=%0d", failures);
+            $display("FAIL: verilog TNPS datapath address mapping failures=%0d", failures);
         $finish;
     end
 endmodule

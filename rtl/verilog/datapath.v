@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 
-`ifndef MDLA7_VERILOG_FINAL_DATAPATH_V
-`define MDLA7_VERILOG_FINAL_DATAPATH_V
+`ifndef MDLA7_VERILOG_DATAPATH_V
+`define MDLA7_VERILOG_DATAPATH_V
 
 /* verilator lint_off DECLFILENAME */
 module vf_conv_int8_mac #(
@@ -566,8 +566,10 @@ module vf_conv_sample_engine #(
     initial begin
         refcrc_program_path = "";
         refcrc_fd = 0;
-        if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
-            refcrc_program_path = "";
+        if (!$value$plusargs("VERILOG_REF_PROGRAM=%s", refcrc_program_path)) begin
+            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
+                refcrc_program_path = "";
+        end
     end
 
     wire [7:0] safe_int_count = (elem_count == 8'd0) ? 8'd1 :
@@ -1748,8 +1750,10 @@ module vf_pool_sample_engine #(
             refcrc_remaining <= 32'd0;
             sramcrc_remaining <= 32'd0;
             sramcrc_index <= 32'd0;
-            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
-                refcrc_program_path = "";
+            if (!$value$plusargs("VERILOG_REF_PROGRAM=%s", refcrc_program_path)) begin
+                if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
+                    refcrc_program_path = "";
+            end
             refcrc_fd = 0;
             fetch_req_sent <= 1'b0;
             active_sample_vec <= {MAX_ELEMS*8{1'b0}};
@@ -2629,8 +2633,10 @@ module vf_udma_engine #(
             sramcrc_remaining <= 32'd0;
             sramcrc_index <= 32'd0;
             ref_fill_program_path = "";
-            if (!$value$plusargs("FINAL_REF_PROGRAM=%s", ref_fill_program_path))
-                ref_fill_program_path = "";
+            if (!$value$plusargs("VERILOG_REF_PROGRAM=%s", ref_fill_program_path)) begin
+                if (!$value$plusargs("FINAL_REF_PROGRAM=%s", ref_fill_program_path))
+                    ref_fill_program_path = "";
+            end
             ref_fill_fd = 0;
         end else if (start_fire) begin
             payload_token_sent <= 1'b0;

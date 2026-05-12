@@ -62,7 +62,7 @@ module vf_microblock_control (
     end
 endmodule
 
-module mdla7_top_final #(
+module mdla7_top #(
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (
