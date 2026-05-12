@@ -1162,6 +1162,7 @@ def conv_real_partial_psum_descriptors(
     layer: Layer,
     ordinal: int,
     max_output_elems: int | None,
+    start_output_elem: int = 0,
 ) -> list[list[int]]:
     data = descriptor_for_layer.program_bytes
     params = int8_conv_params(layer, data)
@@ -1169,11 +1170,13 @@ def conv_real_partial_psum_descriptors(
         return []
     descs: list[list[int]] = []
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
-    emit_output_elems = output_elems if max_output_elems is None else min(output_elems, max_output_elems)
+    start_output_elem = max(min(start_output_elem, output_elems - 1), 0)
+    remaining_output_elems = output_elems - start_output_elem
+    emit_output_elems = remaining_output_elems if max_output_elems is None else min(remaining_output_elems, max_output_elems)
     group = layer.group or 1
     in_per_group = max(layer.in_c // max(group, 1), 1)
     total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * in_per_group
-    for out_elem_index in range(emit_output_elems):
+    for out_elem_index in range(start_output_elem, start_output_elem + emit_output_elems):
         out_area = max(layer.out_w * layer.out_c, 1)
         oh = out_elem_index // out_area
         ow = (out_elem_index % out_area) // max(layer.out_c, 1)
@@ -1267,6 +1270,7 @@ def conv_shadow_readback_descriptor(
     ordinal: int,
     final_descs: list[list[int]],
     ref_bytes: bytes | None = None,
+    sram_start_offset: int = 0,
 ) -> list[int] | None:
     if not final_descs:
         return None
@@ -1294,7 +1298,7 @@ def conv_shadow_readback_descriptor(
     desc, _ = sample
     if ref_bytes is not None:
         desc[3] = (desc[3] & ~(1 << 2)) | (1 << 6) | (1 << 10)
-        desc[27] = 0
+        desc[27] = sram_start_offset & 0xFFFF_FFFF
     else:
         desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
     expected_last = (ref_bytes[-1] if ref_bytes else final_desc[18]) & 0xFF
@@ -1317,6 +1321,24 @@ def conv_final_q_bytes(final_descs: list[list[int]]) -> bytes:
             tile_outputs = 1
         final_q_bytes.extend([desc[18] & 0xFF] * tile_outputs)
     return bytes(final_q_bytes)
+
+
+def conv_sramcrc_window_starts(output_elems: int, window_elems: int, window_count: int) -> list[int]:
+    if output_elems <= 0 or window_elems <= 0 or window_count <= 0:
+        return []
+    window_elems = min(window_elems, output_elems)
+    if window_count == 1:
+        candidates = [0]
+    elif window_count == 2:
+        candidates = [0, output_elems - window_elems]
+    else:
+        candidates = [0, (output_elems - window_elems) // 2, output_elems - window_elems]
+    starts: list[int] = []
+    for start in candidates:
+        start = max(min(start, output_elems - window_elems), 0)
+        if start not in starts:
+            starts.append(start)
+    return starts
 
 
 def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
@@ -1438,6 +1460,7 @@ def main() -> int:
             remaining_commands = max(command_limit - len(commands), 0)
             real_full_command_count = conv_real_partial_psum_command_count(layer, output_elems)
             ref_bytes: bytes | None = None
+            append_probe = True
             if int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None and real_full_command_count <= remaining_commands:
                 max_output_elems = None
                 descs = conv_real_partial_psum_descriptors(
@@ -1448,24 +1471,43 @@ def main() -> int:
                 ref_bytes = descriptor_for_layer.program_bytes[layer.ref_off:layer.ref_off + layer.ref_size]
             elif int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None:
                 lane_chunks = conv_real_lane_chunk_count(layer)
-                prefix_budget = max(min(remaining_commands - 3, MAX_REFCRC_PREFIX_COMMANDS), 0)
-                max_prefix_outputs = prefix_budget // lane_chunks
                 descs = []
-                if max_prefix_outputs > 0:
-                    descs = conv_real_partial_psum_descriptors(
-                        layer,
-                        len(commands),
-                        max_output_elems=max_prefix_outputs,
-                    )
-                    generated_prefix = conv_final_q_bytes([d for d in descs if d[3] & (1 << 6)])
-                    if generated_prefix:
-                        ref_prefix = descriptor_for_layer.program_bytes[
-                            layer.ref_off:layer.ref_off + min(len(generated_prefix), layer.ref_size)
+                append_probe = False
+                max_window_count = 3
+                available_for_windows = max(remaining_commands - 1 - max_window_count, 0)
+                window_command_budget = min(available_for_windows, MAX_REFCRC_PREFIX_COMMANDS)
+                total_window_outputs = window_command_budget // lane_chunks
+                window_count = min(max_window_count, total_window_outputs, output_elems)
+                if window_count > 0:
+                    window_outputs = max(total_window_outputs // window_count, 1)
+                    for window_start in conv_sramcrc_window_starts(output_elems, window_outputs, window_count):
+                        window_descs = conv_real_partial_psum_descriptors(
+                            layer,
+                            len(commands) + len(descs),
+                            max_output_elems=window_outputs,
+                            start_output_elem=window_start,
+                        )
+                        final_descs = [d for d in window_descs if d[3] & (1 << 6)]
+                        generated_window = conv_final_q_bytes(final_descs)
+                        if not generated_window:
+                            continue
+                        elem_b = max(elem_bytes(layer.dtype), 1)
+                        ref_start = layer.ref_off + window_start * elem_b
+                        ref_window = descriptor_for_layer.program_bytes[
+                            ref_start:ref_start + min(len(generated_window), layer.ref_size - window_start * elem_b)
                         ]
-                        if generated_prefix == ref_prefix:
-                            ref_bytes = ref_prefix
-                        else:
-                            descs = []
+                        if generated_window != ref_window:
+                            continue
+                        probe_desc = conv_shadow_readback_descriptor(
+                            layer,
+                            len(commands) + len(descs) + len(window_descs),
+                            final_descs,
+                            ref_bytes=ref_window,
+                            sram_start_offset=window_start * elem_b,
+                        )
+                        descs.extend(window_descs)
+                        if probe_desc is not None:
+                            descs.append(probe_desc)
                 compact_desc = conv_full_ref_crc_descriptor(layer, len(commands) + len(descs))
                 if compact_desc is not None:
                     descs.append(compact_desc)
@@ -1477,7 +1519,7 @@ def main() -> int:
                     len(commands),
                     max_output_elems=max_output_elems,
                 )
-            if descs:
+            if descs and append_probe:
                 probe_desc = conv_shadow_readback_descriptor(
                     layer,
                     len(commands) + len(descs),
