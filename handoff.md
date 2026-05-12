@@ -6,11 +6,18 @@ Branch：`main`
 
 ## 目前狀態
 
-- 最新 local commit：`6052c6e Add MDLA7 synth Verilog simulation`。
+- 最新 local commit：`e7e9c1e Tag L1 responses with source and stream tid`。
 - 此 commit 尚未確認已 push；之前 GitHub `main` 記錄仍是
   `8e6a1a9 Fuse attention EWE softmax microblocks`。
-- 本次 commit 只收 `rtl/` synth Verilog source / runner / README；
-  沒有收 `rtl/bin`、`rtl/obj_dir`、`rtl/verilator`。
+- 近期 RTL commits：
+  `6052c6e` 建立 synth/verilog_ctrl path；
+  `8d9a1f0` 修 slice runner / TNPS datapath；
+  `18ed74d` 整理 generated profile 目錄；
+  `246fda9` 新增 `run_verilog_ctrl.py` / `run_verilog_final.py`；
+  `55be55e` 新增 EWE sample path；
+  `c130339` 擴充 verilog_final sample datapath；
+  `3a4d11e` 新增 INT16 CONV/EWE/POOL sample datapath。
+- RTL commits 沒有收 `rtl/bin`、`rtl/obj*`、`rtl/verilator`。
 - 工作樹仍有既有未提交變更在 `batch/`、`systemc/`、`reports/`
   與幾個 generated profile HTML；這些不是本次 RTL commit 的內容。
 - 本輪重點：`sd_diffusion_quant` 的 5 組大型 `mul -> softmax`
@@ -27,6 +34,83 @@ Branch：`main`
   `MDLA7 L1 Mesh Evaluation (v0.1)`，三條線是 `conflict/fast`、
   `mesh/fast`、`mesh/conflict`，X 軸依 `mesh/conflict` 由小到大排列。
 
+## 2026-05-12 Verilog Final Streaming / L1 Response Handoff
+
+最新完成並已 commit：
+
+```text
+e7e9c1e Tag L1 responses with source and stream tid
+3305dde Probe requant L1 producer path
+1f7aa93 Feed UDMA store CRC from L1 response
+a26c5ad Check microblock output SRAM CRC
+d544211 Add microblock final tensor CRC probes
+1627ffd Drive verilog final with microblock descriptors
+```
+
+### 目前 verilog_final 狀態
+
+- `run_verilog_final.py` default 已走 microblock descriptors；`--sample-descriptors`
+  才回到舊 sample descriptor path。
+- generator 會在 microblock sequence 後加 tensor coverage probes：
+  - UDMA seed L1 bytes -> UDMA STORE from L1 response -> output SRAM CRC。
+  - REQUANT producer 寫 L1 -> L1CRC 驗 `[requant_out] + zeros`。
+  - UDMA ref-fill output SRAM image -> full output SRAM CRC / final CRC。
+- UDMA STORE path 已可從 L1Mesh read response 寫入 UDMA output SRAM。
+  `vf_udma_engine` 新增 L1 response ports，`final_write_mode && direction_write`
+  會等 read response，再把 16B line 寫到 `output_sram[out_byte_offset + lane]`。
+- UDMA SRAMCRC descriptor 不再打一筆 L1 request；它只掃 UDMA output SRAM。
+- L1Manager/L1Mesh response metadata 已打通：
+  - L1Manager 將 arbitration 選到的 `source/tid` 帶到 mesh request。
+  - L1Mesh response 回傳 `resp_read/resp_source/resp_tid`。
+  - `mdla7_top_final` 只把符合當前 engine source 且 `tid == stream_slot_q`
+    的 read response 餵給 REQUANT/POOL/EWE/UDMA。
+- 已觀察到的 hazard：L1Mesh response/data 在 back-to-back request 時可能有
+  stale beat / metadata-data 同拍風險。`resp_source/resp_tid` 是必要地基，
+  但 REQUANT -> UDMA consumer probe 還需要 per-command response queue 或
+  更嚴格的 response-valid/data register 才能穩定接回。
+
+### 最近驗證
+
+已驗證 PASS：
+
+```bash
+rm -rf rtl/obj/verilog_final/host
+./rtl/batch/run_verilog_final.py --filter slice --limit 1 \
+  --rerun-all --require-crc-coverage --require-final-output-crc
+
+./rtl/batch/run_verilog_final.py --filter slice --limit 3 \
+  --rerun-all --no-build --require-crc-coverage --require-final-output-crc
+```
+
+最近結果：
+
+```text
+limit 1: pass=1 fail=0 skip=0 sample_only=0 total=1
+coverage: refcrc=0 sramcrc=3 finalcrc=2 refB=0 sramB=16777248 finalB=16777232
+
+limit 3: pass=3 fail=0 skip=0 sample_only=0 total=3
+coverage: refcrc=0 sramcrc=12 finalcrc=7 refB=0 sramB=23069440 finalB=23069360
+```
+
+### 下一步
+
+1. 在 L1 response side 加 per-command response queue / skid register：
+   response valid、read bit、source、tid、rdata 必須同拍鎖住，避免 back-to-back
+   request 時 stale `resp_rdata` 被新 command source/tid 吃掉。
+2. 把暫時沒有 commit 的 consumer probe 接回：
+   `REQUANT producer writes L1 -> UDMA STORE reads same L1 address -> UDMA output SRAM CRC`。
+   先用 16B `[requant_out] + zeros`，通過後再擴成多 byte/tile。
+3. 同樣模式推到 POOL/EWE/TNPS：
+   producer engine result byte/line 寫 L1，consumer/UDMA 從同一 L1 address 讀，
+   再做 output SRAM CRC。
+4. 接 full tensor path：
+   將目前 ref-fill full output CRC 逐步替換成真正 producer output SRAM/L1Mesh
+   image，再做 full output tensor compare/CRC。
+5. 注意 Verilator include dependency：
+   `rtl/synth/*.v` 被 include 時，`run_verilog_final_smoke.py` 可能
+   `make: Nothing to be done`。改 L1Manager/L1Mesh 後建議先
+   `rm -rf rtl/obj/verilog_final/host` 再跑 host smoke/regression。
+
 ## 2026-05-12 RTL / Synth Verilog Update
 
 已新增並 commit 一套 `rtl/` synth Verilog simulation path：
@@ -42,8 +126,8 @@ Branch：`main`
   `udma.v`、`l1manager.v`、`l1mesh.v`、`mdla7_top.v`、
   `host.v`、`dram.v`、`Testbench.v`、`common.v`、
   `mdla7_dpi.cpp`、`filelist_system_tb.f`、`README.md`。
-- `rtl/batch/run_mdla7_verilog.py`：
-  quiet Verilator runner，支援 `--compare-synth-verilog`、
+- `rtl/batch/run_verilog_ctrl.py`：
+  verilog_ctrl quiet Verilator runner，支援 `--compare-synth-verilog_ctrl`、
   `--show-verilog-output`、`--verbose-build`、macOS Intel / Apple Silicon
   host/architecture check，`rtl/obj_dir` build output，profile timing sidecar。
 - `rtl/.gitignore`：
@@ -93,7 +177,7 @@ rtl/verilator/bin/verilator --lint-only --sv --timing -Wall -Wno-fatal \
   rtl/synth/udma.v rtl/synth/l1manager.v rtl/synth/l1mesh.v \
   rtl/synth/mdla7_top.v --top-module mdla7_top
 
-./rtl/batch/run_mdla7_verilog.py --compare-synth-verilog --filter '*.bin' \
+./rtl/batch/run_verilog_ctrl.py --filter '*.bin' \
   --require-host-load --timeout 300 --stop-on-fail --build
 ```
 
@@ -120,6 +204,131 @@ compare: comparable=11/11 synth_total_ms=3.424 verilog_total_ms=3.326 verilog/sy
    還是簡化模型。
 4. 若要 push，先確認是否也要另外 commit/處理現有 `batch/`、`systemc/`、
    `reports/` 未提交變更，避免混進 RTL commit。
+
+## 2026-05-12 Verilog Ctrl / Final Update
+
+### Runner naming
+
+- `rtl/batch/run_verilog_ctrl.py`：control/timing shell regression path，
+  default compare mode 是 `--compare-synth-verilog_ctrl`。
+- `rtl/batch/run_verilog_final.py`：full Verilog datapath bring-up path，
+  目前是 sample descriptor + real Verilog sample datapath，不是完整 tensor
+  tile streaming。
+- 舊的 `run_mdla7_verilog.py` 已移除，避免和 ctrl/final 命名混淆。
+- `rtl/obj_dir` 是 verilog_ctrl 既有 build output；verilog_final 產物走
+  `rtl/obj/verilog_final/`。後續若整理 obj 目錄，維持 ctrl/final 分開。
+
+### verilog_ctrl 狀態
+
+- `rtl/synth` 仍是 `verilog_ctrl` target，datapath correctness 透過
+  DPI-C / fast-model CRC 比對，RTL module 主要提供 control、microblock、
+  L1Manager/L1Mesh timing/backpressure。
+- `rtl/synth/host.v` 的 capacity 已在 `3a4d11e` 放大：
+  `MAX_PROGRAM_BYTES=262144`、`MAX_LAYERS=4096`。
+  這修掉 `mobilebert_quant` huge pattern 的錯誤：
+
+```text
+$readmem file address beyond bounds of array
+mobilebert_quant.timing.hex line 1024
+```
+
+- `mobilebert_quant.bin` header layer count 是 `0x734 = 1844`，舊
+  `MAX_LAYERS=1024` 不夠。重建 `rtl/obj_dir/VTestbench` 後 bounds error
+  已消失；用手動 `--timeout 120` 會變成正常長跑 timeout，實際 regression
+  應用 huge default `3600s`。
+
+### verilog_final 狀態
+
+`rtl/verilog_final` 已有以下 sample datapath：
+
+- CONV：INT8 MAC + bias + MBQM + clamp；FP16 real-valued sample MAC；
+  INT16/hybrid signed sample MAC；`vf_conv2d_addrgen` 2D NHWC address-walk
+  primitive。
+- REQUANT：MBQM + output zero-point + activation clamp sample。
+- POOL：INT8 max/avg；FP16 real-valued max/avg；INT16/hybrid signed max/avg。
+- EWE：INT8 ADD/MUL/SUB；FP16 ADD/MUL/SUB/LOGISTIC；INT16 ADD/MUL/SUB。
+- TNPS：SPACE_TO_DEPTH / DEPTH_TO_SPACE address mapping。
+- UDMA：byte-moving timing token path。
+- L1Manager/L1Mesh：multi-source token path、2-deep FIFO backpressure、
+  placement-aware route estimator、contention smoke test。
+
+Descriptor generator：
+
+```bash
+./rtl/batch/gen_verilog_final_program.py <program.bin> -o <program.final.hex>
+```
+
+Regression examples：
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py
+./rtl/batch/run_verilog_final.py --filter dped_int16_L3_6.bin --rerun-all
+./rtl/batch/run_verilog_final.py --filter microisp_int16_L5_20.bin --rerun-all
+./rtl/batch/run_verilog_final.py --filter slice --limit 10 --rerun-all
+```
+
+Recent targeted results:
+
+```text
+dped_int16_L3_6        PASS cmds=4 conv=2 pool=0 requant=0 ewe=2 tnps=0 udma=0 done=4
+microisp_int16_L5_20   PASS cmds=9 conv=6 pool=1 requant=0 ewe=1 tnps=0 udma=1 done=9
+ETHZ_v6_slice census   PASS 175 fail=0 skip=0 total=175
+```
+
+Smoke:
+
+```text
+./rtl/batch/run_verilog_final_smoke.py
+[verilog_final_smoke] PASS
+./rtl/batch/run_verilog_final_smoke.py --test conv
+PASS: verilog_final conv int8 MAC datapath and 2D address walk
+```
+
+### verilog_final descriptor flags
+
+- CONV word 12：bit8 `fp_mode`、bit11 `int16_mode`。
+- POOL word 12：bit8 `avg_mode`、bit9 `fp_mode`、bit11 `int16_mode`。
+- EWE word 12：bits9:8 `op_mode`、bit10 `fp_mode`、bit11 `int16_mode`。
+- FP descriptors use words 16/17 for expected double result bits.
+- INT16 descriptors use word 18 as signed 32-bit expected sample result.
+
+### verilog_final Next-Step
+
+1. `ETHZ_v6_slice` 已跑到 `pass=175 fail=0 skip=0 total=175`，所以目前
+   不是補 SKIP descriptor，而是往更真 datapath 前進。
+2. 下一步把 `vf_conv2d_addrgen` 接進 `vf_conv_sample_engine` 與 generated
+   CONV descriptors，讓 final path 從 flat payload sample MAC 變成
+   descriptor-driven 2D window sample + MAC。
+   需要在 final CONV descriptor 帶最小 shape/window info：
+   `in_h/in_w/in_c`、`out_h/out_w/out_c`、`k_h/k_w`、stride/dilation/pad
+   或先用 default；host 比對 expected input/weight/output byte offset 與
+   valid bit。
+3. 再推 CONV multi-sample / multi-output tile walk：activation/weight tile walk、
+   psum accumulate、writeback buffering、CRC/full tensor compare。
+4. 補更完整 byte-moving / layout descriptor：`RESHAPE/CONCAT/SLICE` 目前多
+   還是 UDMA-style placeholder，後續要接到 TNPS/meta shape ports。
+5. 將 FP sample path 從 Verilator real-valued bring-up primitive 逐步替換成
+   synthesizable FP pipeline 或明確分層成 simulation-only checker。
+
+### Docs / textbook update
+
+- 新增 `md/22_rtl_bringup.md`，正式成為 textbook 第 22 章。
+- 已重生：
+  `md/mdla7_textbook.md`、`md/mdla7_textbook.html`、
+  `pdf/mdla7_textbook.pdf`。
+- PDF 產生命令：
+
+```bash
+bash scripts/build_pdf.sh
+```
+
+- 若 `/tmp/mdpdf_venv/bin/python` 不存在，可用：
+
+```bash
+python3 -m venv --system-site-packages /tmp/mdpdf_venv
+```
+
+  目前機器上已用這個方式建立 venv，build script 可正常跑。
 
 ## 本輪完成
 
