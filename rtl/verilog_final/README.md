@@ -240,7 +240,11 @@ experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton
 and the writeback/shadow tuple plus shadow memory offsets/q values. The
-generator also emits a follow-up CONV probe descriptor that reads back the last
-tile output slot from the shadow SRAM and checks the stored q answer through
-word 3 bit 7 / word 19, plus the rolling shadow CRC/count through word 3 bit 8
-and words 28/29.
+generator emits multiple output-tile groups for small INT8 CONV layers, so
+layers with up to 16 emitted output bytes now exercise a layer-level shadow
+SRAM stream rather than a single output pixel. It also emits a follow-up CONV
+probe descriptor that reads back the last tile output slot from the shadow SRAM
+and checks the stored q answer through word 3 bit 7 / word 19, plus the rolling
+shadow CRC/count through word 3 bit 8 and words 28/29. Larger layers are still
+bounded by the current 63-command host program cap and therefore check the
+generated output prefix until the full output SRAM image path lands.

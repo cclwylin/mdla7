@@ -856,44 +856,64 @@ def int8_conv_sample_descriptor(
 
 def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]:
     descs: list[list[int]] = []
-    cumulative_acc = 0
-    start_lane = 0
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    emit_output_elems = min(output_elems, 16)
+    out_elem_index = 0
     total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * max(layer.in_c, 1)
-    while start_lane < total_lanes:
-        psum_flag = 1 << 4 if not descs else 1 << 5
-        sample = int8_conv_sample_descriptor(
-            layer,
-            ordinal + len(descs),
-            start_lane=start_lane,
-            max_count=8,
-            psum_flag=psum_flag,
-        )
-        if sample is None:
+    while out_elem_index < emit_output_elems:
+        cumulative_acc = 0
+        start_lane = 0
+        tile_descs: list[list[int]] = []
+        while start_lane < total_lanes:
+            psum_flag = 1 << 4 if not tile_descs else 1 << 5
+            sample = int8_conv_sample_descriptor(
+                layer,
+                ordinal + len(descs),
+                start_lane=start_lane,
+                max_count=8,
+                out_elem_index=out_elem_index,
+                psum_flag=psum_flag,
+            )
+            if sample is None:
+                break
+            desc, acc = sample
+            elem_count = desc[12] & 0xFF
+            if elem_count == 0:
+                break
+            cumulative_acc += acc
+            desc[19] = cumulative_acc & 0xFFFF_FFFF
+            tile_descs.append(desc)
+            descs.append(desc)
+            start_lane += elem_count
+        if not tile_descs:
             break
-        desc, acc = sample
-        elem_count = desc[12] & 0xFF
-        if elem_count == 0:
-            break
-        cumulative_acc += acc
-        desc[19] = cumulative_acc & 0xFFFF_FFFF
-        descs.append(desc)
-        start_lane += elem_count
-    if descs:
-        descs[-1][3] |= 1 << 6
+        tile_descs[-1][3] |= 1 << 6
         final_q = clamp_i8(mbqm(clamp_i32(cumulative_acc), 1073741824, 1))
-        descs[-1][18] = final_q & 0xFF
+        tile_descs[-1][18] = final_q & 0xFF
+        tile_count = tile_descs[-1][31] & 0xFF
+        out_elem_index += max(tile_count, 1)
     return descs
 
 
 def conv_shadow_readback_descriptor(
     layer: Layer,
     ordinal: int,
-    final_desc: list[int],
+    final_descs: list[list[int]],
 ) -> list[int] | None:
+    if not final_descs:
+        return None
+    final_desc = final_descs[-1]
     tile_count = final_desc[31] & 0xFF
     if tile_count == 0:
         tile_count = 1
-    read_elem_index = min(tile_count, 4) - 1
+    first_out_offset = final_desc[27]
+    final_q_bytes: list[int] = []
+    for desc in final_descs:
+        tile_outputs = desc[31] & 0xFF
+        if tile_outputs == 0:
+            tile_outputs = 1
+        final_q_bytes.extend([desc[18] & 0xFF] * tile_outputs)
+    read_elem_index = first_out_offset + tile_count - 1
     sample = int8_conv_sample_descriptor(
         layer,
         ordinal,
@@ -906,8 +926,11 @@ def conv_shadow_readback_descriptor(
     desc, _ = sample
     desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
     desc[19] = ((final_desc[18] & 0xFF) if final_desc[18] < 0x80 else (final_desc[18] & 0xFF) - 0x100) & 0xFFFF_FFFF
-    desc[28] = fnv_repeated(final_desc[18], tile_count)
-    desc[29] = tile_count
+    crc = FNV_OFFSET
+    for byte_value in final_q_bytes:
+        crc = fnv_byte(crc, byte_value)
+    desc[28] = crc
+    desc[29] = len(final_q_bytes)
     desc[31] = (desc[31] & ~0xFF) | 1
     return desc
 
@@ -1005,7 +1028,7 @@ def main() -> int:
                 probe_desc = conv_shadow_readback_descriptor(
                     layer,
                     len(commands) + len(descs),
-                    descs[-1],
+                    [d for d in descs if (d[3] & (1 << 6))],
                 )
                 if probe_desc is not None:
                     descs.append(probe_desc)

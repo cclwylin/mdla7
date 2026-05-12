@@ -911,8 +911,10 @@ module vf_conv_sample_engine #(
                         if (conv_partial_first) begin
                             conv_psum_valid_mask <= 4'd0;
                             conv_psum_acc_values <= 128'd0;
-                            conv_shadow_crc <= FNV_OFFSET;
-                            conv_shadow_byte_count <= 32'd0;
+                            if (conv_out_elem_index == 32'd0) begin
+                                conv_shadow_crc <= FNV_OFFSET;
+                                conv_shadow_byte_count <= 32'd0;
+                            end
                             for (psum_i = 0; psum_i < 4; psum_i = psum_i + 1) begin
                                 if (psum_i < scoreboard_tile_output_count) begin
                                     conv_psum_valid_mask[psum_i] <= 1'b1;
@@ -932,9 +934,11 @@ module vf_conv_sample_engine #(
                         end
                         if (conv_writeback_valid_mask != 4'd0) begin
                             writeback_crc_value =
-                                conv_partial_first ? FNV_OFFSET : conv_shadow_crc;
+                                (conv_partial_first && (conv_out_elem_index == 32'd0)) ?
+                                FNV_OFFSET : conv_shadow_crc;
                             writeback_byte_count_value =
-                                conv_partial_first ? 32'd0 : conv_shadow_byte_count;
+                                (conv_partial_first && (conv_out_elem_index == 32'd0)) ?
+                                32'd0 : conv_shadow_byte_count;
                             conv_shadow_valid_mask <= conv_writeback_valid_mask;
                             conv_shadow_output_byte_offsets <= conv_writeback_output_byte_offsets;
                             conv_shadow_q_values <= conv_writeback_q_values;
