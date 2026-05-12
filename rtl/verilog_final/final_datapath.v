@@ -363,7 +363,9 @@ module vf_conv_sample_engine #(
     output reg [7:0]              conv_window_valid_count,
     output     [31:0]             conv_tile_last_output_byte_offset,
     output                        conv_tile_last_input_valid,
-    output reg [7:0]              conv_tile_last_window_valid_count
+    output reg [7:0]              conv_tile_last_window_valid_count,
+    output reg [3:0]              conv_tile_scoreboard_valid_mask,
+    output reg signed [31:0]      conv_tile_scoreboard_q_sum
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -390,6 +392,7 @@ module vf_conv_sample_engine #(
     reg signed [31:0] i16_wv;
     reg signed [63:0] i16_acc64;
     reg signed [31:0] i16_acc;
+    integer tile_i;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -436,8 +439,9 @@ module vf_conv_sample_engine #(
     wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
     wire [31:0] conv_k_w_safe = (conv_k_w == 8'd0) ? 32'd1 : {24'd0, conv_k_w};
     wire [7:0] safe_tile_output_count = (conv_tile_output_count == 8'd0) ? 8'd1 : conv_tile_output_count;
+    wire [7:0] scoreboard_tile_output_count = (safe_tile_output_count > 8'd4) ? 8'd4 : safe_tile_output_count;
     wire [31:0] conv_tile_last_out_elem_index =
-        conv_out_elem_index + {24'd0, safe_tile_output_count} - 32'd1;
+        conv_out_elem_index + {24'd0, scoreboard_tile_output_count} - 32'd1;
     wire [31:0] conv_window_lane = (safe_int_count == 8'd0) ? 32'd0 : {24'd0, safe_int_count - 8'd1};
     wire [31:0] conv_window_col_span = conv_k_w_safe * conv_in_c_safe;
     wire [31:0] conv_window_kh =
@@ -646,6 +650,14 @@ module vf_conv_sample_engine #(
         i16_acc64 = 64'sd0;
         conv_window_valid_count = conv_window_valid_count_at(conv_out_elem_index);
         conv_tile_last_window_valid_count = conv_window_valid_count_at(conv_tile_last_out_elem_index);
+        conv_tile_scoreboard_valid_mask = 4'd0;
+        conv_tile_scoreboard_q_sum = 32'sd0;
+        for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
+            if (tile_i < scoreboard_tile_output_count) begin
+                conv_tile_scoreboard_valid_mask[tile_i] = 1'b1;
+                conv_tile_scoreboard_q_sum = conv_tile_scoreboard_q_sum + $signed(out_q);
+            end
+        end
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
             if (fp_i < safe_fp_count)
                 fp_sum = fp_sum +

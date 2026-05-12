@@ -98,6 +98,8 @@ module host_final #(
     input      [31:0]  conv_tile_last_output_byte_offset,
     input              conv_tile_last_input_valid,
     input      [7:0]   conv_tile_last_window_valid_count,
+    input      [3:0]   conv_tile_scoreboard_valid_mask,
+    input signed [31:0] conv_tile_scoreboard_q_sum,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -139,6 +141,17 @@ module host_final #(
 
     wire [31:0] base = command_index * WORDS_PER_COMMAND;
     wire [3:0] next_op = cmd_mem[base][3:0];
+    wire [7:0] expected_conv_tile_count =
+        (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 :
+        (cmd_mem[base + 31][7:0] > 8'd4) ? 8'd4 :
+        cmd_mem[base + 31][7:0];
+    wire [3:0] expected_conv_tile_valid_mask =
+        (expected_conv_tile_count == 8'd1) ? 4'b0001 :
+        (expected_conv_tile_count == 8'd2) ? 4'b0011 :
+        (expected_conv_tile_count == 8'd3) ? 4'b0111 : 4'b1111;
+    wire signed [31:0] expected_conv_tile_q_sum =
+        $signed({{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]}) *
+        $signed({24'd0, expected_conv_tile_count});
 
     assign top_done_ready = 1'b1;
 
@@ -455,11 +468,13 @@ module host_final #(
                              (conv_first_weight_byte_offset !== cmd_mem[base + 29]) ||
                              (conv_window_valid_count !== cmd_mem[base + 30][7:0]) ||
                              (conv_tile_last_output_byte_offset !==
-                              ({24'd0, ((cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0])} - 32'd1) *
+                              ({24'd0, expected_conv_tile_count} - 32'd1) *
                               {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)}) ||
                              (conv_tile_last_input_valid !== cmd_mem[base + 31][16]) ||
-                             (conv_tile_last_window_valid_count !== cmd_mem[base + 31][15:8]))) begin
-                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_count=%0d",
+                             (conv_tile_last_window_valid_count !== cmd_mem[base + 31][15:8]) ||
+                             (conv_tile_scoreboard_valid_mask !== expected_conv_tile_valid_mask) ||
+                             (conv_tile_scoreboard_q_sum !== expected_conv_tile_q_sum))) begin
+                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_mask=%04b expected=%04b tile_q_sum=%0d expected=%0d tile_count=%0d",
                                      command_index,
                                      conv_sample_input_valid, cmd_mem[base + 3][3],
                                      conv_sample_input_byte_offset, cmd_mem[base + 25],
@@ -471,7 +486,11 @@ module host_final #(
                                      conv_tile_last_output_byte_offset,
                                      conv_tile_last_input_valid,
                                      conv_tile_last_window_valid_count,
-                                     (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0]);
+                                     conv_tile_scoreboard_valid_mask,
+                                     expected_conv_tile_valid_mask,
+                                     conv_tile_scoreboard_q_sum,
+                                     expected_conv_tile_q_sum,
+                                     expected_conv_tile_count);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

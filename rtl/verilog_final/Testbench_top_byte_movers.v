@@ -98,6 +98,8 @@ module Testbench_top_byte_movers;
     wire [31:0] conv_tile_last_output_byte_offset;
     wire conv_tile_last_input_valid;
     wire [7:0] conv_tile_last_window_valid_count;
+    wire [3:0] conv_tile_scoreboard_valid_mask;
+    wire signed [31:0] conv_tile_scoreboard_q_sum;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -209,6 +211,8 @@ module Testbench_top_byte_movers;
         .conv_tile_last_output_byte_offset(conv_tile_last_output_byte_offset),
         .conv_tile_last_input_valid(conv_tile_last_input_valid),
         .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
+        .conv_tile_scoreboard_valid_mask(conv_tile_scoreboard_valid_mask),
+        .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -382,8 +386,10 @@ module Testbench_top_byte_movers;
             (conv_window_valid_count != 8'd6) ||
             (conv_tile_last_output_byte_offset != 32'd2) ||
             !conv_tile_last_input_valid ||
-            (conv_tile_last_window_valid_count != 8'd4)) begin
-            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d tile_last_out=%0d tile_valid=%0d tile_count=%0d",
+            (conv_tile_last_window_valid_count != 8'd4) ||
+            (conv_tile_scoreboard_valid_mask != 4'b0111) ||
+            (conv_tile_scoreboard_q_sum != 32'sd120)) begin
+            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d tile_last_out=%0d tile_valid=%0d tile_count=%0d tile_mask=%04b tile_q_sum=%0d",
                      conv_sample_input_valid,
                      conv_sample_input_byte_offset,
                      conv_sample_weight_byte_offset,
@@ -393,7 +399,9 @@ module Testbench_top_byte_movers;
                      conv_window_valid_count,
                      conv_tile_last_output_byte_offset,
                      conv_tile_last_input_valid,
-                     conv_tile_last_window_valid_count);
+                     conv_tile_last_window_valid_count,
+                     conv_tile_scoreboard_valid_mask,
+                     conv_tile_scoreboard_q_sum);
             failures = failures + 1;
         end
 
