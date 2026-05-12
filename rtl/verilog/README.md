@@ -18,7 +18,8 @@ Scope for this path:
   tile/bank placement instead of only simplified address-derived hops.
 
 Do not split new work into separate `verilog_ctrl` / `verilog_final` trees.
-New hardware work belongs here.
+New hardware work belongs here. The legacy `rtl/synth` control shell and
+`run_verilog_ctrl.py` runner have been retired.
 
 Smoke tests:
 

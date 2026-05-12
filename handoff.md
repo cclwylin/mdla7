@@ -175,7 +175,8 @@ rm -rf rtl/obj/verilog/host
 - Workspace is dirty; several unrelated files were already modified before this handoff. Do not revert user changes.
 - Smoke `.verilog.hex` files under `rtl/obj/verilog/programs/` are generated local artifacts.
 - `--full-tensor` exists, but should not become the final architecture. Use compact descriptors plus Verilog-side traversal.
-- `rtl/verilog` is now the single hardware Verilog tree. Do not create a new `verilog_ctrl` / `verilog_final` split for future work.
+- `rtl/verilog` is now the single hardware Verilog tree.
+- Legacy `verilog_ctrl` is retired. `rtl/synth` and `run_verilog_ctrl.py` were removed; do not recreate a `verilog_ctrl` / `verilog_final` split.
 
 ## Recent Commits
 
