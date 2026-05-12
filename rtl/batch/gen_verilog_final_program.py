@@ -772,11 +772,41 @@ def tnps_final_bytes(final_descs: list[list[int]]) -> bytes:
     return bytes(out)
 
 
-def closed_loop_tnps_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
-    desc = tnps_output_descriptor(layer, ordinal, 0, 1)
+def tnps_contiguous_output_byte_count(layer: Layer, start_out_byte: int, max_count: int) -> int:
+    first_src = tnps_output_source_byte_offset(layer, start_out_byte)
+    if first_src is None:
+        return 0
+    max_count = min(max_count, 16 - (first_src & 0xF))
+    count = 0
+    for lane in range(max_count):
+        src = tnps_output_source_byte_offset(layer, start_out_byte + lane)
+        if src is None or src != first_src + lane:
+            break
+        count += 1
+    return count
+
+
+def closed_loop_tnps_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    max_payload_bytes: int,
+) -> list[list[int]]:
+    byte_count = tnps_contiguous_output_byte_count(
+        layer,
+        0,
+        max(1, min(layer.ref_size, max_payload_bytes, 16)),
+    )
+    if byte_count <= 0:
+        return []
+    desc = tnps_output_descriptor(layer, ordinal, 0, byte_count)
     if desc is None:
         return []
-    expected = tnps_final_bytes([desc])
+    data = descriptor_for_layer.program_bytes
+    expected = bytes(
+        data[layer.in_off + tnps_output_source_byte_offset(layer, lane)]
+        for lane in range(byte_count)
+    )
     if not expected:
         return []
     src_byte = desc[16]
@@ -788,7 +818,7 @@ def closed_loop_tnps_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
             ordinal,
             layer.in_off + src_byte,
             l1_base + src_byte,
-            1,
+            len(expected),
             SMF_LOAD_A,
         )
     ]
@@ -3014,6 +3044,7 @@ def main() -> int:
                     layer,
                     len(commands) + len(descs),
                     result_dram_off,
+                    args.max_payload_bytes,
                 )
             elif layer.op_kind in OK_CONV and elem_bytes(layer.dtype) == 1:
                 closed_loop_descs = closed_loop_conv_probe(

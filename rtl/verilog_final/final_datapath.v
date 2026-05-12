@@ -2860,6 +2860,24 @@ module vf_tnps_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] compact_l1_response;
+        input [DATA_WIDTH-1:0] data;
+        input [3:0] lane;
+        input [31:0] byte_count;
+        integer idx;
+        integer src_lane;
+        reg [DATA_WIDTH-1:0] compact;
+        begin
+            compact = {DATA_WIDTH{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                src_lane = lane + idx;
+                if ((idx < byte_count) && (src_lane < DATA_WIDTH/8))
+                    compact[idx*8 +: 8] = data[src_lane*8 +: 8];
+            end
+            compact_l1_response = compact;
+        end
+    endfunction
+
     vf_tnps_addrgen u_addrgen (
         .mode_space_to_depth(mode_space_to_depth),
         .in_h(in_h),
@@ -2978,7 +2996,7 @@ module vf_tnps_engine #(
                 sramcrc_index <= out_byte_offset;
             end
         end else if ((phase_id == PH_PAYLOAD_READ) && l1_resp_valid) begin
-            permute_vec <= l1_resp_rdata;
+            permute_vec <= compact_l1_response(l1_resp_rdata, l1_req_addr[3:0], bytes);
         end else if (final_write_active && payload_token_fire) begin
             for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
                 if ((sramcrc_i < bytes) &&
