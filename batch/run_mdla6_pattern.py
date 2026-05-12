@@ -97,7 +97,7 @@ _BANNER_HINTS = ("ALL RIGHTS RESERVED", "Accellera", "Copyright (c)",
 def _refresh_model_profile_index() -> None:
     try:
         subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
-                        "--html-out", "output/profile/profile_mdla6_pattern.html",
+                        "--html-out", "profile/profile_mdla6_pattern.html",
                         "--title", "MDLA7 MDLA6 Pattern Profiles",
                         "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
@@ -734,7 +734,7 @@ def main():
               f"  sim total {total_ms:.1f} ms,  wall {total_s:.0f}s  ====", flush=True)
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()
-    print(f"html: {OUT_DIR / 'profile' / 'profile_mdla6_pattern.html'}", flush=True)
+    print(f"html: {HERE / 'profile' / 'profile_mdla6_pattern.html'}", flush=True)
 
 
 if __name__ == "__main__":

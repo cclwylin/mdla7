@@ -126,7 +126,7 @@ def main() -> None:
         corpus_name=str(cfg["name"]),
         default_model_dir=Path(cfg["model_dir"]),
         default_csv_out=Path(cfg["csv"]),
-        profile_html=f"output/profile/{cfg['profile']}",
+        profile_html=f"profile/{cfg['profile']}",
         profile_title=str(cfg["title"]),
         pattern_order_csv=cfg.get("order"),
         recursive=bool(cfg.get("recursive", False)),

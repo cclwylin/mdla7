@@ -116,7 +116,7 @@ def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
         if not html_path.is_absolute():
             html_path = HERE / html_path
         if html_path.parent == HERE:
-            html_out = f"output/profile/{html_path.name}"
+            html_out = f"profile/{html_path.name}"
         subprocess.run(
             [sys.executable, str(MODEL_PROFILE_PY),
              "--html-out", html_out,
@@ -401,7 +401,7 @@ def _write_cx_rtl_compare_html(model_path: Path,
 def _write_rtl_compare_index(title: str, html_out: str,
                              rows: list[dict], csv_path: Path) -> None:
     out_path = HERE / html_out
-    link_prefix = "../" if out_path.parent == OUT_DIR / "profile" else "output/"
+    link_prefix = "../output/" if out_path.parent == HERE / "profile" else "output/"
     body = []
     for row in rows:
         pat = row.get("pattern", "")
@@ -449,7 +449,7 @@ a:hover {{ text-decoration:underline; }}
 def _write_cx_rtl_compare_index(title: str, html_out: str,
                                    rows: list[dict], csv_path: Path) -> None:
     out_path = HERE / html_out
-    link_prefix = "../" if out_path.parent == OUT_DIR / "profile" else "output/"
+    link_prefix = "../output/" if out_path.parent == HERE / "profile" else "output/"
     body = []
     for row in rows:
         pat = row.get("pattern", "")

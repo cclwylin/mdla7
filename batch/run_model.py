@@ -87,7 +87,7 @@ def _mode_paths(model: Path, l1_timing: str = "fast",
 def _refresh_model_profile_index() -> None:
     try:
         subprocess.run([sys.executable, str(MODEL_PROFILE_PY),
-                        "--html-out", "output/profile/profile_mdla6_pattern.html",
+                        "--html-out", "profile/profile_mdla6_pattern.html",
                         "--title", "MDLA7 MDLA6 Pattern Profiles",
                         "--only-metrics-rows"],
                        cwd=str(HERE), capture_output=True, text=True)
