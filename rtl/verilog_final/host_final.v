@@ -69,6 +69,10 @@ module host_final #(
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
     output reg signed [31:0] requant_input_value,
+    output reg         requant_sramcrc_mode,
+    output reg [31:0]  requant_sramcrc_expected_crc,
+    output reg [31:0]  requant_sramcrc_expected_count,
+    output reg [31:0]  requant_out_byte_offset,
     output reg         pool_avg_mode,
     output reg         pool_fp_mode,
     output reg         pool_int16_mode,
@@ -136,6 +140,8 @@ module host_final #(
     input      [127:0] conv_psum_acc_values,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
+    input      [31:0]   requant_sramcrc_crc,
+    input      [31:0]   requant_sramcrc_count,
     input signed [31:0] pool_out,
     input signed [7:0]  pool_out_q,
     input      [63:0]   pool_fp_bits,
@@ -268,6 +274,10 @@ module host_final #(
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
             requant_input_value <= cmd_mem[base + 4];
+            requant_sramcrc_mode <= cmd_mem[base + 3][10];
+            requant_sramcrc_expected_crc <= cmd_mem[base + 28];
+            requant_sramcrc_expected_count <= cmd_mem[base + 29];
+            requant_out_byte_offset <= cmd_mem[base + 27];
             pool_sample_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                                 cmd_mem[base + 5], cmd_mem[base + 4]};
             pool_elem_count <= cmd_mem[base + 12][7:0];
@@ -518,6 +528,10 @@ module host_final #(
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;
             requant_input_value <= 32'sd0;
+            requant_sramcrc_mode <= 1'b0;
+            requant_sramcrc_expected_crc <= 32'd0;
+            requant_sramcrc_expected_count <= 32'd0;
+            requant_out_byte_offset <= 32'd0;
             pool_avg_mode <= 1'b0;
             pool_fp_mode <= 1'b0;
             pool_int16_mode <= 1'b0;
@@ -785,7 +799,17 @@ module host_final #(
                                      $signed(conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_REQUANT) &&
+                        if ((desc_op_class == OP_REQUANT) && requant_sramcrc_mode &&
+                            ((requant_sramcrc_crc !== requant_sramcrc_expected_crc) ||
+                             (requant_sramcrc_count !== requant_sramcrc_expected_count))) begin
+                            $display("HOST_FINAL_FAIL: REQUANT sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                                     command_index, requant_sramcrc_crc,
+                                     requant_sramcrc_expected_crc,
+                                     requant_sramcrc_count,
+                                     requant_sramcrc_expected_count);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
                             (requant_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, requant_scaled_out,

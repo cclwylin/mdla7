@@ -1527,6 +1527,69 @@ def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
     return words
 
 
+def requant_output_descriptor_from_conv_final(layer: Layer, ordinal: int, conv_desc: list[int]) -> list[int]:
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x18) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_REQUANT
+    words[1] = 1
+    words[2] = addr
+    words[4] = conv_desc[19]
+    words[14] = conv_desc[14]
+    words[15] = conv_desc[15]
+    words[16] = conv_desc[16]
+    words[17] = conv_desc[17]
+    words[18] = conv_desc[18] & 0xFF
+    words[19] = layer.index
+    words[27] = conv_desc[27] & 0xFFFF_FFFF
+    return words
+
+
+def requant_output_descriptors_for_conv(
+    layer: Layer,
+    ordinal: int,
+    max_output_elems: int,
+    start_output_elem: int = 0,
+) -> list[list[int]]:
+    conv_descs = conv_real_partial_psum_descriptors(
+        layer,
+        ordinal,
+        max_output_elems=max_output_elems,
+        start_output_elem=start_output_elem,
+    )
+    descs: list[list[int]] = []
+    for conv_desc in conv_descs:
+        if conv_desc[3] & (1 << 6):
+            descs.append(
+                requant_output_descriptor_from_conv_final(
+                    layer,
+                    ordinal + len(descs),
+                    conv_desc,
+                )
+            )
+    return descs
+
+
+def requant_final_q_bytes(final_descs: list[list[int]]) -> bytes:
+    return bytes(desc[18] & 0xFF for desc in final_descs)
+
+
+def requant_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
+    if not ref_bytes:
+        return None
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x18) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_REQUANT
+    words[1] = len(ref_bytes) & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = 1 << 10
+    words[19] = layer.index
+    words[25] = (layer.ref_off + start_output_elem) & 0xFFFF_FFFF
+    words[27] = start_output_elem & 0xFFFF_FFFF
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    return words
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("program", type=Path)
@@ -1703,6 +1766,35 @@ def main() -> int:
             pool_crc_desc = pool_full_ref_crc_descriptor(layer, len(commands) + len(descs))
             if pool_crc_desc is not None:
                 descs.append(pool_crc_desc)
+        if (
+            args.emit_conv_partial_psum and
+            layer.op_kind in OK_CONV and
+            elem_bytes(layer.dtype) == 1 and
+            int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None
+        ):
+            requant_output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            if remaining_commands > 2:
+                max_requant_outputs = min(requant_output_elems, remaining_commands - 2, 512)
+                requant_sram_descs = requant_output_descriptors_for_conv(
+                    layer,
+                    len(commands) + len(descs),
+                    max_output_elems=max_requant_outputs,
+                )
+                generated_requant = requant_final_q_bytes(requant_sram_descs)
+                ref_requant = descriptor_for_layer.program_bytes[
+                    layer.ref_off:layer.ref_off + min(len(generated_requant), layer.ref_size)
+                ]
+                if generated_requant and generated_requant == ref_requant:
+                    descs.extend(requant_sram_descs)
+                    requant_probe_desc = requant_sramcrc_probe_descriptor(
+                        layer,
+                        len(commands) + len(descs),
+                        0,
+                        ref_requant,
+                    )
+                    if requant_probe_desc is not None:
+                        descs.append(requant_probe_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -1725,7 +1817,7 @@ def main() -> int:
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
-            if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 10)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_POOL) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:

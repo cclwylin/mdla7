@@ -72,6 +72,9 @@ module mdla7_top_final #(
     input      [15:0]           conv_sample_kw,
     input      [15:0]           conv_sample_ic,
     input signed [31:0]         requant_input_value,
+    input                       requant_sramcrc_mode,
+    input      [31:0]           requant_sramcrc_expected_count,
+    input      [31:0]           requant_out_byte_offset,
     input                       pool_avg_mode,
     input                       pool_fp_mode,
     input                       pool_int16_mode,
@@ -140,6 +143,8 @@ module mdla7_top_final #(
     output     [127:0]          conv_psum_acc_values,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
+    output     [31:0]           requant_sramcrc_crc,
+    output     [31:0]           requant_sramcrc_count,
     output signed [31:0]        pool_out,
     output signed [7:0]         pool_out_q,
     output     [63:0]           pool_fp_bits,
@@ -225,6 +230,9 @@ module mdla7_top_final #(
     reg [15:0] conv_sample_kw_q;
     reg [15:0] conv_sample_ic_q;
     reg signed [31:0] requant_input_value_q;
+    reg requant_sramcrc_mode_q;
+    reg [31:0] requant_sramcrc_expected_count_q;
+    reg [31:0] requant_out_byte_offset_q;
     reg pool_avg_mode_q;
     reg pool_fp_mode_q;
     reg pool_int16_mode_q;
@@ -522,6 +530,9 @@ module mdla7_top_final #(
         .zp_out(conv_zp_out_q),
         .act_min(conv_act_min_q),
         .act_max(conv_act_max_q),
+        .sramcrc_mode(requant_sramcrc_mode_q),
+        .sramcrc_expected_count(requant_sramcrc_expected_count_q),
+        .out_byte_offset(requant_out_byte_offset_q),
         .l1_req_valid(requant_l1_req_valid),
         .l1_req_ready(requant_l1_req_ready),
         .l1_req_write(requant_l1_req_write),
@@ -532,6 +543,8 @@ module mdla7_top_final #(
         .done_ready(1'b1),
         .phase_id(requant_phase_id),
         .remaining_cycles(requant_remaining_cycles),
+        .sramcrc_crc(requant_sramcrc_crc),
+        .sramcrc_count(requant_sramcrc_count),
         .scaled_out(requant_scaled_out),
         .out_q(requant_out_q)
     );
@@ -805,6 +818,9 @@ module mdla7_top_final #(
             conv_sample_kw_q <= 16'd0;
             conv_sample_ic_q <= 16'd0;
             requant_input_value_q <= 32'sd0;
+            requant_sramcrc_mode_q <= 1'b0;
+            requant_sramcrc_expected_count_q <= 32'd0;
+            requant_out_byte_offset_q <= 32'd0;
             pool_avg_mode_q <= 1'b0;
             pool_fp_mode_q <= 1'b0;
             pool_int16_mode_q <= 1'b0;
@@ -886,6 +902,9 @@ module mdla7_top_final #(
                         conv_sample_kw_q <= conv_sample_kw;
                         conv_sample_ic_q <= conv_sample_ic;
                         requant_input_value_q <= requant_input_value;
+                        requant_sramcrc_mode_q <= requant_sramcrc_mode;
+                        requant_sramcrc_expected_count_q <= requant_sramcrc_expected_count;
+                        requant_out_byte_offset_q <= requant_out_byte_offset;
                         pool_avg_mode_q <= pool_avg_mode;
                         pool_fp_mode_q <= pool_fp_mode;
                         pool_int16_mode_q <= pool_int16_mode;

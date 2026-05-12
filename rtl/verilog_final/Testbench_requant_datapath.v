@@ -37,6 +37,9 @@ module Testbench_requant_datapath;
         .zp_out(zp_out),
         .act_min(act_min),
         .act_max(act_max),
+        .sramcrc_mode(1'b0),
+        .sramcrc_expected_count(32'd0),
+        .out_byte_offset(32'd0),
         .l1_req_valid(l1_req_valid),
         .l1_req_ready(1'b1),
         .l1_req_write(l1_req_write),
@@ -47,6 +50,8 @@ module Testbench_requant_datapath;
         .done_ready(1'b1),
         .phase_id(phase_id),
         .remaining_cycles(remaining_cycles),
+        .sramcrc_crc(),
+        .sramcrc_count(),
         .scaled_out(scaled_out),
         .out_q(out_q)
     );

@@ -150,7 +150,11 @@ Current converter behavior:
   16-bit weight values, computes the expected sample MAC accumulator, and
   `host_final.v` checks the Verilog INT16 sample result.
 - INT8 CONV also emits a REQUANT sample descriptor using the same raw accumulator
-  so `vf_requant_sample_engine` is exercised through `mdla7_top_final`.
+  so `vf_requant_sample_engine` is exercised through `mdla7_top_final`. With
+  `--crc-coverage`, accepted INT8 CONV final accumulators are also replayed
+  through REQUANT descriptors, the REQUANT datapath writes q bytes into its own
+  output SRAM image, and a REQUANT SRAM walker checks CRC/count against the
+  matched golden tensor slice as `sramcrc`.
 - INT8 AVG_POOL/MAX_POOL op kinds `2/3`: emitted as POOL sample descriptors.
   The generator takes up to 16 input bytes from the `.bin`, computes the expected
   max or integer average, and `host_final.v` checks the Verilog pool result.
@@ -245,7 +249,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV/POOL final writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check, bit9 CONV/POOL ref CRC, bit10 CONV/REQUANT/POOL SRAM CRC |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |

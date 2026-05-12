@@ -1126,6 +1126,9 @@ module vf_requant_sample_engine #(
     input signed [31:0]    zp_out,
     input signed [31:0]    act_min,
     input signed [31:0]    act_max,
+    input                  sramcrc_mode,
+    input      [31:0]      sramcrc_expected_count,
+    input      [31:0]      out_byte_offset,
     output                 l1_req_valid,
     input                  l1_req_ready,
     output                 l1_req_write,
@@ -1136,6 +1139,8 @@ module vf_requant_sample_engine #(
     input                  done_ready,
     output reg [3:0]       phase_id,
     output reg [31:0]      remaining_cycles,
+    output reg [31:0]      sramcrc_crc,
+    output reg [31:0]      sramcrc_count,
     output signed [31:0]   scaled_out,
     output signed [7:0]    out_q
 );
@@ -1150,11 +1155,29 @@ module vf_requant_sample_engine #(
     localparam [2:0] ST_PIPE  = 3'd2;
     localparam [2:0] ST_STORE = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
+    localparam [2:0] ST_SRAMCRC = 3'd5;
+    localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
+    localparam [31:0] FNV_PRIME = 32'd16777619;
+    localparam integer MAX_REQUANT_OUTPUT_SRAM_BYTES = 16777216;
 
     reg [2:0] state;
     reg [31:0] pipe_remaining;
     reg signed [31:0] quantized;
     reg signed [31:0] clamped;
+    reg [31:0] sramcrc_remaining;
+    reg [31:0] sramcrc_index;
+    reg [31:0] sramcrc_crc_value;
+    reg [31:0] sramcrc_count_value;
+    reg [7:0] output_sram [0:MAX_REQUANT_OUTPUT_SRAM_BYTES-1];
+    integer sramcrc_i;
+
+    function [31:0] fnv_byte;
+        input [31:0] crc;
+        input [7:0] byte_value;
+        begin
+            fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
 
     function signed [31:0] clamp_i32;
         input signed [63:0] value;
@@ -1250,6 +1273,7 @@ module vf_requant_sample_engine #(
             ST_PARAM: begin phase_id = PH_PARAM_FETCH; remaining_cycles = 32'd2; end
             ST_PIPE: begin phase_id = PH_QUANT_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
+            ST_SRAMCRC: begin phase_id = PH_QUANT_PIPE; remaining_cycles = sramcrc_remaining; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -1259,12 +1283,25 @@ module vf_requant_sample_engine #(
         if (!rst_n) begin
             state <= ST_IDLE;
             pipe_remaining <= 32'd0;
+            sramcrc_remaining <= 32'd0;
+            sramcrc_index <= 32'd0;
+            sramcrc_crc <= FNV_OFFSET;
+            sramcrc_count <= 32'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
-                    if (start_valid && start_ready)
-                        state <= ST_PARAM;
+                    if (start_valid && start_ready) begin
+                        if (sramcrc_mode) begin
+                            sramcrc_crc <= FNV_OFFSET;
+                            sramcrc_count <= 32'd0;
+                            sramcrc_index <= out_byte_offset;
+                            sramcrc_remaining <= sramcrc_expected_count;
+                            state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
+                        end else begin
+                            state <= ST_PARAM;
+                        end
+                    end
                 end
                 ST_PARAM: begin
                     pipe_remaining <= 32'd2;
@@ -1277,8 +1314,37 @@ module vf_requant_sample_engine #(
                         state <= ST_STORE;
                 end
                 ST_STORE: begin
-                    if (l1_req_ready)
+                    if (l1_req_ready) begin
+                        if (out_byte_offset < MAX_REQUANT_OUTPUT_SRAM_BYTES)
+                            output_sram[out_byte_offset] <= out_q;
                         state <= ST_DONE;
+                    end
+                end
+                ST_SRAMCRC: begin
+                    if (sramcrc_remaining != 32'd0) begin
+                        sramcrc_crc_value = sramcrc_crc;
+                        sramcrc_count_value = sramcrc_count;
+                        for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                            if ((sramcrc_i < sramcrc_remaining) &&
+                                ((sramcrc_index + sramcrc_i[31:0]) < MAX_REQUANT_OUTPUT_SRAM_BYTES)) begin
+                                sramcrc_crc_value =
+                                    fnv_byte(sramcrc_crc_value,
+                                             output_sram[sramcrc_index + sramcrc_i[31:0]]);
+                                sramcrc_count_value = sramcrc_count_value + 32'd1;
+                            end
+                        end
+                        sramcrc_crc <= sramcrc_crc_value;
+                        sramcrc_count <= sramcrc_count_value;
+                        if (sramcrc_remaining <= 32'd16) begin
+                            sramcrc_remaining <= 32'd0;
+                            state <= ST_DONE;
+                        end else begin
+                            sramcrc_remaining <= sramcrc_remaining - 32'd16;
+                            sramcrc_index <= sramcrc_index + 32'd16;
+                        end
+                    end else begin
+                        state <= ST_DONE;
+                    end
                 end
                 ST_DONE: begin
                     if (done_ready)

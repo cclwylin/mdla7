@@ -66,6 +66,10 @@ module Testbench_host_program;
     wire [15:0] conv_sample_kw;
     wire [15:0] conv_sample_ic;
     wire signed [31:0] requant_input_value;
+    wire requant_sramcrc_mode;
+    wire [31:0] requant_sramcrc_expected_crc;
+    wire [31:0] requant_sramcrc_expected_count;
+    wire [31:0] requant_out_byte_offset;
     wire pool_avg_mode;
     wire pool_fp_mode;
     wire pool_int16_mode;
@@ -130,6 +134,8 @@ module Testbench_host_program;
     wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
+    wire [31:0] requant_sramcrc_crc;
+    wire [31:0] requant_sramcrc_count;
     wire signed [31:0] pool_out;
     wire signed [7:0] pool_out_q;
     wire [63:0] pool_fp_bits;
@@ -215,6 +221,10 @@ module Testbench_host_program;
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
+        .requant_sramcrc_mode(requant_sramcrc_mode),
+        .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
+        .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
+        .requant_out_byte_offset(requant_out_byte_offset),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
@@ -281,6 +291,8 @@ module Testbench_host_program;
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
+        .requant_sramcrc_crc(requant_sramcrc_crc),
+        .requant_sramcrc_count(requant_sramcrc_count),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
@@ -362,6 +374,9 @@ module Testbench_host_program;
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
+        .requant_sramcrc_mode(requant_sramcrc_mode),
+        .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
+        .requant_out_byte_offset(requant_out_byte_offset),
         .pool_avg_mode(pool_avg_mode),
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
@@ -429,6 +444,8 @@ module Testbench_host_program;
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
+        .requant_sramcrc_crc(requant_sramcrc_crc),
+        .requant_sramcrc_count(requant_sramcrc_count),
         .pool_out(pool_out),
         .pool_out_q(pool_out_q),
         .pool_fp_bits(pool_fp_bits),
