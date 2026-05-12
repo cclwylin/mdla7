@@ -60,6 +60,8 @@ module mdla7_top_final #(
     input      [1:0]            conv_elem_bytes,
     input      [31:0]           conv_out_elem_index,
     input      [7:0]            conv_tile_output_count,
+    input                       conv_partial_first,
+    input                       conv_partial_accumulate,
     input      [15:0]           conv_sample_kh,
     input      [15:0]           conv_sample_kw,
     input      [15:0]           conv_sample_ic,
@@ -109,6 +111,8 @@ module mdla7_top_final #(
     output     [127:0]          conv_tile_result_output_byte_offsets,
     output     [127:0]          conv_tile_result_acc_values,
     output     [127:0]          conv_tile_result_q_values,
+    output     [3:0]            conv_psum_valid_mask,
+    output     [127:0]          conv_psum_acc_values,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
     output signed [31:0]        pool_out,
@@ -182,6 +186,8 @@ module mdla7_top_final #(
     reg [1:0] conv_elem_bytes_q;
     reg [31:0] conv_out_elem_index_q;
     reg [7:0] conv_tile_output_count_q;
+    reg conv_partial_first_q;
+    reg conv_partial_accumulate_q;
     reg [15:0] conv_sample_kh_q;
     reg [15:0] conv_sample_kw_q;
     reg [15:0] conv_sample_ic_q;
@@ -407,6 +413,8 @@ module mdla7_top_final #(
         .conv_elem_bytes(conv_elem_bytes_q),
         .conv_out_elem_index(conv_out_elem_index_q),
         .conv_tile_output_count(conv_tile_output_count_q),
+        .conv_partial_first(conv_partial_first_q),
+        .conv_partial_accumulate(conv_partial_accumulate_q),
         .conv_sample_kh(conv_sample_kh_q),
         .conv_sample_kw(conv_sample_kw_q),
         .conv_sample_ic(conv_sample_ic_q),
@@ -440,7 +448,9 @@ module mdla7_top_final #(
         .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
         .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
         .conv_tile_result_acc_values(conv_tile_result_acc_values),
-        .conv_tile_result_q_values(conv_tile_result_q_values)
+        .conv_tile_result_q_values(conv_tile_result_q_values),
+        .conv_psum_valid_mask(conv_psum_valid_mask),
+        .conv_psum_acc_values(conv_psum_acc_values)
     );
 
     vf_requant_sample_engine u_requant (
@@ -718,6 +728,8 @@ module mdla7_top_final #(
             conv_elem_bytes_q <= 2'd1;
             conv_out_elem_index_q <= 32'd0;
             conv_tile_output_count_q <= 8'd1;
+            conv_partial_first_q <= 1'b0;
+            conv_partial_accumulate_q <= 1'b0;
             conv_sample_kh_q <= 16'd0;
             conv_sample_kw_q <= 16'd0;
             conv_sample_ic_q <= 16'd0;
@@ -786,6 +798,8 @@ module mdla7_top_final #(
                         conv_elem_bytes_q <= conv_elem_bytes;
                         conv_out_elem_index_q <= conv_out_elem_index;
                         conv_tile_output_count_q <= conv_tile_output_count;
+                        conv_partial_first_q <= conv_partial_first;
+                        conv_partial_accumulate_q <= conv_partial_accumulate;
                         conv_sample_kh_q <= conv_sample_kh;
                         conv_sample_kw_q <= conv_sample_kw;
                         conv_sample_ic_q <= conv_sample_ic;

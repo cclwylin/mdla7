@@ -336,6 +336,8 @@ module vf_conv_sample_engine #(
     input      [1:0]              conv_elem_bytes,
     input      [31:0]             conv_out_elem_index,
     input      [7:0]              conv_tile_output_count,
+    input                         conv_partial_first,
+    input                         conv_partial_accumulate,
     input      [15:0]             conv_sample_kh,
     input      [15:0]             conv_sample_kw,
     input      [15:0]             conv_sample_ic,
@@ -369,7 +371,9 @@ module vf_conv_sample_engine #(
     output reg [127:0]            conv_tile_result_out_elem_indices,
     output reg [127:0]            conv_tile_result_output_byte_offsets,
     output reg [127:0]            conv_tile_result_acc_values,
-    output reg [127:0]            conv_tile_result_q_values
+    output reg [127:0]            conv_tile_result_q_values,
+    output reg [3:0]              conv_psum_valid_mask,
+    output reg [127:0]            conv_psum_acc_values
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -397,6 +401,7 @@ module vf_conv_sample_engine #(
     reg signed [63:0] i16_acc64;
     reg signed [31:0] i16_acc;
     integer tile_i;
+    integer psum_i;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -724,6 +729,8 @@ module vf_conv_sample_engine #(
         if (!rst_n) begin
             state <= ST_IDLE;
             compute_remaining <= 32'd0;
+            conv_psum_valid_mask <= 4'd0;
+            conv_psum_acc_values <= 128'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -748,8 +755,29 @@ module vf_conv_sample_engine #(
                         state <= ST_STORE;
                 end
                 ST_STORE: begin
-                    if (l1_req_ready)
+                    if (l1_req_ready) begin
+                        if (conv_partial_first) begin
+                            conv_psum_valid_mask <= 4'd0;
+                            conv_psum_acc_values <= 128'd0;
+                            for (psum_i = 0; psum_i < 4; psum_i = psum_i + 1) begin
+                                if (psum_i < scoreboard_tile_output_count) begin
+                                    conv_psum_valid_mask[psum_i] <= 1'b1;
+                                    conv_psum_acc_values[psum_i*32 +: 32] <= acc_out;
+                                end
+                            end
+                        end else if (conv_partial_accumulate) begin
+                            for (psum_i = 0; psum_i < 4; psum_i = psum_i + 1) begin
+                                if (psum_i < scoreboard_tile_output_count) begin
+                                    conv_psum_valid_mask[psum_i] <= 1'b1;
+                                    conv_psum_acc_values[psum_i*32 +: 32] <=
+                                        conv_psum_valid_mask[psum_i] ?
+                                        ($signed(conv_psum_acc_values[psum_i*32 +: 32]) + acc_out) :
+                                        acc_out;
+                                end
+                            end
+                        end
                         state <= ST_DONE;
+                    end
                 end
                 ST_DONE: begin
                     if (done_ready)

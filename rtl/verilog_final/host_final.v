@@ -57,6 +57,8 @@ module host_final #(
     output reg [1:0]   conv_elem_bytes,
     output reg [31:0]  conv_out_elem_index,
     output reg [7:0]   conv_tile_output_count,
+    output reg         conv_partial_first,
+    output reg         conv_partial_accumulate,
     output reg [15:0]  conv_sample_kh,
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
@@ -104,6 +106,8 @@ module host_final #(
     input      [127:0] conv_tile_result_output_byte_offsets,
     input      [127:0] conv_tile_result_acc_values,
     input      [127:0] conv_tile_result_q_values,
+    input      [3:0]   conv_psum_valid_mask,
+    input      [127:0] conv_psum_acc_values,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -163,6 +167,8 @@ module host_final #(
     wire [31:0] expected_conv_tile_q_value =
         {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
     wire [31:0] expected_conv_tile_acc_value = conv_acc_out;
+    wire [31:0] expected_conv_psum_acc_value =
+        cmd_mem[base + 3][5] ? (conv_acc_out + conv_acc_out) : conv_acc_out;
 
     assign top_done_ready = 1'b1;
 
@@ -216,6 +222,8 @@ module host_final #(
             conv_elem_bytes <= (cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1;
             conv_out_elem_index <= 32'd0;
             conv_tile_output_count <= (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0];
+            conv_partial_first <= cmd_mem[base + 3][4];
+            conv_partial_accumulate <= cmd_mem[base + 3][5];
             conv_sample_kh <= {8'd0, cmd_mem[base + 23][23:16]};
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
@@ -244,11 +252,11 @@ module host_final #(
         for (load_i = 0; load_i < MAX_COMMANDS * WORDS_PER_COMMAND; load_i = load_i + 1)
             cmd_mem[load_i] = 32'd0;
 
-        // Command 0: CONV sample MAC.
+        // Command 0: CONV sample MAC, first partial-K tile.
         cmd_mem[0] = {28'd0, OP_CONV};
         cmd_mem[1] = 32'd16;
         cmd_mem[2] = 32'h0000_02a0;
-        cmd_mem[3] = 32'd12;
+        cmd_mem[3] = 32'd28;
         cmd_mem[4] = 32'h0102_0304;
         cmd_mem[5] = 32'hfc07_0000;
         cmd_mem[8] = 32'h0201_ff03;
@@ -273,64 +281,93 @@ module host_final #(
         cmd_mem[30] = 32'd6;
         cmd_mem[31] = (32'd1 << 16) | (32'd4 << 8) | 32'd3;
 
-        // Command 1: REQUANT sample using the CONV raw accumulator.
-        cmd_mem[32] = {28'd0, OP_REQUANT};
-        cmd_mem[33] = 32'd1;
-        cmd_mem[34] = 32'h0000_02b0;
-        cmd_mem[36] = 32'd18;
+        // Command 1: CONV sample MAC, accumulate a second partial-K tile.
+        cmd_mem[32] = {28'd0, OP_CONV};
+        cmd_mem[33] = 32'd16;
+        cmd_mem[34] = 32'h0000_02a0;
+        cmd_mem[35] = 32'd44;
+        cmd_mem[36] = 32'h0102_0304;
+        cmd_mem[37] = 32'hfc07_0000;
+        cmd_mem[40] = 32'h0201_ff03;
+        cmd_mem[41] = 32'h0506_0000;
+        cmd_mem[44] = 32'd6;
+        cmd_mem[45] = 32'd5;
         cmd_mem[46] = 32'sd1073741824;
         cmd_mem[47] = 32'd1;
         cmd_mem[48] = -32'sd128;
         cmd_mem[49] = 32'sd127;
         cmd_mem[50] = 32'd18;
+        cmd_mem[52] = 32'h0006_0001;
+        cmd_mem[53] = 32'h0001_0001;
+        cmd_mem[54] = 32'h0101_0601;
+        cmd_mem[55] = 32'h0500_0101;
+        cmd_mem[56] = 32'h0003_0000;
+        cmd_mem[57] = 32'd5;
+        cmd_mem[58] = 32'd5;
+        cmd_mem[59] = 32'd0;
+        cmd_mem[60] = 32'd0;
+        cmd_mem[61] = 32'd0;
+        cmd_mem[62] = 32'd6;
+        cmd_mem[63] = (32'd1 << 16) | (32'd4 << 8) | 32'd3;
 
-        // Command 2: POOL sample max over 7 INT8 elements.
-        cmd_mem[64] = {28'd0, OP_POOL};
-        cmd_mem[65] = 32'd7;
-        cmd_mem[66] = 32'h0000_02c0;
-        cmd_mem[68] = 32'h0102_0304;
-        cmd_mem[69] = 32'hfc07_0000;
-        cmd_mem[76] = 32'd7;
-        cmd_mem[82] = 32'd7;
+        // Command 2: REQUANT sample using the CONV raw accumulator.
+        cmd_mem[64] = {28'd0, OP_REQUANT};
+        cmd_mem[65] = 32'd1;
+        cmd_mem[66] = 32'h0000_02b0;
+        cmd_mem[68] = 32'd18;
+        cmd_mem[78] = 32'sd1073741824;
+        cmd_mem[79] = 32'd1;
+        cmd_mem[80] = -32'sd128;
+        cmd_mem[81] = 32'sd127;
+        cmd_mem[82] = 32'd18;
 
-        // Command 3: EWE sample add over 4 INT8 elements.
-        cmd_mem[96] = {28'd0, OP_EWE};
-        cmd_mem[97] = 32'd4;
-        cmd_mem[98] = 32'h0000_02d0;
+        // Command 3: POOL sample max over 7 INT8 elements.
+        cmd_mem[96] = {28'd0, OP_POOL};
+        cmd_mem[97] = 32'd7;
+        cmd_mem[98] = 32'h0000_02c0;
         cmd_mem[100] = 32'h0102_0304;
-        cmd_mem[104] = 32'h0201_ff03;
-        cmd_mem[108] = 32'd4;
-        cmd_mem[114] = 32'd15;
+        cmd_mem[101] = 32'hfc07_0000;
+        cmd_mem[108] = 32'd7;
+        cmd_mem[114] = 32'd7;
 
-        // Command 4: UDMA read path.
-        cmd_mem[128] = {28'd0, OP_UDMA};
-        cmd_mem[129] = 32'd256;
-        cmd_mem[130] = 32'h0000_02a0;
-        cmd_mem[131] = 32'd0;
-        cmd_mem[132] = 32'd512;
-        cmd_mem[133] = 32'd3;
+        // Command 4: EWE sample add over 4 INT8 elements.
+        cmd_mem[128] = {28'd0, OP_EWE};
+        cmd_mem[129] = 32'd4;
+        cmd_mem[130] = 32'h0000_02d0;
+        cmd_mem[132] = 32'h0102_0304;
+        cmd_mem[136] = 32'h0201_ff03;
+        cmd_mem[140] = 32'd4;
+        cmd_mem[146] = 32'd15;
 
-        // Command 5: TNPS space-to-depth over a 4x4x1 tensor, block=2.
-        cmd_mem[160] = {28'd0, OP_TNPS};
-        cmd_mem[161] = 32'd128;
-        cmd_mem[162] = 32'h0000_03f0;
-        cmd_mem[163] = 32'd2;
-        cmd_mem[166] = 32'd4;
-        cmd_mem[167] = 32'd4;
-        cmd_mem[168] = 32'd1;
-        cmd_mem[169] = 32'd2;
-        cmd_mem[170] = 32'd2;
-        cmd_mem[171] = 32'd4;
-        cmd_mem[172] = 32'd2;
-        cmd_mem[173] = 32'd1;
-        cmd_mem[174] = 32'd2;
-        cmd_mem[175] = 32'd0;
-        cmd_mem[176] = 32'd4;
-        cmd_mem[177] = 32'd2;
-        cmd_mem[178] = 32'd1;
+        // Command 5: UDMA read path.
+        cmd_mem[160] = {28'd0, OP_UDMA};
+        cmd_mem[161] = 32'd256;
+        cmd_mem[162] = 32'h0000_02a0;
+        cmd_mem[163] = 32'd0;
+        cmd_mem[164] = 32'd512;
+        cmd_mem[165] = 32'd3;
 
-        // Command 6: stop.
-        cmd_mem[192] = {28'd0, OP_DONE};
+        // Command 6: TNPS space-to-depth over a 4x4x1 tensor, block=2.
+        cmd_mem[192] = {28'd0, OP_TNPS};
+        cmd_mem[193] = 32'd128;
+        cmd_mem[194] = 32'h0000_03f0;
+        cmd_mem[195] = 32'd2;
+        cmd_mem[198] = 32'd4;
+        cmd_mem[199] = 32'd4;
+        cmd_mem[200] = 32'd1;
+        cmd_mem[201] = 32'd2;
+        cmd_mem[202] = 32'd2;
+        cmd_mem[203] = 32'd4;
+        cmd_mem[204] = 32'd2;
+        cmd_mem[205] = 32'd1;
+        cmd_mem[206] = 32'd2;
+        cmd_mem[207] = 32'd0;
+        cmd_mem[208] = 32'd4;
+        cmd_mem[209] = 32'd2;
+        cmd_mem[210] = 32'd1;
+
+        // Command 7: stop.
+        cmd_mem[224] = {28'd0, OP_DONE};
 
         program_path = "";
         if ($value$plusargs("FINAL_PROGRAM=%s", program_path))
@@ -391,6 +428,8 @@ module host_final #(
             conv_elem_bytes <= 2'd1;
             conv_out_elem_index <= 32'd0;
             conv_tile_output_count <= 8'd1;
+            conv_partial_first <= 1'b0;
+            conv_partial_accumulate <= 1'b0;
             conv_sample_kh <= 16'd0;
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;
@@ -525,6 +564,24 @@ module host_final #(
                                      $signed(conv_tile_result_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]),
                                      $signed(expected_conv_tile_q_value),
                                      expected_conv_tile_count);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            cmd_mem[base + 3][2] &&
+                            (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) &&
+                            ((conv_psum_valid_mask !== expected_conv_tile_valid_mask) ||
+                             (conv_psum_acc_values[31:0] !== expected_conv_psum_acc_value) ||
+                             (conv_psum_acc_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_psum_acc_value))) begin
+                            $display("HOST_FINAL_FAIL: CONV psum cmd=%0d mask=%04b expected=%04b psum0=%0d psum_last=%0d expected=%0d first=%0d accum=%0d",
+                                     command_index,
+                                     conv_psum_valid_mask,
+                                     expected_conv_tile_valid_mask,
+                                     $signed(conv_psum_acc_values[31:0]),
+                                     $signed(conv_psum_acc_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]),
+                                     $signed(expected_conv_psum_acc_value),
+                                     cmd_mem[base + 3][4],
+                                     cmd_mem[base + 3][5]);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

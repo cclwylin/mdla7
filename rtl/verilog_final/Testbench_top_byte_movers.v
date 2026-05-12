@@ -60,6 +60,8 @@ module Testbench_top_byte_movers;
     reg [1:0] conv_elem_bytes;
     reg [31:0] conv_out_elem_index;
     reg [7:0] conv_tile_output_count;
+    reg conv_partial_first;
+    reg conv_partial_accumulate;
     reg [15:0] conv_sample_kh;
     reg [15:0] conv_sample_kw;
     reg [15:0] conv_sample_ic;
@@ -104,6 +106,8 @@ module Testbench_top_byte_movers;
     wire [127:0] conv_tile_result_output_byte_offsets;
     wire [127:0] conv_tile_result_acc_values;
     wire [127:0] conv_tile_result_q_values;
+    wire [3:0] conv_psum_valid_mask;
+    wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -173,6 +177,8 @@ module Testbench_top_byte_movers;
         .conv_elem_bytes(conv_elem_bytes),
         .conv_out_elem_index(conv_out_elem_index),
         .conv_tile_output_count(conv_tile_output_count),
+        .conv_partial_first(conv_partial_first),
+        .conv_partial_accumulate(conv_partial_accumulate),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
@@ -221,6 +227,8 @@ module Testbench_top_byte_movers;
         .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
         .conv_tile_result_acc_values(conv_tile_result_acc_values),
         .conv_tile_result_q_values(conv_tile_result_q_values),
+        .conv_psum_valid_mask(conv_psum_valid_mask),
+        .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -314,6 +322,8 @@ module Testbench_top_byte_movers;
         conv_elem_bytes = 2'd1;
         conv_out_elem_index = 32'd0;
         conv_tile_output_count = 8'd1;
+        conv_partial_first = 1'b0;
+        conv_partial_accumulate = 1'b0;
         conv_sample_kh = 16'd0;
         conv_sample_kw = 16'd0;
         conv_sample_ic = 16'd0;
@@ -376,6 +386,8 @@ module Testbench_top_byte_movers;
         conv_elem_bytes = 2'd1;
         conv_out_elem_index = 32'd0;
         conv_tile_output_count = 8'd3;
+        conv_partial_first = 1'b1;
+        conv_partial_accumulate = 1'b0;
         conv_sample_kh = 16'd0;
         conv_sample_kw = 16'd5;
         conv_sample_ic = 16'd0;
@@ -422,6 +434,30 @@ module Testbench_top_byte_movers;
                      $signed(conv_tile_result_q_values[95:64]));
             failures = failures + 1;
         end
+        if ((conv_psum_valid_mask != 4'b0111) ||
+            ($signed(conv_psum_acc_values[31:0]) != 32'sd40) ||
+            ($signed(conv_psum_acc_values[95:64]) != 32'sd40)) begin
+            $display("FAIL: CONV psum first mask=%04b psum0=%0d psum2=%0d",
+                     conv_psum_valid_mask,
+                     $signed(conv_psum_acc_values[31:0]),
+                     $signed(conv_psum_acc_values[95:64]));
+            failures = failures + 1;
+        end
+
+        conv_partial_first = 1'b0;
+        conv_partial_accumulate = 1'b1;
+        issue_desc(OP_CONV);
+        wait_done("conv_psum_accumulate");
+        if ((conv_psum_valid_mask != 4'b0111) ||
+            ($signed(conv_psum_acc_values[31:0]) != 32'sd80) ||
+            ($signed(conv_psum_acc_values[95:64]) != 32'sd80)) begin
+            $display("FAIL: CONV psum accumulate mask=%04b psum0=%0d psum2=%0d",
+                     conv_psum_valid_mask,
+                     $signed(conv_psum_acc_values[31:0]),
+                     $signed(conv_psum_acc_values[95:64]));
+            failures = failures + 1;
+        end
+        conv_partial_accumulate = 1'b0;
 
         bytes = 32'd4;
         l1mesh_addr = 22'h0002a8;

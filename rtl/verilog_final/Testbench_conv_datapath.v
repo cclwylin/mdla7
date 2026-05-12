@@ -152,6 +152,8 @@ module Testbench_conv_datapath;
         .conv_elem_bytes(elem_bytes),
         .conv_out_elem_index(out_elem_index),
         .conv_tile_output_count(tile_output_count),
+        .conv_partial_first(1'b0),
+        .conv_partial_accumulate(1'b0),
         .conv_sample_kh(sample_kh),
         .conv_sample_kw(sample_kw),
         .conv_sample_ic(sample_ic),
@@ -185,7 +187,9 @@ module Testbench_conv_datapath;
         .conv_tile_result_out_elem_indices(engine_tile_result_out_elem_indices),
         .conv_tile_result_output_byte_offsets(engine_tile_result_output_byte_offsets),
         .conv_tile_result_acc_values(engine_tile_result_acc_values),
-        .conv_tile_result_q_values(engine_tile_result_q_values)
+        .conv_tile_result_q_values(engine_tile_result_q_values),
+        .conv_psum_valid_mask(),
+        .conv_psum_acc_values()
     );
 
     task clear_vecs;

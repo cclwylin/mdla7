@@ -140,6 +140,9 @@ Conv datapath status:
 - `vf_conv_sample_engine` connects that primitive to `mdla7_top_final`, issues
   activation/weight/output L1Mesh tokens, and is now reachable from generated
   `.bin` descriptors.
+- INT8 CONV carries a 4-entry psum skeleton for partial-K bring-up: descriptor
+  word 3 bit 4 seeds the psum entries, and bit 5 accumulates another tile into
+  the same entries.
 - The same sample engine also has an FP16 input / real-valued MAC path for float
   CONV descriptors. This is a simulator bring-up primitive, not yet a
   synthesizable IEEE754 pipeline.
@@ -187,7 +190,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
