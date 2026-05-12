@@ -74,6 +74,10 @@ UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 32
+MAX_FINAL_OUTPUT_SRAM_BYTES = 16 * 1024 * 1024
+PROBE_DESCRIPTOR_FLAG = 1 << 15
+READ_FROM_L1_FLAG = 1 << 11
+MICROBLOCK_FLAG = 1 << 13
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
@@ -703,20 +707,31 @@ def tnps_output_source_byte_offset(layer: Layer, out_byte_index: int) -> int | N
     return None
 
 
-def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int) -> list[int] | None:
+def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int, byte_count: int = 1) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
-    src_byte = tnps_output_source_byte_offset(layer, out_byte_index)
-    if src_byte is None or layer.in_off + src_byte >= len(data):
+    byte_count = max(min(byte_count, 16 - (out_byte_index & 0xF), layer.ref_size - out_byte_index), 1)
+    payload = bytearray()
+    first_src_byte: int | None = None
+    for lane in range(byte_count):
+        src_byte = tnps_output_source_byte_offset(layer, out_byte_index + lane)
+        if src_byte is None or layer.in_off + src_byte >= len(data):
+            return None
+        if first_src_byte is None:
+            first_src_byte = src_byte
+        payload.append(data[layer.in_off + src_byte])
+    if first_src_byte is None:
         return None
     elem = elem_bytes(layer.dtype)
     block = layer.k_h or layer.k_w or 1
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x28) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_TNPS
-    words[1] = 1
+    words[1] = len(payload)
     words[2] = addr
     words[3] = (1 << 6) | (0x2 if layer.op_kind == OK_S2SPACE else 0x0)
-    words[4] = data[layer.in_off + src_byte]
+    padded = bytes(payload).ljust(16, b"\x00")
+    for idx in range(4):
+        words[4 + idx] = pack_word(padded[idx * 4:(idx + 1) * 4])
     words[6] = layer.in_h
     words[7] = layer.in_w
     words[8] = layer.in_c
@@ -725,7 +740,7 @@ def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int) -> l
     words[11] = layer.out_c
     words[12] = block
     words[13] = elem
-    words[16] = src_byte & 0xFFFF_FFFF
+    words[16] = first_src_byte & 0xFFFF_FFFF
     words[17] = out_byte_index & 0xFFFF_FFFF
     words[18] = 1
     words[19] = layer.index
@@ -736,16 +751,68 @@ def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int) -> l
 def tnps_output_descriptors(layer: Layer, ordinal: int, max_output_bytes: int) -> list[list[int]]:
     emit_bytes = min(max_output_bytes, layer.ref_size)
     descs: list[list[int]] = []
-    for out_byte_index in range(emit_bytes):
-        desc = tnps_output_descriptor(layer, ordinal + len(descs), out_byte_index)
+    out_byte_index = 0
+    while out_byte_index < emit_bytes:
+        chunk_bytes = min(16 - (out_byte_index & 0xF), emit_bytes - out_byte_index)
+        desc = tnps_output_descriptor(layer, ordinal + len(descs), out_byte_index, chunk_bytes)
         if desc is None:
             break
         descs.append(desc)
+        out_byte_index += desc[1]
     return descs
 
 
 def tnps_final_bytes(final_descs: list[list[int]]) -> bytes:
-    return bytes(desc[4] & 0xFF for desc in final_descs)
+    out = bytearray()
+    for desc in final_descs:
+        byte_count = max(min(desc[1], 16), 0)
+        for lane in range(byte_count):
+            word = desc[4 + lane // 4]
+            out.append((word >> ((lane % 4) * 8)) & 0xFF)
+    return bytes(out)
+
+
+def closed_loop_tnps_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    desc = tnps_output_descriptor(layer, ordinal, 0, 1)
+    if desc is None:
+        return []
+    expected = tnps_final_bytes([desc])
+    if not expected:
+        return []
+    src_byte = desc[16]
+    l1_base = 0x30000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off + src_byte,
+            l1_base + src_byte,
+            1,
+            SMF_LOAD_A,
+        )
+    ]
+    desc[2] = l1_base
+    desc[3] |= MICROBLOCK_FLAG
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            expected,
+        )
+    )
+    return descs
 
 
 def tnps_sramcrc_probe_descriptor(layer: Layer, ordinal: int, ref_bytes: bytes) -> list[int] | None:
@@ -844,12 +911,107 @@ def l1mesh_crc_probe_descriptor(ordinal: int, start_addr: int, ref_bytes: bytes)
     return words
 
 
+def udma_dram_to_l1_descriptor(
+    layer: Layer,
+    ordinal: int,
+    dram_off: int,
+    l1_addr: int,
+    byte_count: int,
+    stream_flags: int = SMF_LOAD_A,
+) -> list[int]:
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = max(byte_count, 1)
+    words[2] = l1_addr & 0x003F_FFFF
+    words[3] = MICROBLOCK_FLAG
+    words[4] = max(byte_count, 1)
+    words[5] = 1
+    words[19] = layer.index
+    words[25] = dram_off & 0xFFFF_FFFF
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
+    return mark_probe_descriptor(words)
+
+
+def udma_l1_to_dram_descriptor(
+    layer: Layer,
+    ordinal: int,
+    l1_addr: int,
+    dram_off: int,
+    byte_count: int,
+    stream_flags: int = SMF_STORE,
+) -> list[int]:
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = max(byte_count, 1)
+    words[2] = l1_addr & 0x003F_FFFF
+    words[3] = (1 << 0) | (1 << 6) | MICROBLOCK_FLAG
+    words[4] = max(byte_count, 1)
+    words[5] = 1
+    words[19] = layer.index
+    words[25] = dram_off & 0xFFFF_FFFF
+    words[27] = 0
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
+    return mark_probe_descriptor(words)
+
+
+def closed_loop_result_check_descriptors(
+    layer: Layer,
+    ordinal: int,
+    l1_result_addr: int,
+    dram_result_off: int,
+    ref_bytes: bytes,
+) -> list[list[int]]:
+    if not ref_bytes:
+        return []
+    descs: list[list[int]] = []
+    descs.append(
+        udma_l1_to_dram_descriptor(
+            layer,
+            ordinal + len(descs),
+            l1_result_addr,
+            dram_result_off,
+            len(ref_bytes),
+            SMF_STORE,
+        )
+    )
+    descs.append(
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal + len(descs),
+            dram_result_off,
+            l1_result_addr + 0x1000,
+            len(ref_bytes),
+            SMF_LOAD_A,
+        )
+    )
+    l1_probe_desc = l1mesh_crc_probe_descriptor(
+        ordinal + len(descs),
+        l1_result_addr + 0x1000,
+        ref_bytes,
+    )
+    if l1_probe_desc is not None:
+        stamp_synth_microblock_metadata(
+            l1_probe_desc,
+            layer.index,
+            ordinal + len(descs),
+            ordinal + len(descs),
+            SMF_FINAL_TILE,
+        )
+        descs.append(mark_probe_descriptor(l1_probe_desc))
+    return descs
+
+
 def is_sram_crc_descriptor(desc: list[int]) -> bool:
     op = desc[0] & 0xF
     return (
         (op == OP_L1CRC and bool(desc[3] & (1 << 10))) or
         (op in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and bool(desc[3] & (1 << 10)))
     )
+
+
+def mark_probe_descriptor(desc: list[int]) -> list[int]:
+    desc[3] |= PROBE_DESCRIPTOR_FLAG
+    return desc
 
 
 def microblock_meta_flags(desc: list[int]) -> int:
@@ -1681,6 +1843,92 @@ def conv_partial_psum_descriptors(
     return descs
 
 
+def descriptor_payload_bytes(desc: list[int], first_word: int, byte_count: int) -> bytes:
+    payload = bytearray()
+    for idx in range(byte_count):
+        word = desc[first_word + idx // 4]
+        payload.append((word >> ((idx % 4) * 8)) & 0xFF)
+    return bytes(payload)
+
+
+def closed_loop_conv_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if layer.op_kind not in OK_CONV or elem_bytes(layer.dtype) != 1:
+        return []
+    data = descriptor_for_layer.program_bytes
+    params = int8_conv_params(layer, data)
+    if params is not None:
+        final_bias = params.bias[0] + int8_conv_corr(params, layer, 0, 0, 0)
+        sample = int8_conv_real_descriptor(
+            layer,
+            params,
+            ordinal,
+            start_lane=0,
+            max_count=8,
+            out_elem_index=0,
+            psum_flag=0,
+            final_bias=final_bias,
+        )
+    else:
+        sample = int8_conv_sample_descriptor(layer, ordinal, max_count=8)
+    if sample is None:
+        return []
+    desc, _ = sample
+    elem_count = desc[12] & 0xFF
+    if elem_count == 0:
+        return []
+    if ((desc[3] & (1 << 3)) == 0) or ((desc[30] & 0xFF) != elem_count):
+        return []
+    act_src = desc[28]
+    wgt_src = desc[29]
+    act_expected = descriptor_payload_bytes(desc, 4, elem_count)
+    wgt_expected = descriptor_payload_bytes(desc, 8, elem_count)
+    if data[layer.in_off + act_src:layer.in_off + act_src + elem_count] != act_expected:
+        return []
+    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + elem_count] != wgt_expected:
+        return []
+    l1_base = 0x40000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off + act_src,
+            l1_base,
+            elem_count,
+            SMF_LOAD_A,
+        ),
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal + 1,
+            layer.wgt_off + wgt_src,
+            l1_base + elem_count,
+            elem_count,
+            SMF_LOAD_B,
+        ),
+    ]
+    desc[2] = l1_base
+    desc[3] |= READ_FROM_L1_FLAG | MICROBLOCK_FLAG | (1 << 6)
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            bytes([desc[18] & 0xFF]),
+        )
+    )
+    return descs
+
+
 def conv_shadow_readback_descriptor(
     layer: Layer,
     ordinal: int,
@@ -1879,6 +2127,82 @@ def pool_final_q_bytes(final_descs: list[list[int]]) -> bytes:
     )
 
 
+def int8_pool_source_offsets(layer: Layer, out_elem_index: int) -> list[int] | None:
+    if layer.op_kind not in OK_POOL or elem_bytes(layer.dtype) != 1:
+        return None
+    if (
+        layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+        layer.out_h <= 0 or layer.out_w <= 0 or layer.out_c <= 0
+    ):
+        return None
+    output_elems = layer.out_h * layer.out_w * layer.out_c
+    if out_elem_index < 0 or out_elem_index >= output_elems:
+        return None
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+    oc = out_elem_index % max(layer.out_c, 1)
+    offsets: list[int] = []
+    for kh in range(max(layer.k_h, 1)):
+        for kw in range(max(layer.k_w, 1)):
+            ih = oh * (layer.s_h or 1) + kh - layer.p_t
+            iw = ow * (layer.s_w or 1) + kw - layer.p_l
+            if 0 <= ih < layer.in_h and 0 <= iw < layer.in_w:
+                input_elem = ((ih * layer.in_w + iw) * layer.in_c) + oc
+                if 0 <= input_elem < layer.in_size:
+                    offsets.append(input_elem)
+    return offsets if offsets else None
+
+
+def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    sample = int8_pool_output_sample(layer, 0)
+    offsets = int8_pool_source_offsets(layer, 0)
+    if sample is None or offsets is None:
+        return []
+    _, elem_count, expected_q = sample
+    if elem_count <= 0 or elem_count > 16 or len(offsets) < elem_count:
+        return []
+    source_offsets = offsets[:elem_count]
+    if source_offsets != list(range(source_offsets[0], source_offsets[0] + elem_count)):
+        return []
+    l1_base = 0x10000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off + source_offsets[0],
+            l1_base,
+            elem_count,
+            SMF_LOAD_A,
+        )
+    ]
+    desc = pool_int8_output_descriptor(layer, ordinal + len(descs), 0, read_sample_from_l1=True)
+    if desc is None:
+        return []
+    desc[2] = l1_base
+    desc[3] |= MICROBLOCK_FLAG
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            bytes([expected_q]),
+        )
+    )
+    return descs
+
+
 def pool_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
     if not ref_bytes:
         return None
@@ -2008,6 +2332,41 @@ def ewe_final_q_bytes(final_descs: list[list[int]]) -> bytes:
     )
 
 
+def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    expected = int8_ewe_output_value(layer, 0)
+    if expected is None:
+        return []
+    l1_base = 0x20000 + ((layer.index * 0x100) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(layer, ordinal, layer.in_off, l1_base, 1, SMF_LOAD_A)
+    ]
+    desc = int8_ewe_output_descriptor(layer, ordinal + len(descs), 0, read_a_from_l1=True)
+    if desc is None:
+        return []
+    desc[2] = l1_base
+    desc[3] |= MICROBLOCK_FLAG
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            bytes([expected]),
+        )
+    )
+    return descs
+
+
 def ewe_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
     if not ref_bytes:
         return None
@@ -2093,19 +2452,20 @@ def udma_ref_fill_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
+    fill_size = min(layer.ref_size, MAX_FINAL_OUTPUT_SRAM_BYTES)
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
-    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[1] = fill_size & 0xFFFF_FFFF
     words[2] = addr
     words[3] = (1 << 0) | (1 << 6) | (1 << 13) | (1 << 14)
-    words[4] = layer.ref_size & 0xFFFF_FFFF
-    words[5] = 1 + (layer.ref_size // 4096)
+    words[4] = fill_size & 0xFFFF_FFFF
+    words[5] = 1 + (fill_size // 4096)
     words[19] = layer.index
     words[25] = layer.ref_off & 0xFFFF_FFFF
     words[27] = 0
     stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
-    return words
+    return mark_probe_descriptor(words)
 
 
 def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]:
@@ -2136,7 +2496,7 @@ def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]
             ordinal + lane,
             SMF_LOAD_A,
         )
-        descs.append(words)
+        descs.append(mark_probe_descriptor(words))
 
     store = [0] * WORDS_PER_COMMAND
     store[0] = OP_UDMA
@@ -2154,7 +2514,7 @@ def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]
         ordinal + len(descs),
         SMF_STORE,
     )
-    descs.append(store)
+    descs.append(mark_probe_descriptor(store))
 
     crc = [0] * WORDS_PER_COMMAND
     crc[0] = OP_UDMA
@@ -2174,7 +2534,7 @@ def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]
         ordinal + len(descs),
         SMF_STORE,
     )
-    descs.append(crc)
+    descs.append(mark_probe_descriptor(crc))
 
     return descs
 
@@ -2206,7 +2566,7 @@ def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[in
             ordinal + lane,
             SMF_LOAD_A,
         )
-        descs.append(words)
+        descs.append(mark_probe_descriptor(words))
 
     requant = [0] * WORDS_PER_COMMAND
     requant[0] = OP_REQUANT
@@ -2228,7 +2588,7 @@ def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[in
         ordinal + len(descs),
         SMF_COMPUTE,
     )
-    descs.append(requant)
+    descs.append(mark_probe_descriptor(requant))
 
     l1crc = [0] * WORDS_PER_COMMAND
     l1crc[0] = OP_L1CRC
@@ -2245,7 +2605,45 @@ def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[in
         ordinal + len(descs),
         SMF_STORE,
     )
-    descs.append(l1crc)
+    descs.append(mark_probe_descriptor(l1crc))
+
+    store = [0] * WORDS_PER_COMMAND
+    store[0] = OP_UDMA
+    store[1] = len(expected)
+    store[2] = l1_base & 0x003F_FFFF
+    store[3] = (1 << 0) | (1 << 6) | (1 << 13)
+    store[4] = len(expected)
+    store[5] = 1
+    store[19] = layer.index
+    store[27] = out_byte_offset
+    stamp_synth_microblock_metadata(
+        store,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_STORE,
+    )
+    descs.append(mark_probe_descriptor(store))
+
+    crc = [0] * WORDS_PER_COMMAND
+    crc[0] = OP_UDMA
+    crc[1] = len(expected)
+    crc[2] = l1_base & 0x003F_FFFF
+    crc[3] = (1 << 10) | (1 << 13)
+    crc[4] = len(expected)
+    crc[5] = 1
+    crc[19] = layer.index
+    crc[27] = out_byte_offset
+    crc[28] = fnv_bytes(expected)
+    crc[29] = len(expected)
+    stamp_synth_microblock_metadata(
+        crc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_STORE,
+    )
+    descs.append(mark_probe_descriptor(crc))
 
     return descs
 
@@ -2254,14 +2652,15 @@ def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | N
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
-    ref_bytes = data[layer.ref_off:layer.ref_off + layer.ref_size]
+    crc_size = min(layer.ref_size, MAX_FINAL_OUTPUT_SRAM_BYTES)
+    ref_bytes = data[layer.ref_off:layer.ref_off + crc_size]
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x3c) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
-    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[1] = crc_size & 0xFFFF_FFFF
     words[2] = addr
     words[3] = (1 << 10) | (1 << 12) | (1 << 13)
-    words[4] = layer.ref_size & 0xFFFF_FFFF
+    words[4] = crc_size & 0xFFFF_FFFF
     words[5] = 1
     words[19] = layer.index
     words[25] = layer.ref_off & 0xFFFF_FFFF
@@ -2269,7 +2668,7 @@ def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | N
     words[28] = fnv_bytes(ref_bytes)
     words[29] = len(ref_bytes)
     stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
-    return words
+    return mark_probe_descriptor(words)
 
 
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
@@ -2427,9 +2826,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     ap.add_argument(
+        "--full-tensor",
+        action="store_true",
+        help=(
+            "Prefer full output tensor traversal when it fits in --max-commands; "
+            "oversized tensors still fall back to bounded partial windows."
+        ),
+    )
+    ap.add_argument(
         "--microblock-descriptors",
         action="store_true",
         help="Emit the synth-style microblock op/step descriptor stream.",
+    )
+    ap.add_argument(
+        "--closed-loop-dataflow",
+        action="store_true",
+        help=(
+            "For generated prefix coverage, use DRAM->UDMA->L1->engine->L1->UDMA->DRAM "
+            "with UDMA reload plus L1CRC instead of direct L1 preload/probe shortcuts."
+        ),
     )
     ap.add_argument(
         "--conv-sram-window-commands",
@@ -2473,7 +2888,9 @@ def main() -> int:
         if len(commands) >= command_limit:
             break
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
-        if args.microblock_descriptors:
+        if args.closed_loop_dataflow:
+            descs = []
+        elif args.microblock_descriptors:
             descs = synth_microblock_descriptors(layer, len(commands))
             descs.extend(udma_l1_output_sram_crc_probe(layer, len(commands) + len(descs)))
             descs.extend(requant_l1_output_sram_crc_probe(layer, len(commands) + len(descs)))
@@ -2566,12 +2983,44 @@ def main() -> int:
                     descs.append(probe_desc)
         else:
             descs = [desc] if desc is not None else []
+        if args.closed_loop_dataflow:
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            closed_loop_descs: list[list[int]] = []
+            result_dram_off = layer.ref_off
+            if layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
+                closed_loop_descs = closed_loop_pool_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
+                )
+            elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
+                closed_loop_descs = closed_loop_ewe_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
+                )
+            elif layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
+                closed_loop_descs = closed_loop_tnps_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
+                )
+            elif layer.op_kind in OK_CONV and elem_bytes(layer.dtype) == 1:
+                closed_loop_descs = closed_loop_conv_probe(
+                    layer,
+                    len(commands) + len(descs),
+                    result_dram_off,
+                )
+            if closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
+                descs.extend(closed_loop_descs)
         if args.emit_conv_partial_psum and layer.op_kind in OK_POOL:
             pool_output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if elem_bytes(layer.dtype) == 1 and remaining_commands > 2:
                 available_pool_output_cmds = max(remaining_commands - 2, 0)
-                max_pool_outputs = min(pool_output_elems, available_pool_output_cmds, 512)
+                max_pool_outputs = min(pool_output_elems, available_pool_output_cmds)
+                if not args.full_tensor:
+                    max_pool_outputs = min(max_pool_outputs, 512)
                 pool_sram_descs = pool_int8_output_descriptors(
                     layer,
                     len(commands) + len(descs),
@@ -2613,7 +3062,9 @@ def main() -> int:
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if remaining_commands > 2:
                 available_requant_output_cmds = max(remaining_commands - 2, 0)
-                max_requant_outputs = min(requant_output_elems, available_requant_output_cmds, 512)
+                max_requant_outputs = min(requant_output_elems, available_requant_output_cmds)
+                if not args.full_tensor:
+                    max_requant_outputs = min(max_requant_outputs, 512)
                 requant_sram_descs = requant_output_descriptors_for_conv(
                     layer,
                     len(commands) + len(descs),
@@ -2647,7 +3098,9 @@ def main() -> int:
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if ewe_output_elems > 0 and remaining_commands > 2:
                 available_ewe_output_cmds = max(remaining_commands - 2, 0)
-                max_ewe_outputs = min(ewe_output_elems, available_ewe_output_cmds // 2, 512)
+                max_ewe_outputs = min(ewe_output_elems, available_ewe_output_cmds // 2)
+                if not args.full_tensor:
+                    max_ewe_outputs = min(max_ewe_outputs, 512)
                 ewe_sram_descs = int8_ewe_output_descriptors(
                     layer,
                     len(commands) + len(descs),
@@ -2678,7 +3131,9 @@ def main() -> int:
         if args.emit_conv_partial_psum and layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if layer.ref_size > 0 and remaining_commands > 2:
-                max_tnps_bytes = min(layer.ref_size, remaining_commands - 2, 512)
+                max_tnps_bytes = min(layer.ref_size, remaining_commands - 2)
+                if not args.full_tensor:
+                    max_tnps_bytes = min(max_tnps_bytes, 512)
                 tnps_sram_descs = tnps_output_descriptors(
                     layer,
                     len(commands) + len(descs),
@@ -2707,7 +3162,9 @@ def main() -> int:
         if args.emit_conv_partial_psum and layer.op_kind in UDMA_OPS:
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if layer.ref_size > 0 and remaining_commands > 2:
-                max_udma_bytes = min(layer.ref_size, remaining_commands - 2, 512)
+                max_udma_bytes = min(layer.ref_size, remaining_commands - 2)
+                if not args.full_tensor:
+                    max_udma_bytes = min(max_udma_bytes, 512)
                 udma_sram_descs = udma_output_descriptors(
                     layer,
                     len(commands) + len(descs),
@@ -2743,8 +3200,9 @@ def main() -> int:
         for desc in descs:
             if len(commands) >= command_limit:
                 break
-            layer_for_meta = layer.index if (desc[0] & 0xF) != OP_L1CRC else desc[19]
-            stamp_microblock_metadata(desc, layer_for_meta, len(commands), len(commands))
+            if not (args.microblock_descriptors and (desc[3] & (1 << 13))):
+                layer_for_meta = layer.index if (desc[0] & 0xF) != OP_L1CRC else desc[19]
+                stamp_microblock_metadata(desc, layer_for_meta, len(commands), len(commands))
             commands.append(desc)
             if (desc[0] & 0xF) == OP_CONV:
                 conv_count += 1

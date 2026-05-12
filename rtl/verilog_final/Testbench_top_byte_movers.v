@@ -42,6 +42,7 @@ module Testbench_top_byte_movers;
     reg [127:0] conv_act_vec;
     reg [127:0] conv_wgt_vec;
     reg [7:0] conv_elem_count;
+    reg conv_read_sample_from_l1;
     reg conv_fp_mode;
     reg conv_int16_mode;
     reg signed [15:0] conv_zp_in;
@@ -185,6 +186,13 @@ module Testbench_top_byte_movers;
         .l1mesh_addr(l1mesh_addr),
         .l1mesh_wdata(l1mesh_wdata),
         .l1mesh_wstrb(l1mesh_wstrb),
+        .udma_dram_req_valid(),
+        .udma_dram_req_write(),
+        .udma_dram_req_addr(),
+        .udma_dram_req_bytes(),
+        .udma_dram_req_wdata(),
+        .udma_dram_req_wstrb(),
+        .udma_dram_resp_rdata(128'd0),
         .tnps_mode_space_to_depth(tnps_mode_space_to_depth),
         .tnps_in_h(tnps_in_h),
         .tnps_in_w(tnps_in_w),
@@ -199,11 +207,13 @@ module Testbench_top_byte_movers;
         .tnps_final_write_mode(1'b0),
         .tnps_sramcrc_mode(1'b0),
         .tnps_input_byte(8'd0),
+        .tnps_input_vec(128'd0),
         .tnps_out_byte_offset(32'd0),
         .tnps_sramcrc_expected_count(32'd0),
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
         .conv_zp_in(conv_zp_in),
@@ -420,6 +430,7 @@ module Testbench_top_byte_movers;
         conv_act_vec = 128'd0;
         conv_wgt_vec = 128'd0;
         conv_elem_count = 8'd0;
+        conv_read_sample_from_l1 = 1'b0;
         conv_fp_mode = 1'b0;
         conv_int16_mode = 1'b0;
         conv_zp_in = 16'sd0;

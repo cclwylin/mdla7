@@ -1,5 +1,87 @@
 `timescale 1ns/1ps
 
+module vf_dram_model #(
+    parameter DATA_WIDTH = 128,
+    parameter MAX_DRAM_BYTES = 16777216
+) (
+    input                         clk,
+    input                         req_valid,
+    input                         req_write,
+    input      [31:0]             req_addr,
+    input      [31:0]             req_bytes,
+    input      [DATA_WIDTH-1:0]   req_wdata,
+    input      [DATA_WIDTH/8-1:0] req_wstrb,
+    output reg [DATA_WIDTH-1:0]   resp_rdata
+);
+    localparam integer STRB_WIDTH = DATA_WIDTH / 8;
+    reg [1023:0] program_path;
+    reg [7:0] mem [0:MAX_DRAM_BYTES-1];
+    reg mem_valid [0:MAX_DRAM_BYTES-1];
+    integer fd;
+    integer seek_rc;
+    integer byte_value;
+    integer lane;
+    integer init_i;
+    integer addr_i;
+
+    initial begin
+        program_path = "";
+        if (!$value$plusargs("FINAL_REF_PROGRAM=%s", program_path))
+            program_path = "";
+        fd = 0;
+        resp_rdata = {DATA_WIDTH{1'b0}};
+        for (init_i = 0; init_i < MAX_DRAM_BYTES; init_i = init_i + 1) begin
+            mem[init_i] = 8'd0;
+            mem_valid[init_i] = 1'b0;
+        end
+    end
+
+    always @* begin
+        resp_rdata = {DATA_WIDTH{1'b0}};
+        if (!req_write) begin
+            fd = $fopen(program_path, "rb");
+            if (program_path != "" && fd != 0) begin
+                seek_rc = $fseek(fd, req_addr, 0);
+                if (seek_rc == 0) begin
+                    for (lane = 0; lane < STRB_WIDTH; lane = lane + 1) begin
+                        if (lane < req_bytes) begin
+                            addr_i = req_addr + lane;
+                            if ((addr_i < MAX_DRAM_BYTES) && mem_valid[addr_i]) begin
+                                resp_rdata[lane*8 +: 8] = mem[addr_i];
+                            end else begin
+                                byte_value = $fgetc(fd);
+                                if (byte_value >= 0)
+                                    resp_rdata[lane*8 +: 8] = byte_value[7:0];
+                            end
+                        end
+                    end
+                end
+                $fclose(fd);
+            end else begin
+                for (lane = 0; lane < STRB_WIDTH; lane = lane + 1) begin
+                    if (lane < req_bytes) begin
+                        addr_i = req_addr + lane;
+                        if ((addr_i < MAX_DRAM_BYTES) && mem_valid[addr_i])
+                            resp_rdata[lane*8 +: 8] = mem[addr_i];
+                    end
+                end
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (req_valid && req_write) begin
+            for (lane = 0; lane < STRB_WIDTH; lane = lane + 1) begin
+                addr_i = req_addr + lane;
+                if ((lane < req_bytes) && req_wstrb[lane] && (addr_i < MAX_DRAM_BYTES)) begin
+                    mem[addr_i] <= req_wdata[lane*8 +: 8];
+                    mem_valid[addr_i] <= 1'b1;
+                end
+            end
+        end
+    end
+endmodule
+
 module Testbench_host_program;
     reg clk;
     reg rst_n;
@@ -40,12 +122,14 @@ module Testbench_host_program;
     wire tnps_final_write_mode;
     wire tnps_sramcrc_mode;
     wire [7:0] tnps_input_byte;
+    wire [127:0] tnps_input_vec;
     wire [31:0] tnps_out_byte_offset;
     wire [31:0] tnps_sramcrc_expected_crc;
     wire [31:0] tnps_sramcrc_expected_count;
     wire [127:0] conv_act_vec;
     wire [127:0] conv_wgt_vec;
     wire [7:0] conv_elem_count;
+    wire conv_read_sample_from_l1;
     wire conv_fp_mode;
     wire conv_int16_mode;
     wire signed [15:0] conv_zp_in;
@@ -195,16 +279,40 @@ module Testbench_host_program;
     wire [31:0] ewe_sramcrc_count;
     wire [63:0] ewe_fp_bits;
     wire [31:0] placement_route_cycles;
+    wire [31:0] microblock_load_count;
+    wire [31:0] microblock_compute_count;
+    wire [31:0] microblock_store_count;
+    wire [31:0] microblock_final_count;
     wire [8:0] block_busy;
     wire [8:0] block_done_valid;
     wire test_done;
     wire test_fail;
     wire [31:0] issued_count;
     wire [31:0] done_count;
+    wire [31:0] measured_cycle_count;
     wire top_done_ready_unused;
+    wire udma_dram_req_valid;
+    wire udma_dram_req_write;
+    wire [31:0] udma_dram_req_addr;
+    wire [31:0] udma_dram_req_bytes;
+    wire [127:0] udma_dram_req_wdata;
+    wire [15:0] udma_dram_req_wstrb;
+    wire [127:0] udma_dram_resp_rdata;
     integer watchdog;
+    integer watchdog_limit;
 
     always #5 clk = ~clk;
+
+    vf_dram_model u_dram (
+        .clk(clk),
+        .req_valid(udma_dram_req_valid),
+        .req_write(udma_dram_req_write),
+        .req_addr(udma_dram_req_addr),
+        .req_bytes(udma_dram_req_bytes),
+        .req_wdata(udma_dram_req_wdata),
+        .req_wstrb(udma_dram_req_wstrb),
+        .resp_rdata(udma_dram_resp_rdata)
+    );
 
     host_final u_host (
         .clk(clk),
@@ -245,12 +353,14 @@ module Testbench_host_program;
         .tnps_final_write_mode(tnps_final_write_mode),
         .tnps_sramcrc_mode(tnps_sramcrc_mode),
         .tnps_input_byte(tnps_input_byte),
+        .tnps_input_vec(tnps_input_vec),
         .tnps_out_byte_offset(tnps_out_byte_offset),
         .tnps_sramcrc_expected_crc(tnps_sramcrc_expected_crc),
         .tnps_sramcrc_expected_count(tnps_sramcrc_expected_count),
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
         .conv_zp_in(conv_zp_in),
@@ -403,10 +513,15 @@ module Testbench_host_program;
         .ewe_fp_bits(ewe_fp_bits),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),
+        .microblock_load_count(microblock_load_count),
+        .microblock_compute_count(microblock_compute_count),
+        .microblock_store_count(microblock_store_count),
+        .microblock_final_count(microblock_final_count),
         .test_done(test_done),
         .test_fail(test_fail),
         .issued_count(issued_count),
-        .done_count(done_count)
+        .done_count(done_count),
+        .measured_cycle_count(measured_cycle_count)
     );
 
     mdla7_top_final u_top (
@@ -433,6 +548,13 @@ module Testbench_host_program;
         .l1mesh_addr(l1mesh_addr),
         .l1mesh_wdata(l1mesh_wdata),
         .l1mesh_wstrb(l1mesh_wstrb),
+        .udma_dram_req_valid(udma_dram_req_valid),
+        .udma_dram_req_write(udma_dram_req_write),
+        .udma_dram_req_addr(udma_dram_req_addr),
+        .udma_dram_req_bytes(udma_dram_req_bytes),
+        .udma_dram_req_wdata(udma_dram_req_wdata),
+        .udma_dram_req_wstrb(udma_dram_req_wstrb),
+        .udma_dram_resp_rdata(udma_dram_resp_rdata),
         .tnps_mode_space_to_depth(tnps_mode_space_to_depth),
         .tnps_in_h(tnps_in_h),
         .tnps_in_w(tnps_in_w),
@@ -447,11 +569,13 @@ module Testbench_host_program;
         .tnps_final_write_mode(tnps_final_write_mode),
         .tnps_sramcrc_mode(tnps_sramcrc_mode),
         .tnps_input_byte(tnps_input_byte),
+        .tnps_input_vec(tnps_input_vec),
         .tnps_out_byte_offset(tnps_out_byte_offset),
         .tnps_sramcrc_expected_count(tnps_sramcrc_expected_count),
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
         .conv_zp_in(conv_zp_in),
@@ -548,6 +672,10 @@ module Testbench_host_program;
         .tnps_sramcrc_crc(tnps_sramcrc_crc),
         .tnps_sramcrc_count(tnps_sramcrc_count),
         .placement_route_cycles(placement_route_cycles),
+        .microblock_load_count(microblock_load_count),
+        .microblock_compute_count(microblock_compute_count),
+        .microblock_store_count(microblock_store_count),
+        .microblock_final_count(microblock_final_count),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),
         .conv_acc_out(conv_acc_out),
@@ -607,17 +735,22 @@ module Testbench_host_program;
         clk = 1'b0;
         rst_n = 1'b0;
         watchdog = 0;
+        if (!$value$plusargs("HOST_WATCHDOG_CYCLES=%d", watchdog_limit))
+            watchdog_limit = 20000000;
         repeat (4) @(posedge clk);
         rst_n = 1'b1;
 
-        while (!test_done && watchdog < 6000000) begin
+        while (!test_done && watchdog < watchdog_limit) begin
             watchdog = watchdog + 1;
             @(posedge clk);
         end
 
         if (!test_done) begin
-            $display("FAIL: verilog_final host program timeout issued=%0d done=%0d busy=%0d",
-                     issued_count, done_count, busy);
+            $display("FAIL: verilog_final host program timeout issued=%0d done=%0d busy=%0d active_op=%0d layer=%0d mb=%0d slot=%0d flags=%02x phase=%0d remaining=%0d block_busy=%09b block_done=%09b",
+                     issued_count, done_count, busy, active_op_class,
+                     active_layer_id, active_microblock_id, active_stream_slot,
+                     active_stream_meta_flags, active_phase_id,
+                     active_remaining_cycles, block_busy, block_done_valid);
         end else if (test_fail) begin
             $display("FAIL: verilog_final host program host reported failure issued=%0d done=%0d",
                      issued_count, done_count);
@@ -625,8 +758,8 @@ module Testbench_host_program;
             $display("FAIL: verilog_final host program counts issued=%0d done=%0d",
                      issued_count, done_count);
         end else begin
-            $display("PASS: verilog_final host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d",
-                     issued_count, done_count);
+            $display("PASS: verilog_final host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d vf_cycles=%0d",
+                     issued_count, done_count, measured_cycle_count);
         end
         $finish;
     end

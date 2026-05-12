@@ -2,6 +2,66 @@
 
 `include "common.v"
 
+module vf_microblock_control (
+    input             clk,
+    input             rst_n,
+    input             accept,
+    input             complete,
+    input      [3:0]  desc_op_class,
+    input      [15:0] desc_layer_id,
+    input      [15:0] desc_microblock_id,
+    input      [7:0]  desc_stream_slot,
+    input      [7:0]  desc_stream_meta_flags,
+    output reg        active_valid,
+    output reg [3:0]  active_op_class,
+    output reg [15:0] active_layer_id,
+    output reg [15:0] active_microblock_id,
+    output reg [7:0]  active_stream_slot,
+    output reg [7:0]  active_stream_meta_flags,
+    output reg [31:0] load_count,
+    output reg [31:0] compute_count,
+    output reg [31:0] store_count,
+    output reg [31:0] final_count
+);
+    localparam [7:0] SMF_LOAD_A = 8'h01;
+    localparam [7:0] SMF_LOAD_B = 8'h02;
+    localparam [7:0] SMF_COMPUTE = 8'h04;
+    localparam [7:0] SMF_STORE = 8'h08;
+    localparam [7:0] SMF_FINAL_TILE = 8'h10;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            active_valid <= 1'b0;
+            active_op_class <= 4'd0;
+            active_layer_id <= 16'd0;
+            active_microblock_id <= 16'd0;
+            active_stream_slot <= 8'd0;
+            active_stream_meta_flags <= 8'd0;
+            load_count <= 32'd0;
+            compute_count <= 32'd0;
+            store_count <= 32'd0;
+            final_count <= 32'd0;
+        end else if (accept) begin
+            active_valid <= 1'b1;
+            active_op_class <= desc_op_class;
+            active_layer_id <= desc_layer_id;
+            active_microblock_id <= desc_microblock_id;
+            active_stream_slot <= desc_stream_slot;
+            active_stream_meta_flags <= desc_stream_meta_flags;
+            if ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0)
+                load_count <= load_count + 32'd1;
+            if ((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0)
+                compute_count <= compute_count + 32'd1;
+            if ((desc_stream_meta_flags & SMF_STORE) != 8'd0)
+                store_count <= store_count + 32'd1;
+            if ((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0)
+                final_count <= final_count + 32'd1;
+        end else if (complete) begin
+            active_valid <= 1'b0;
+        end
+    end
+endmodule
+
 module mdla7_top_final #(
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
@@ -36,6 +96,7 @@ module mdla7_top_final #(
     output     [31:0]           udma_dram_req_bytes,
     output     [DATA_WIDTH-1:0] udma_dram_req_wdata,
     output     [DATA_WIDTH/8-1:0] udma_dram_req_wstrb,
+    input      [DATA_WIDTH-1:0] udma_dram_resp_rdata,
 
     input                       tnps_mode_space_to_depth,
     input      [15:0]           tnps_in_h,
@@ -51,11 +112,13 @@ module mdla7_top_final #(
     input                       tnps_final_write_mode,
     input                       tnps_sramcrc_mode,
     input      [7:0]            tnps_input_byte,
+    input      [127:0]          tnps_input_vec,
     input      [31:0]           tnps_out_byte_offset,
     input      [31:0]           tnps_sramcrc_expected_count,
     input      [127:0]          conv_act_vec,
     input      [127:0]          conv_wgt_vec,
     input      [7:0]            conv_elem_count,
+    input                       conv_read_sample_from_l1,
     input                       conv_fp_mode,
     input                       conv_int16_mode,
     input signed [15:0]         conv_zp_in,
@@ -153,6 +216,10 @@ module mdla7_top_final #(
     output     [31:0]           tnps_sramcrc_crc,
     output     [31:0]           tnps_sramcrc_count,
     output     [31:0]           placement_route_cycles,
+    output     [31:0]           microblock_load_count,
+    output     [31:0]           microblock_compute_count,
+    output     [31:0]           microblock_store_count,
+    output     [31:0]           microblock_final_count,
     output     [8:0]            block_busy,
     output     [8:0]            block_done_valid,
     output signed [31:0]        conv_acc_out,
@@ -257,11 +324,13 @@ module mdla7_top_final #(
     reg tnps_final_write_mode_q;
     reg tnps_sramcrc_mode_q;
     reg [7:0] tnps_input_byte_q;
+    reg [127:0] tnps_input_vec_q;
     reg [31:0] tnps_out_byte_offset_q;
     reg [31:0] tnps_sramcrc_expected_count_q;
     reg [127:0] conv_act_vec_q;
     reg [127:0] conv_wgt_vec_q;
     reg [7:0] conv_elem_count_q;
+    reg conv_read_sample_from_l1_q;
     reg conv_fp_mode_q;
     reg conv_int16_mode_q;
     reg signed [15:0] conv_zp_in_q;
@@ -442,6 +511,11 @@ module mdla7_top_final #(
     wire [3:0] l1mesh_phase_id;
     wire [31:0] l1mesh_remaining_cycles;
     wire [DATA_WIDTH-1:0] l1mesh_rdata;
+    reg l1_resp_valid_q;
+    reg l1_resp_read_q;
+    reg [3:0] l1_resp_source_q;
+    reg [7:0] l1_resp_tid_q;
+    reg [DATA_WIDTH-1:0] l1_resp_rdata_q;
     wire l1mesh_crc_busy;
     wire l1mesh_crc_done;
     wire [1:0] route_source_x;
@@ -453,6 +527,14 @@ module mdla7_top_final #(
     wire legacy_req_ready;
     wire [3:0] l1mgr_debug_source_unused;
     wire [7:0] l1mgr_debug_tid_unused;
+    wire microblock_active_valid;
+    wire [3:0] microblock_active_op_class;
+    wire [15:0] microblock_active_layer_id;
+    wire [15:0] microblock_active_microblock_id;
+    wire [7:0] microblock_active_stream_slot;
+    wire [7:0] microblock_active_stream_meta_flags;
+    wire microblock_accept = desc_valid && desc_ready;
+    wire microblock_complete = done_valid_q && done_ready;
     /* verilator lint_off UNUSEDSIGNAL */
     wire [155:0] final_debug_unused = {
         l1mesh_rdata,
@@ -508,7 +590,9 @@ module mdla7_top_final #(
                                      run_pool ? pool_remaining_cycles :
                                      run_udma ? udma_remaining_cycles :
                                      run_tnps ? tnps_remaining_cycles : 32'd0;
-    wire l1_drained = !l1mgr_busy && !l1mgr_resp_valid && !l1mesh_busy && !l1mesh_resp_valid && !l1mesh_crc_busy;
+    wire l1_drained = !l1mgr_busy && !l1mgr_resp_valid &&
+                       !l1mesh_busy && !l1mesh_resp_valid &&
+                       !l1_resp_valid_q && !l1mesh_crc_busy;
     wire conv_start = start_pending && run_conv;
     wire requant_start = start_pending && run_requant;
     wire ewe_start = start_pending && run_ewe;
@@ -520,11 +604,11 @@ module mdla7_top_final #(
     assign desc_ready = (state == ST_IDLE);
     assign done_valid = done_valid_q;
     assign busy = (state != ST_IDLE);
-    assign active_op_class = op_class_q;
-    assign active_layer_id = layer_id_q;
-    assign active_microblock_id = microblock_id_q;
-    assign active_stream_slot = stream_slot_q;
-    assign active_stream_meta_flags = stream_meta_flags_q;
+    assign active_op_class = microblock_active_valid ? microblock_active_op_class : op_class_q;
+    assign active_layer_id = microblock_active_valid ? microblock_active_layer_id : layer_id_q;
+    assign active_microblock_id = microblock_active_valid ? microblock_active_microblock_id : microblock_id_q;
+    assign active_stream_slot = microblock_active_valid ? microblock_active_stream_slot : stream_slot_q;
+    assign active_stream_meta_flags = microblock_active_valid ? microblock_active_stream_meta_flags : stream_meta_flags_q;
     assign active_phase_id = selected_busy ? selected_phase :
                              l1mgr_busy ? l1mgr_phase_id :
                              l1mesh_busy ? l1mesh_phase_id : 4'd0;
@@ -534,7 +618,7 @@ module mdla7_top_final #(
     assign l1mgr_resp_ready = l1mesh_req_ready;
     assign conv_l1_req_ready = run_conv && l1mesh_req_ready;
     assign block_busy = {l1mesh_busy, l1mgr_busy, udma_busy, tnps_busy, pool_busy, ewe_busy, requant_busy, conv_busy, 1'b0};
-    assign block_done_valid = {l1mesh_resp_valid, l1mgr_resp_valid, udma_done_valid, tnps_done_valid, pool_done_valid, ewe_done_valid, requant_done_valid, conv_done_valid, 1'b0};
+    assign block_done_valid = {l1_resp_valid_q, l1mgr_resp_valid, udma_done_valid, tnps_done_valid, pool_done_valid, ewe_done_valid, requant_done_valid, conv_done_valid, 1'b0};
 
     vf_l1mesh_route_estimator u_route (
         .source_id(op_class_q),
@@ -548,6 +632,28 @@ module mdla7_top_final #(
         .bank_y(route_bank_y)
     );
 
+    vf_microblock_control u_microblock_control (
+        .clk(clk),
+        .rst_n(rst_n),
+        .accept(microblock_accept),
+        .complete(microblock_complete),
+        .desc_op_class(desc_op_class),
+        .desc_layer_id(desc_layer_id),
+        .desc_microblock_id(desc_microblock_id),
+        .desc_stream_slot(desc_stream_slot),
+        .desc_stream_meta_flags(desc_stream_meta_flags),
+        .active_valid(microblock_active_valid),
+        .active_op_class(microblock_active_op_class),
+        .active_layer_id(microblock_active_layer_id),
+        .active_microblock_id(microblock_active_microblock_id),
+        .active_stream_slot(microblock_active_stream_slot),
+        .active_stream_meta_flags(microblock_active_stream_meta_flags),
+        .load_count(microblock_load_count),
+        .compute_count(microblock_compute_count),
+        .store_count(microblock_store_count),
+        .final_count(microblock_final_count)
+    );
+
     vf_conv_sample_engine u_conv (
         .clk(clk),
         .rst_n(rst_n),
@@ -556,6 +662,7 @@ module mdla7_top_final #(
         .act_vec(conv_act_vec_q),
         .wgt_vec(conv_wgt_vec_q),
         .elem_count(conv_elem_count_q),
+        .read_sample_from_l1(conv_read_sample_from_l1_q),
         .fp_mode(conv_fp_mode_q),
         .int16_mode(conv_int16_mode_q),
         .zp_in(conv_zp_in_q),
@@ -594,6 +701,9 @@ module mdla7_top_final #(
         .conv_sample_kh(conv_sample_kh_q),
         .conv_sample_kw(conv_sample_kw_q),
         .conv_sample_ic(conv_sample_ic_q),
+        .l1_resp_valid(run_conv && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd1)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .l1_req_valid(conv_l1_req_valid),
         .l1_req_ready(conv_l1_req_ready),
         .l1_req_write(conv_l1_req_write),
@@ -662,10 +772,10 @@ module mdla7_top_final #(
         .sramcrc_expected_count(requant_sramcrc_expected_count_q),
         .out_byte_offset(requant_out_byte_offset_q),
         .l1_req_base_addr(l1mesh_addr_q),
-        .l1_resp_valid(run_requant && l1mesh_resp_valid && l1mesh_resp_read &&
-                       (l1mesh_resp_source == 4'd2) &&
-                       (l1mesh_resp_tid == stream_slot_q)),
-        .l1_resp_rdata(l1mesh_rdata),
+        .l1_resp_valid(run_requant && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd2) &&
+                       (l1_resp_tid_q == stream_slot_q)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .l1_req_valid(requant_l1_req_valid),
         .l1_req_ready(requant_l1_req_ready),
         .l1_req_write(requant_l1_req_write),
@@ -702,10 +812,10 @@ module mdla7_top_final #(
         .l1_req_base_addr(l1mesh_addr_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
-        .l1_resp_valid(run_pool && l1mesh_resp_valid && l1mesh_resp_read &&
-                       (l1mesh_resp_source == 4'd4) &&
-                       (l1mesh_resp_tid == stream_slot_q)),
-        .l1_resp_rdata(l1mesh_rdata),
+        .l1_resp_valid(run_pool && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd4) &&
+                       (l1_resp_tid_q == stream_slot_q)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .l1_req_valid(pool_l1_req_valid),
         .l1_req_ready(pool_l1_req_ready),
         .l1_req_write(pool_l1_req_write),
@@ -755,10 +865,10 @@ module mdla7_top_final #(
         .a_vec(ewe_a_vec_q),
         .b_vec(ewe_b_vec_q),
         .elem_count(ewe_elem_count_q),
-        .l1_resp_valid(run_ewe && l1mesh_resp_valid && l1mesh_resp_read &&
-                       (l1mesh_resp_source == 4'd3) &&
-                       (l1mesh_resp_tid == stream_slot_q)),
-        .l1_resp_rdata(l1mesh_rdata),
+        .l1_resp_valid(run_ewe && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd3) &&
+                       (l1_resp_tid_q == stream_slot_q)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .l1_req_valid(ewe_l1_req_valid),
         .l1_req_ready(ewe_l1_req_ready),
         .l1_req_write(ewe_l1_req_write),
@@ -804,16 +914,17 @@ module mdla7_top_final #(
         .l1_req_payload_cycles(udma_l1_req_payload_cycles),
         .l1_req_wdata(udma_l1_req_wdata),
         .l1_req_wstrb(udma_l1_req_wstrb),
-        .l1_resp_valid(run_udma && l1mesh_resp_valid && l1mesh_resp_read &&
-                       (l1mesh_resp_source == 4'd6) &&
-                       (l1mesh_resp_tid == stream_slot_q)),
-        .l1_resp_rdata(l1mesh_rdata),
+        .l1_resp_valid(run_udma && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd6) &&
+                       (l1_resp_tid_q == stream_slot_q)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .dram_req_valid(udma_dram_req_valid),
         .dram_req_write(udma_dram_req_write),
         .dram_req_addr(udma_dram_req_addr),
         .dram_req_bytes(udma_dram_req_bytes),
         .dram_req_wdata(udma_dram_req_wdata),
         .dram_req_wstrb(udma_dram_req_wstrb),
+        .dram_resp_rdata(udma_dram_resp_rdata),
         .busy(udma_busy),
         .done_valid(udma_done_valid),
         .done_ready(1'b1),
@@ -843,9 +954,14 @@ module mdla7_top_final #(
         .final_write_mode(tnps_final_write_mode_q),
         .sramcrc_mode(tnps_sramcrc_mode_q),
         .input_byte(tnps_input_byte_q),
+        .input_vec(tnps_input_vec_q),
         .out_byte_offset(tnps_out_byte_offset_q),
         .sramcrc_expected_count(tnps_sramcrc_expected_count_q),
         .l1_req_base_addr(l1mesh_addr_q),
+        .l1_resp_valid(run_tnps && l1_resp_valid_q && l1_resp_read_q &&
+                       (l1_resp_source_q == 4'd5) &&
+                       (l1_resp_tid_q == stream_slot_q)),
+        .l1_resp_rdata(l1_resp_rdata_q),
         .l1_req_valid(tnps_l1_req_valid),
         .l1_req_ready(tnps_l1_req_ready),
         .l1_req_write(tnps_l1_req_write),
@@ -976,6 +1092,11 @@ module mdla7_top_final #(
         if (!rst_n) begin
             state <= ST_IDLE;
             done_valid_q <= 1'b0;
+            l1_resp_valid_q <= 1'b0;
+            l1_resp_read_q <= 1'b0;
+            l1_resp_source_q <= 4'd0;
+            l1_resp_tid_q <= 8'd0;
+            l1_resp_rdata_q <= {DATA_WIDTH{1'b0}};
             op_class_q <= 4'd0;
             layer_id_q <= 16'd0;
             microblock_id_q <= 16'd0;
@@ -1011,11 +1132,13 @@ module mdla7_top_final #(
             tnps_final_write_mode_q <= 1'b0;
             tnps_sramcrc_mode_q <= 1'b0;
             tnps_input_byte_q <= 8'd0;
+            tnps_input_vec_q <= 128'd0;
             tnps_out_byte_offset_q <= 32'd0;
             tnps_sramcrc_expected_count_q <= 32'd0;
             conv_act_vec_q <= 128'd0;
             conv_wgt_vec_q <= 128'd0;
             conv_elem_count_q <= 8'd0;
+            conv_read_sample_from_l1_q <= 1'b0;
             conv_fp_mode_q <= 1'b0;
             conv_int16_mode_q <= 1'b0;
             conv_zp_in_q <= 16'sd0;
@@ -1093,6 +1216,11 @@ module mdla7_top_final #(
             ewe_act_min_q <= -32'sd128;
             ewe_act_max_q <= 32'sd127;
         end else begin
+            l1_resp_valid_q <= l1mesh_resp_valid;
+            l1_resp_read_q <= l1mesh_resp_read;
+            l1_resp_source_q <= l1mesh_resp_source;
+            l1_resp_tid_q <= l1mesh_resp_tid;
+            l1_resp_rdata_q <= l1mesh_rdata;
             case (state)
                 ST_IDLE: begin
                     done_valid_q <= 1'b0;
@@ -1130,11 +1258,13 @@ module mdla7_top_final #(
                         tnps_final_write_mode_q <= tnps_final_write_mode;
                         tnps_sramcrc_mode_q <= tnps_sramcrc_mode;
                         tnps_input_byte_q <= tnps_input_byte;
+                        tnps_input_vec_q <= tnps_input_vec;
                         tnps_out_byte_offset_q <= tnps_out_byte_offset;
                         tnps_sramcrc_expected_count_q <= tnps_sramcrc_expected_count;
                         conv_act_vec_q <= conv_act_vec;
                         conv_wgt_vec_q <= conv_wgt_vec;
                         conv_elem_count_q <= conv_elem_count;
+                        conv_read_sample_from_l1_q <= conv_read_sample_from_l1;
                         conv_fp_mode_q <= conv_fp_mode;
                         conv_int16_mode_q <= conv_int16_mode;
                         conv_zp_in_q <= conv_zp_in;

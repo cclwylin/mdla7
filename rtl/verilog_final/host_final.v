@@ -43,12 +43,14 @@ module host_final #(
     output reg         tnps_final_write_mode,
     output reg         tnps_sramcrc_mode,
     output reg [7:0]   tnps_input_byte,
+    output reg [127:0] tnps_input_vec,
     output reg [31:0]  tnps_out_byte_offset,
     output reg [31:0]  tnps_sramcrc_expected_crc,
     output reg [31:0]  tnps_sramcrc_expected_count,
     output reg [127:0] conv_act_vec,
     output reg [127:0] conv_wgt_vec,
     output reg [7:0]   conv_elem_count,
+    output reg         conv_read_sample_from_l1,
     output reg         conv_fp_mode,
     output reg         conv_int16_mode,
     output reg signed [15:0] conv_zp_in,
@@ -202,11 +204,16 @@ module host_final #(
     input      [63:0]   ewe_fp_bits,
     input      [8:0]   block_busy,
     input      [8:0]   block_done_valid,
+    input      [31:0]  microblock_load_count,
+    input      [31:0]  microblock_compute_count,
+    input      [31:0]  microblock_store_count,
+    input      [31:0]  microblock_final_count,
 
     output reg         test_done,
     output reg         test_fail,
     output reg [31:0]  issued_count,
-    output reg [31:0]  done_count
+    output reg [31:0]  done_count,
+    output reg [31:0]  measured_cycle_count
 );
     localparam [3:0] OP_DONE = 4'd0;
     localparam [3:0] OP_CONV = 4'd1;
@@ -216,6 +223,11 @@ module host_final #(
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
     localparam [3:0] OP_L1CRC = 4'd7;
+    localparam [7:0] SMF_LOAD_A = 8'h01;
+    localparam [7:0] SMF_LOAD_B = 8'h02;
+    localparam [7:0] SMF_COMPUTE = 8'h04;
+    localparam [7:0] SMF_STORE = 8'h08;
+    localparam [7:0] SMF_FINAL_TILE = 8'h10;
 
     localparam [2:0] ST_LOAD  = 3'd0;
     localparam [2:0] ST_ISSUE = 3'd1;
@@ -230,6 +242,10 @@ module host_final #(
     reg [31:0] watchdog;
     reg [31:0] cmd_mem [0:MAX_COMMANDS*WORDS_PER_COMMAND-1];
     reg [1023:0] program_path;
+    reg [31:0] expected_microblock_load_count;
+    reg [31:0] expected_microblock_compute_count;
+    reg [31:0] expected_microblock_store_count;
+    reg [31:0] expected_microblock_final_count;
     integer load_i;
 
     wire [31:0] base = command_index * WORDS_PER_COMMAND;
@@ -261,6 +277,9 @@ module host_final #(
     wire [31:0] expected_conv_psum_acc_value =
         (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) ? cmd_mem[base + 19] : conv_acc_out;
     wire microblock_descriptor_mode = cmd_mem[base + 3][13];
+    wire descriptor_has_stream_flags =
+        (desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) != 8'd0;
+    wire probe_descriptor_mode = cmd_mem[base + 3][15];
 
     assign top_done_ready = 1'b1;
 
@@ -317,6 +336,8 @@ module host_final #(
             tnps_final_write_mode <= cmd_mem[base + 3][6];
             tnps_sramcrc_mode <= cmd_mem[base + 3][10];
             tnps_input_byte <= cmd_mem[base + 4][7:0];
+            tnps_input_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
+                               cmd_mem[base + 5], cmd_mem[base + 4]};
             tnps_out_byte_offset <= cmd_mem[base + 27];
             tnps_sramcrc_expected_crc <= cmd_mem[base + 28];
             tnps_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -325,6 +346,7 @@ module host_final #(
             conv_wgt_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
                              cmd_mem[base + 9], cmd_mem[base + 8]};
             conv_elem_count <= cmd_mem[base + 12][7:0];
+            conv_read_sample_from_l1 <= cmd_mem[base + 3][11];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
@@ -407,8 +429,7 @@ module host_final #(
             ewe_left_shift <= cmd_mem[base + 24];
             ewe_act_min <= cmd_mem[base + 25];
             ewe_act_max <= cmd_mem[base + 26];
-            if (cmd_mem[base + 3][6]) begin
-                l1mesh_addr <= cmd_mem[base + 27][21:0];
+            if (cmd_mem[base + 3][6] && (cmd_mem[base][3:0] != OP_UDMA)) begin
                 l1mesh_wdata <= byte_lane_wdata(final_write_byte(cmd_mem[base][3:0]),
                                                 cmd_mem[base + 27][3:0]);
                 l1mesh_wstrb <= 16'h0001 << cmd_mem[base + 27][3:0];
@@ -618,12 +639,14 @@ module host_final #(
             tnps_final_write_mode <= 1'b0;
             tnps_sramcrc_mode <= 1'b0;
             tnps_input_byte <= 8'd0;
+            tnps_input_vec <= 128'd0;
             tnps_out_byte_offset <= 32'd0;
             tnps_sramcrc_expected_crc <= 32'd0;
             tnps_sramcrc_expected_count <= 32'd0;
             conv_act_vec <= 128'd0;
             conv_wgt_vec <= 128'd0;
             conv_elem_count <= 8'd0;
+            conv_read_sample_from_l1 <= 1'b0;
             conv_fp_mode <= 1'b0;
             conv_int16_mode <= 1'b0;
             conv_zp_in <= 16'sd0;
@@ -707,6 +730,11 @@ module host_final #(
             test_fail <= 1'b0;
             issued_count <= 32'd0;
             done_count <= 32'd0;
+            measured_cycle_count <= 32'd0;
+            expected_microblock_load_count <= 32'd0;
+            expected_microblock_compute_count <= 32'd0;
+            expected_microblock_store_count <= 32'd0;
+            expected_microblock_final_count <= 32'd0;
         end else begin
             case (state)
                 ST_LOAD: begin
@@ -731,6 +759,8 @@ module host_final #(
                 end
                 ST_WAIT: begin
                     watchdog <= watchdog + 32'd1;
+                    if (!probe_descriptor_mode)
+                        measured_cycle_count <= measured_cycle_count + 32'd1;
                     if (watchdog == 32'd5000000) begin
                         $display("HOST_FINAL_FAIL: timeout cmd=%0d op=%0d active=%0d phase=%0d remaining=%0d top_busy=%0d block_busy=%09b block_done=%09b",
                                  command_index, desc_op_class, active_op_class,
@@ -756,6 +786,73 @@ module host_final #(
                                      active_stream_slot, desc_stream_slot,
                                      active_stream_meta_flags, desc_stream_meta_flags);
                             test_fail <= 1'b1;
+                        end
+                        if (descriptor_has_stream_flags) begin
+                            if ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0)
+                                expected_microblock_load_count <= expected_microblock_load_count + 32'd1;
+                            if ((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0)
+                                expected_microblock_compute_count <= expected_microblock_compute_count + 32'd1;
+                            if ((desc_stream_meta_flags & SMF_STORE) != 8'd0)
+                                expected_microblock_store_count <= expected_microblock_store_count + 32'd1;
+                            if ((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0)
+                                expected_microblock_final_count <= expected_microblock_final_count + 32'd1;
+                            if ((desc_stream_slot !== desc_microblock_id[7:0]) ||
+                                ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) == 8'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock control cmd=%0d op=%0d layer=%0d mb=%0d slot=%0d flags=%02x",
+                                         command_index, desc_op_class, desc_layer_id,
+                                         desc_microblock_id, desc_stream_slot,
+                                         desc_stream_meta_flags);
+                                test_fail <= 1'b1;
+                            end
+                            if (((desc_op_class == OP_CONV) ||
+                                 (desc_op_class == OP_REQUANT) ||
+                                 (desc_op_class == OP_EWE) ||
+                                 (desc_op_class == OP_POOL) ||
+                                 (desc_op_class == OP_TNPS)) &&
+                                ((desc_stream_meta_flags & SMF_COMPUTE) == 8'd0) &&
+                                !cmd_mem[base + 3][10]) begin
+                                $display("HOST_FINAL_FAIL: microblock compute flag cmd=%0d op=%0d flags=%02x",
+                                         command_index, desc_op_class, desc_stream_meta_flags);
+                                test_fail <= 1'b1;
+                            end
+                            if ((desc_op_class == OP_UDMA) &&
+                                ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_STORE)) == 8'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock udma flag cmd=%0d flags=%02x",
+                                         command_index, desc_stream_meta_flags);
+                                test_fail <= 1'b1;
+                            end
+                            if (microblock_load_count !== expected_microblock_load_count +
+                                (((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0) ? 32'd1 : 32'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock load count cmd=%0d got=%0d expected=%0d",
+                                         command_index, microblock_load_count,
+                                         expected_microblock_load_count +
+                                         (((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0) ? 32'd1 : 32'd0));
+                                test_fail <= 1'b1;
+                            end
+                            if (microblock_compute_count !== expected_microblock_compute_count +
+                                (((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0) ? 32'd1 : 32'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock compute count cmd=%0d got=%0d expected=%0d",
+                                         command_index, microblock_compute_count,
+                                         expected_microblock_compute_count +
+                                         (((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0) ? 32'd1 : 32'd0));
+                                test_fail <= 1'b1;
+                            end
+                            if (microblock_store_count !== expected_microblock_store_count +
+                                (((desc_stream_meta_flags & SMF_STORE) != 8'd0) ? 32'd1 : 32'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock store count cmd=%0d got=%0d expected=%0d",
+                                         command_index, microblock_store_count,
+                                         expected_microblock_store_count +
+                                         (((desc_stream_meta_flags & SMF_STORE) != 8'd0) ? 32'd1 : 32'd0));
+                                test_fail <= 1'b1;
+                            end
+                            if (microblock_final_count !== expected_microblock_final_count +
+                                (((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0) ? 32'd1 : 32'd0)) begin
+                                $display("HOST_FINAL_FAIL: microblock final count cmd=%0d got=%0d expected=%0d",
+                                         command_index, microblock_final_count,
+                                         expected_microblock_final_count +
+                                         (((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0) ? 32'd1 : 32'd0));
+                                test_fail <= 1'b1;
+                            end
                         end
                         if ((desc_op_class == OP_L1CRC) &&
                             ((l1mesh_crc !== cmd_mem[base + 28]) ||

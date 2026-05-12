@@ -313,6 +313,7 @@ module vf_conv_sample_engine #(
     input      [MAX_ELEMS*8-1:0]  act_vec,
     input      [MAX_ELEMS*8-1:0]  wgt_vec,
     input      [7:0]              elem_count,
+    input                         read_sample_from_l1,
     input                         fp_mode,
     input                         int16_mode,
     input signed [15:0]           zp_in,
@@ -351,6 +352,8 @@ module vf_conv_sample_engine #(
     input      [15:0]             conv_sample_kh,
     input      [15:0]             conv_sample_kw,
     input      [15:0]             conv_sample_ic,
+    input                         l1_resp_valid,
+    input      [DATA_WIDTH-1:0]   l1_resp_rdata,
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
@@ -456,6 +459,12 @@ module vf_conv_sample_engine #(
     integer refcrc_seek_rc;
     reg [1023:0] refcrc_program_path;
     reg [7:0] conv_output_sram [0:MAX_CONV_OUTPUT_SRAM_BYTES-1];
+    reg [MAX_ELEMS*8-1:0] active_act_vec;
+    reg [MAX_ELEMS*8-1:0] active_wgt_vec;
+    reg act_req_sent;
+    reg wgt_req_sent;
+    wire [MAX_ELEMS*8-1:0] conv_mac_act_vec = read_sample_from_l1 ? active_act_vec : act_vec;
+    wire [MAX_ELEMS*8-1:0] conv_mac_wgt_vec = read_sample_from_l1 ? active_wgt_vec : wgt_vec;
     wire [31:0] conv_read_output_byte_offset;
     wire [3:0] conv_shadow_read_slot;
 
@@ -573,7 +582,9 @@ module vf_conv_sample_engine #(
     wire [31:0] mac_cycles = ceil_div(fp_mode ? {24'd0, safe_fp_count} :
                                       int16_mode ? {24'd0, safe_fp_count} :
                                                    {24'd0, safe_int_count}, 32'd16) + 32'd1;
-    wire req_state = (state == ST_ACT) || (state == ST_WGT) || (state == ST_STORE);
+    wire req_state = ((state == ST_ACT) && (!read_sample_from_l1 || !act_req_sent)) ||
+                     ((state == ST_WGT) && (!read_sample_from_l1 || !wgt_req_sent)) ||
+                     (state == ST_STORE);
 
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
@@ -582,7 +593,9 @@ module vf_conv_sample_engine #(
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr =
         ((state == ST_STORE) && conv_partial_final) ?
-        conv_read_output_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
+        conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
+        (state == ST_WGT) ? (l1_req_base_addr + sample_bytes[ADDR_WIDTH-1:0]) :
+        l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count : sample_bytes;
     assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 : payload_cycles;
     assign l1_req_wdata = l1_req_write
@@ -670,8 +683,8 @@ module vf_conv_sample_engine #(
     vf_conv_int8_mac #(
         .MAX_ELEMS(MAX_ELEMS)
     ) u_mac (
-        .act_vec(act_vec),
-        .wgt_vec(wgt_vec),
+        .act_vec(conv_mac_act_vec),
+        .wgt_vec(conv_mac_wgt_vec),
         .elem_count(elem_count),
         .zp_in(zp_in),
         .bias(bias),
@@ -870,14 +883,16 @@ module vf_conv_sample_engine #(
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
             if (fp_i < safe_fp_count)
                 fp_sum = fp_sum +
-                         (fp16_to_real(act_vec[fp_i*16 +: 16]) *
-                          fp16_to_real(wgt_vec[fp_i*16 +: 16]));
+                         (fp16_to_real(conv_mac_act_vec[fp_i*16 +: 16]) *
+                          fp16_to_real(conv_mac_wgt_vec[fp_i*16 +: 16]));
         end
         fp_sum_bits = $realtobits(fp_sum);
         for (i16_i = 0; i16_i < (MAX_ELEMS/2); i16_i = i16_i + 1) begin
             if (i16_i < safe_fp_count) begin
-                i16_av = {{16{act_vec[i16_i*16 + 15]}}, act_vec[i16_i*16 +: 16]};
-                i16_wv = {{16{wgt_vec[i16_i*16 + 15]}}, wgt_vec[i16_i*16 +: 16]};
+                i16_av = {{16{conv_mac_act_vec[i16_i*16 + 15]}},
+                          conv_mac_act_vec[i16_i*16 +: 16]};
+                i16_wv = {{16{conv_mac_wgt_vec[i16_i*16 + 15]}},
+                          conv_mac_wgt_vec[i16_i*16 +: 16]};
                 i16_acc64 = i16_acc64 + ($signed(i16_av) * $signed(i16_wv));
             end
         end
@@ -933,6 +948,10 @@ module vf_conv_sample_engine #(
         if (!rst_n) begin
             state <= ST_IDLE;
             compute_remaining <= 32'd0;
+            active_act_vec <= {MAX_ELEMS*8{1'b0}};
+            active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
+            act_req_sent <= 1'b0;
+            wgt_req_sent <= 1'b0;
             conv_psum_valid_mask <= 4'd0;
             conv_psum_acc_values <= 128'd0;
             conv_shadow_valid_mask <= 4'd0;
@@ -954,7 +973,11 @@ module vf_conv_sample_engine #(
             case (state)
                 ST_IDLE: begin
                     compute_remaining <= 32'd0;
+                    act_req_sent <= 1'b0;
+                    wgt_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
+                        active_act_vec <= act_vec;
+                        active_wgt_vec <= wgt_vec;
                         if (conv_refcrc_mode) begin
                             conv_shadow_valid_mask <= 4'd0;
                             conv_shadow_output_byte_offsets <= 128'd0;
@@ -989,11 +1012,27 @@ module vf_conv_sample_engine #(
                     end
                 end
                 ST_ACT: begin
-                    if (l1_req_ready)
+                    if (read_sample_from_l1) begin
+                        if (!act_req_sent && l1_req_ready)
+                            act_req_sent <= 1'b1;
+                        if (l1_resp_valid) begin
+                            active_act_vec <= l1_resp_rdata[MAX_ELEMS*8-1:0];
+                            state <= ST_WGT;
+                        end
+                    end else if (l1_req_ready) begin
                         state <= ST_WGT;
+                    end
                 end
                 ST_WGT: begin
-                    if (l1_req_ready) begin
+                    if (read_sample_from_l1) begin
+                        if (!wgt_req_sent && l1_req_ready)
+                            wgt_req_sent <= 1'b1;
+                        if (l1_resp_valid) begin
+                            active_wgt_vec <= l1_resp_rdata[MAX_ELEMS*8-1:0];
+                            compute_remaining <= mac_cycles;
+                            state <= ST_COMPUTE;
+                        end
+                    end else if (l1_req_ready) begin
                         compute_remaining <= mac_cycles;
                         state <= ST_COMPUTE;
                     end
@@ -1298,7 +1337,7 @@ module vf_requant_sample_engine #(
     assign l1_req_valid = ((state == ST_PARAM) && read_input_from_l1 && !param_req_sent) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_addr = l1_req_base_addr;
+    assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
     assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 : 32'd1;
     assign l1_req_payload_cycles = 32'd2;
     assign l1_req_wdata = l1_req_write
@@ -1548,7 +1587,7 @@ module vf_pool_sample_engine #(
     assign l1_req_valid = ((state == ST_FETCH) && (!read_sample_from_l1 || !fetch_req_sent)) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_addr = l1_req_base_addr;
+    assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
     assign l1_req_bytes = (state == ST_FETCH) ? ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                                           {24'd0, safe_count}) :
                           (fp_mode ? 32'd8 : (int16_mode ? 32'd4 : 32'd1));
@@ -2172,7 +2211,7 @@ module vf_ewe_sample_engine #(
     assign l1_req_valid = ((state == ST_A) && (!read_a_from_l1 || !a_req_sent)) ||
                           (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_addr = l1_req_base_addr;
+    assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
     assign l1_req_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                    {24'd0, safe_count};
     assign l1_req_payload_cycles = 32'd2;
@@ -2391,6 +2430,7 @@ module vf_udma_engine #(
     output     [31:0] dram_req_bytes,
     output     [DATA_WIDTH-1:0] dram_req_wdata,
     output     [DATA_WIDTH/8-1:0] dram_req_wstrb,
+    input      [DATA_WIDTH-1:0] dram_resp_rdata,
     output            busy,
     output            done_valid,
     input             done_ready,
@@ -2459,17 +2499,25 @@ module vf_udma_engine #(
     wire payload_phase_active = busy &&
         ((phase_id == PH_L1_PAYLOAD_READ) || (phase_id == PH_L1_PAYLOAD_WRITE));
     reg payload_token_sent;
+    reg [31:0] load_l1_offset;
+    reg [31:0] load_l1_remaining;
+    reg [DATA_WIDTH-1:0] store_dram_wdata;
+    reg [DATA_WIDTH/8-1:0] store_dram_wstrb;
     reg final_l1_write_done;
     reg final_l1_resp_armed;
     reg [3:0] final_l1_resp_guard;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire start_fire = start_valid && start_ready;
     wire final_l1_write_pending = final_write_mode && !ref_fill_mode && direction_write;
+    wire dram_to_l1_load_mode = !direction_write && !sramcrc_mode && !ref_fill_mode;
+    wire [31:0] load_l1_beat_bytes =
+        (load_l1_remaining > 32'd16) ? 32'd16 : load_l1_remaining;
     wire final_l1_write_fire =
         final_l1_write_pending && payload_token_sent &&
         final_l1_resp_armed && l1_resp_valid && !final_l1_write_done;
     wire phase_stall =
-        (payload_phase_active && !payload_token_sent && !l1_req_ready) ||
+        (payload_phase_active && dram_to_l1_load_mode && (load_l1_remaining != 32'd0) && !l1_req_ready) ||
+        (payload_phase_active && !dram_to_l1_load_mode && !payload_token_sent && !l1_req_ready) ||
         (payload_phase_active && final_l1_write_pending && payload_token_sent && !final_l1_write_done) ||
         (sramcrc_mode && (sramcrc_remaining != 32'd0));
     wire sramcrc_active = sramcrc_mode && busy;
@@ -2486,26 +2534,28 @@ module vf_udma_engine #(
     integer final_write_i;
     integer sramcrc_i;
 
-    assign l1_req_valid = payload_phase_active && !payload_token_sent && !sramcrc_mode;
+    assign l1_req_valid = payload_phase_active && !sramcrc_mode &&
+        (dram_to_l1_load_mode ? (load_l1_remaining != 32'd0) : !payload_token_sent);
     assign l1_req_write = !direction_write;
-    assign l1_req_addr = l1_req_base_addr;
-    assign l1_req_bytes = bytes;
-    assign l1_req_payload_cycles = l1_payload_cycles;
+    assign l1_req_addr = l1_req_base_addr + load_l1_offset[ADDR_WIDTH-1:0];
+    assign l1_req_bytes = dram_to_l1_load_mode ? load_l1_beat_bytes : bytes;
+    assign l1_req_payload_cycles = dram_to_l1_load_mode ? 32'd1 : l1_payload_cycles;
     assign l1_req_wdata = l1_req_write
-        ? byte_lane_wdata(input_byte, l1_req_addr[3:0])
+        ? (dram_to_l1_load_mode ? dram_resp_rdata : byte_lane_wdata(input_byte, l1_req_addr[3:0]))
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
-        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        ? (dram_to_l1_load_mode ? beat_wstrb(load_l1_beat_bytes, l1_req_addr[3:0]) :
+           ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0]))
         : {DATA_WIDTH/8{1'b0}};
     assign dram_req_valid = busy &&
         ((phase_id == PH_DRAM_CMD) ||
          (phase_id == PH_DRAM_WRITE_DATA) ||
          (phase_id == PH_DRAM_READ_DATA));
     assign dram_req_write = direction_write;
-    assign dram_req_addr = 32'd0;
+    assign dram_req_addr = ref_off + (direction_write ? out_byte_offset : load_l1_offset);
     assign dram_req_bytes = direction_write ? bytes : effective_dram_read_bytes;
-    assign dram_req_wdata = direction_write ? {DATA_WIDTH{1'b0}} : {DATA_WIDTH{1'b0}};
-    assign dram_req_wstrb = direction_write ? {DATA_WIDTH/8{1'b1}} : {DATA_WIDTH/8{1'b0}};
+    assign dram_req_wdata = direction_write ? store_dram_wdata : {DATA_WIDTH{1'b0}};
+    assign dram_req_wstrb = direction_write ? store_dram_wstrb : {DATA_WIDTH/8{1'b0}};
 
     function [31:0] fnv_byte;
         input [31:0] crc;
@@ -2523,9 +2573,30 @@ module vf_udma_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH/8-1:0] beat_wstrb;
+        input [31:0] byte_count;
+        input [3:0] lane;
+        integer idx;
+        integer absolute_lane;
+        reg [DATA_WIDTH/8-1:0] mask;
+        begin
+            mask = {DATA_WIDTH/8{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                absolute_lane = lane + idx;
+                if ((idx < byte_count) && (absolute_lane < DATA_WIDTH/8))
+                    mask[absolute_lane] = 1'b1;
+            end
+            beat_wstrb = mask;
+        end
+    endfunction
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             payload_token_sent <= 1'b0;
+            load_l1_offset <= 32'd0;
+            load_l1_remaining <= 32'd0;
+            store_dram_wdata <= {DATA_WIDTH{1'b0}};
+            store_dram_wstrb <= {DATA_WIDTH/8{1'b0}};
             final_l1_write_done <= 1'b0;
             final_l1_resp_armed <= 1'b0;
             final_l1_resp_guard <= 4'd0;
@@ -2539,6 +2610,10 @@ module vf_udma_engine #(
             ref_fill_fd = 0;
         end else if (start_fire) begin
             payload_token_sent <= 1'b0;
+            load_l1_offset <= 32'd0;
+            load_l1_remaining <= dram_to_l1_load_mode ? bytes : 32'd0;
+            store_dram_wdata <= {DATA_WIDTH{1'b0}};
+            store_dram_wstrb <= {DATA_WIDTH/8{1'b0}};
             final_l1_write_done <= 1'b0;
             final_l1_resp_armed <= 1'b0;
             final_l1_resp_guard <= 4'd0;
@@ -2571,6 +2646,15 @@ module vf_udma_engine #(
             end
         end else if (payload_token_fire) begin
             payload_token_sent <= 1'b1;
+            if (dram_to_l1_load_mode) begin
+                if (load_l1_remaining > load_l1_beat_bytes) begin
+                    load_l1_remaining <= load_l1_remaining - load_l1_beat_bytes;
+                    load_l1_offset <= load_l1_offset + load_l1_beat_bytes;
+                    payload_token_sent <= 1'b0;
+                end else begin
+                    load_l1_remaining <= 32'd0;
+                end
+            end
             if (final_l1_write_pending)
                 final_l1_resp_guard <= 4'd4;
             if (final_write_mode && !ref_fill_mode && !direction_write &&
@@ -2586,6 +2670,8 @@ module vf_udma_engine #(
             final_l1_write_done <= 1'b1;
             final_l1_resp_armed <= 1'b0;
             final_l1_resp_guard <= 4'd0;
+            store_dram_wdata <= l1_resp_rdata;
+            store_dram_wstrb <= beat_wstrb(bytes, 4'd0);
             for (final_write_i = 0; final_write_i < 16; final_write_i = final_write_i + 1) begin
                 if ((final_write_i < bytes) &&
                     ((out_byte_offset + final_write_i[31:0]) < MAX_UDMA_OUTPUT_SRAM_BYTES)) begin
@@ -2667,9 +2753,12 @@ module vf_tnps_engine #(
     input             final_write_mode,
     input             sramcrc_mode,
     input      [7:0]  input_byte,
+    input      [127:0] input_vec,
     input      [31:0] out_byte_offset,
     input      [31:0] sramcrc_expected_count,
     input      [ADDR_WIDTH-1:0] l1_req_base_addr,
+    input             l1_resp_valid,
+    input      [DATA_WIDTH-1:0] l1_resp_rdata,
     output            l1_req_valid,
     input             l1_req_ready,
     output            l1_req_write,
@@ -2722,6 +2811,31 @@ module vf_tnps_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] vector_lane_wdata;
+        input [127:0] value;
+        input [3:0] lane;
+        begin
+            vector_lane_wdata = value << ({lane, 3'd0});
+        end
+    endfunction
+
+    function [DATA_WIDTH/8-1:0] vector_lane_wstrb;
+        input [31:0] byte_count;
+        input [3:0] lane;
+        reg [DATA_WIDTH/8-1:0] mask;
+        integer idx;
+        integer absolute_lane;
+        begin
+            mask = {DATA_WIDTH/8{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                absolute_lane = lane + idx;
+                if ((idx < byte_count) && (absolute_lane < DATA_WIDTH/8))
+                    mask[absolute_lane] = 1'b1;
+            end
+            vector_lane_wstrb = mask;
+        end
+    endfunction
+
     vf_tnps_addrgen u_addrgen (
         .mode_space_to_depth(mode_space_to_depth),
         .in_h(in_h),
@@ -2768,36 +2882,60 @@ module vf_tnps_engine #(
     reg [31:0] sramcrc_crc_value;
     reg [31:0] sramcrc_count_value;
     reg [7:0] output_sram [0:MAX_TNPS_OUTPUT_SRAM_BYTES-1];
+    reg [DATA_WIDTH-1:0] permute_vec;
+    reg payload_read_req_sent;
+    reg payload_read_resp_seen;
     integer sramcrc_i;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
-    wire phase_stall = payload_phase_active && !payload_token_sent && !l1_req_ready;
+    wire phase_stall =
+        (payload_phase_active && (phase_id == PH_PAYLOAD_READ) &&
+         (!payload_read_req_sent || !payload_read_resp_seen)) ||
+        (payload_phase_active && (phase_id == PH_PAYLOAD_WRITE) &&
+         !payload_token_sent && !l1_req_ready);
 
     wire sramcrc_active = sramcrc_mode && busy && (phase_id == PH_PERMUTE_PIPE);
     wire final_write_active = final_write_mode && busy && (phase_id == PH_PAYLOAD_WRITE);
+    wire [DATA_WIDTH-1:0] final_write_vec = final_write_mode ? permute_vec : input_vec;
 
-    assign l1_req_valid = payload_phase_active && !payload_token_sent;
+    assign l1_req_valid = payload_phase_active &&
+        ((phase_id == PH_PAYLOAD_READ) ? !payload_read_req_sent : !payload_token_sent);
     assign l1_req_write = (phase_id == PH_PAYLOAD_WRITE);
-    assign l1_req_addr = l1_req_base_addr;
+    assign l1_req_addr = (phase_id == PH_PAYLOAD_READ)
+        ? (l1_req_base_addr + sample_src_byte_offset[ADDR_WIDTH-1:0])
+        : out_byte_offset[ADDR_WIDTH-1:0];
     assign l1_req_bytes = bytes;
     assign l1_req_payload_cycles = (phase_id == PH_PAYLOAD_WRITE)
         ? payload_write_cycles
         : payload_read_cycles;
     assign l1_req_wdata = l1_req_write
-        ? byte_lane_wdata(input_byte, l1_req_addr[3:0])
+        ? vector_lane_wdata(final_write_vec, l1_req_addr[3:0])
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
-        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        ? vector_lane_wstrb(bytes, l1_req_addr[3:0])
         : {DATA_WIDTH/8{1'b0}};
 
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
+        if (!rst_n) begin
             payload_token_sent <= 1'b0;
-        else if (start_fire)
+            payload_read_req_sent <= 1'b0;
+            payload_read_resp_seen <= 1'b0;
+        end else if (start_fire) begin
             payload_token_sent <= 1'b0;
-        else if (payload_token_fire)
+            payload_read_req_sent <= 1'b0;
+            payload_read_resp_seen <= 1'b0;
+        end else if (payload_token_fire) begin
             payload_token_sent <= 1'b1;
-        else if (!payload_phase_active)
+            if (phase_id == PH_PAYLOAD_READ)
+                payload_read_req_sent <= 1'b1;
+        end else if ((phase_id == PH_PAYLOAD_READ) && l1_resp_valid) begin
+            payload_read_resp_seen <= 1'b1;
+        end else if (!payload_phase_active) begin
             payload_token_sent <= 1'b0;
+            if (phase_id != PH_PAYLOAD_READ) begin
+                payload_read_req_sent <= 1'b0;
+                payload_read_resp_seen <= 1'b0;
+            end
+        end
     end
 
     always @(posedge clk or negedge rst_n) begin
@@ -2806,16 +2944,24 @@ module vf_tnps_engine #(
             sramcrc_count <= 32'd0;
             sramcrc_remaining <= 32'd0;
             sramcrc_index <= 32'd0;
+            permute_vec <= {DATA_WIDTH{1'b0}};
         end else if (start_fire) begin
+            permute_vec <= input_vec;
             if (sramcrc_mode) begin
                 sramcrc_crc <= FNV_OFFSET;
                 sramcrc_count <= 32'd0;
                 sramcrc_remaining <= sramcrc_expected_count;
                 sramcrc_index <= out_byte_offset;
             end
+        end else if ((phase_id == PH_PAYLOAD_READ) && l1_resp_valid) begin
+            permute_vec <= l1_resp_rdata;
         end else if (final_write_active && payload_token_fire) begin
-            if (out_byte_offset < MAX_TNPS_OUTPUT_SRAM_BYTES)
-                output_sram[out_byte_offset] <= input_byte;
+            for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                if ((sramcrc_i < bytes) &&
+                    ((out_byte_offset + sramcrc_i[31:0]) < MAX_TNPS_OUTPUT_SRAM_BYTES))
+                    output_sram[out_byte_offset + sramcrc_i[31:0]] <=
+                        final_write_vec[sramcrc_i*8 +: 8];
+            end
         end else if (sramcrc_active && (sramcrc_remaining != 32'd0)) begin
             sramcrc_crc_value = sramcrc_crc;
             sramcrc_count_value = sramcrc_count;

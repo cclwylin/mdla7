@@ -41,6 +41,23 @@ Current smoke coverage:
   REQUANT, EWE, POOL, and TNPS requesters into L1Mesh service.
 - `top`: `mdla7_top_final` integration for CONV/REQUANT/POOL/EWE/UDMA/TNPS.
 - `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top_final`.
+- `closed_loop`: generated host program that verifies
+  `DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM`
+  with a final UDMA reload and L1CRC check for each engine.
+
+Closed-loop dataflow smoke:
+
+```sh
+./rtl/batch/run_verilog_final_smoke.py --test closed_loop
+```
+
+This test auto-generates its compact descriptor stream and reference DRAM image
+under `rtl/obj/verilog_final/programs/`. It covers POOL, TNPS, EWE, and CONV as
+separate closed loops:
+
+```text
+DRAM -> UDMA -> L1 -> engine -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
+```
 
 `host_final.v` is the first program-driven path for `verilog_final`. It uses a
 simple 32-word descriptor format and has a built-in default
@@ -60,12 +77,41 @@ An MDL7 `.bin` can be converted to this descriptor stream:
   --program rtl/verilog_final/dped_float_L1.final.hex
 ```
 
+To generate real `.bin` probes that explicitly exercise the shared closed-loop
+path, add `--closed-loop-dataflow`:
+
+```sh
+./rtl/batch/gen_verilog_final_program.py rtl/bin/ETHZ_v6_slice/dped_float_L1.bin \
+  -o rtl/obj/verilog_final/programs/dped_float_L1.closed_loop.final.hex \
+  --closed-loop-dataflow
+./rtl/batch/run_verilog_final_smoke.py --test host \
+  --program rtl/obj/verilog_final/programs/dped_float_L1.closed_loop.final.hex \
+  --ref-program rtl/bin/ETHZ_v6_slice/dped_float_L1.bin
+```
+
+These generated probes use real UDMA descriptors around the engine command:
+
+```text
+DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM -> UDMA -> L1CRC
+```
+
 For small byte-moving regression batches, use:
 
 ```sh
 ./rtl/batch/run_verilog_final.py --filter slice --limit 10
 ./rtl/batch/run_verilog_final.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
 ```
+
+For closed-loop dataflow regression through the batch runner, use:
+
+```sh
+./rtl/batch/run_verilog_final.py --filter slice --closed-loop-dataflow
+./rtl/batch/run_verilog_final.py --filter dped_float_L1.bin --closed-loop-dataflow
+```
+
+The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
+`finalB` count bytes that completed the shared path through UDMA, L1, an engine,
+UDMA store-back, DRAM reload, and L1CRC.
 
 To spend more commands on oversized INT8 CONV output SRAM windows:
 
