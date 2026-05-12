@@ -2541,7 +2541,11 @@ module vf_udma_engine #(
     assign l1_req_bytes = dram_to_l1_load_mode ? load_l1_beat_bytes : bytes;
     assign l1_req_payload_cycles = dram_to_l1_load_mode ? 32'd1 : l1_payload_cycles;
     assign l1_req_wdata = l1_req_write
-        ? (dram_to_l1_load_mode ? dram_resp_rdata : byte_lane_wdata(input_byte, l1_req_addr[3:0]))
+        ? (dram_to_l1_load_mode ? align_dram_to_l1_wdata(
+                                      dram_resp_rdata,
+                                      l1_req_addr[3:0],
+                                      load_l1_beat_bytes
+                                  ) : byte_lane_wdata(input_byte, l1_req_addr[3:0]))
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
         ? (dram_to_l1_load_mode ? beat_wstrb(load_l1_beat_bytes, l1_req_addr[3:0]) :
@@ -2587,6 +2591,26 @@ module vf_udma_engine #(
                     mask[absolute_lane] = 1'b1;
             end
             beat_wstrb = mask;
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] align_dram_to_l1_wdata;
+        input [DATA_WIDTH-1:0] data;
+        input [3:0] l1_lane;
+        input [31:0] byte_count;
+        integer idx;
+        integer dst_lane;
+        reg [DATA_WIDTH-1:0] aligned;
+        begin
+            aligned = {DATA_WIDTH{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                dst_lane = l1_lane + idx;
+                if ((idx < byte_count) &&
+                    (dst_lane < DATA_WIDTH/8)) begin
+                    aligned[dst_lane*8 +: 8] = data[idx*8 +: 8];
+                end
+            end
+            align_dram_to_l1_wdata = aligned;
         end
     endfunction
 

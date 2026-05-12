@@ -112,6 +112,9 @@ For closed-loop dataflow regression through the batch runner, use:
 The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
 `finalB` count bytes that completed the shared path through UDMA, L1, an engine,
 UDMA store-back, DRAM reload, and L1CRC.
+POOL closed-loop probes use per-byte UDMA scatter loads when the real pooling
+window is not contiguous in DRAM, then present the sampled bytes as a contiguous
+L1 vector to the POOL datapath.
 
 To spend more commands on oversized INT8 CONV output SRAM windows:
 

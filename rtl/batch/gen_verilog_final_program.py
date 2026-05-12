@@ -2163,20 +2163,20 @@ def closed_loop_pool_probe(layer: Layer, ordinal: int, result_dram_off: int) -> 
     if elem_count <= 0 or elem_count > 16 or len(offsets) < elem_count:
         return []
     source_offsets = offsets[:elem_count]
-    if source_offsets != list(range(source_offsets[0], source_offsets[0] + elem_count)):
-        return []
     l1_base = 0x10000 + ((layer.index * 0x100) & 0x2FFFF)
     l1_result = l1_base + 0x80
-    descs: list[list[int]] = [
-        udma_dram_to_l1_descriptor(
-            layer,
-            ordinal,
-            layer.in_off + source_offsets[0],
-            l1_base,
-            elem_count,
-            SMF_LOAD_A,
+    descs: list[list[int]] = []
+    for idx, src_off in enumerate(source_offsets):
+        descs.append(
+            udma_dram_to_l1_descriptor(
+                layer,
+                ordinal + len(descs),
+                layer.in_off + src_off,
+                l1_base + idx,
+                1,
+                SMF_LOAD_A,
+            )
         )
-    ]
     desc = pool_int8_output_descriptor(layer, ordinal + len(descs), 0, read_sample_from_l1=True)
     if desc is None:
         return []
