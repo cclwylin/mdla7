@@ -261,6 +261,8 @@ module vf_conv_sample_engine #(
     input      [MAX_ELEMS*8-1:0]  act_vec,
     input      [MAX_ELEMS*8-1:0]  wgt_vec,
     input      [7:0]              elem_count,
+    input      [31:0]             workload_bytes,
+    input      [31:0]             workload_outputs,
     input                         read_sample_from_l1,
     input                         fp_mode,
     input                         int16_mode,
@@ -587,16 +589,25 @@ module vf_conv_sample_engine #(
     wire [7:0] safe_fp_count = (elem_count == 8'd0) ? 8'd1 :
                                (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
                                elem_count;
+    wire [31:0] workload_elem_count = (elem_count == 8'd0) ? 32'd1 : {24'd0, elem_count};
     wire [31:0] sample_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                          {24'd0, safe_int_count};
+    wire [31:0] elem_workload_bytes = (fp_mode || int16_mode) ? (workload_elem_count << 1) :
+                                                                  workload_elem_count;
+    wire [31:0] workload_sample_bytes = (workload_bytes > sample_bytes) ? workload_bytes :
+                                                                           elem_workload_bytes;
     wire [31:0] store_bytes = fp_mode ? 32'd8 :
                               int16_mode ? 32'd4 :
                               32'd1;
-    wire [31:0] payload_cycles = ceil_div(sample_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
+    wire [31:0] payload_cycles = ceil_div(workload_sample_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
     wire [31:0] store_payload_cycles = ceil_div(store_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
-    wire [31:0] mac_cycles = ceil_div(fp_mode ? {24'd0, safe_fp_count} :
-                                      int16_mode ? {24'd0, safe_fp_count} :
-                                                   {24'd0, safe_int_count}, 32'd16) + 32'd1;
+    wire [7:0] safe_tile_output_count = (conv_tile_output_count == 8'd0) ? 8'd1 : conv_tile_output_count;
+    wire [31:0] workload_lane_count = (fp_mode || int16_mode) ? (workload_sample_bytes >> 1) :
+                                                                 workload_sample_bytes;
+    wire [31:0] workload_output_count = (workload_outputs == 32'd0) ? {24'd0, safe_tile_output_count} :
+                                                                         workload_outputs;
+    wire [31:0] workload_mac_ops = workload_lane_count * workload_output_count;
+    wire [31:0] mac_cycles = ceil_div(workload_mac_ops, 32'd16) + 32'd1;
     wire req_state = ((state == ST_ACT) && (!read_sample_from_l1 || !act_req_sent)) ||
                      ((state == ST_WGT) && (!read_sample_from_l1 || !wgt_req_sent)) ||
                      (state == ST_STORE);
@@ -609,11 +620,11 @@ module vf_conv_sample_engine #(
     assign l1_req_addr =
         ((state == ST_STORE) && conv_partial_final && !read_sample_from_l1) ?
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
-        (state == ST_WGT) ? (l1_req_base_addr + sample_bytes[ADDR_WIDTH-1:0]) :
+        (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0]) :
         l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
                           (state == ST_STORE) ? store_bytes :
-                          sample_bytes;
+                          workload_sample_bytes;
     assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 :
                                    (state == ST_STORE) ? store_payload_cycles :
                                    payload_cycles;
@@ -628,7 +639,6 @@ module vf_conv_sample_engine #(
 
     wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
     wire [31:0] conv_k_w_safe = (conv_k_w == 8'd0) ? 32'd1 : {24'd0, conv_k_w};
-    wire [7:0] safe_tile_output_count = (conv_tile_output_count == 8'd0) ? 8'd1 : conv_tile_output_count;
     wire [7:0] scoreboard_tile_output_count = (safe_tile_output_count > 8'd4) ? 8'd4 : safe_tile_output_count;
     wire [31:0] conv_tile_last_out_elem_index =
         conv_out_elem_index + {24'd0, scoreboard_tile_output_count} - 32'd1;

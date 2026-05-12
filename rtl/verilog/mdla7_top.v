@@ -118,6 +118,8 @@ module mdla7_top #(
     input      [127:0]          conv_act_vec,
     input      [127:0]          conv_wgt_vec,
     input      [7:0]            conv_elem_count,
+    input      [31:0]           conv_workload_bytes,
+    input      [31:0]           conv_workload_outputs,
     input                       conv_read_sample_from_l1,
     input                       conv_fp_mode,
     input                       conv_int16_mode,
@@ -330,6 +332,8 @@ module mdla7_top #(
     reg [127:0] conv_act_vec_q;
     reg [127:0] conv_wgt_vec_q;
     reg [7:0] conv_elem_count_q;
+    reg [31:0] conv_workload_bytes_q;
+    reg [31:0] conv_workload_outputs_q;
     reg conv_read_sample_from_l1_q;
     reg conv_fp_mode_q;
     reg conv_int16_mode_q;
@@ -662,6 +666,8 @@ module mdla7_top #(
         .act_vec(conv_act_vec_q),
         .wgt_vec(conv_wgt_vec_q),
         .elem_count(conv_elem_count_q),
+        .workload_bytes(conv_workload_bytes_q),
+        .workload_outputs(conv_workload_outputs_q),
         .read_sample_from_l1(conv_read_sample_from_l1_q),
         .fp_mode(conv_fp_mode_q),
         .int16_mode(conv_int16_mode_q),
@@ -1138,6 +1144,8 @@ module mdla7_top #(
             conv_act_vec_q <= 128'd0;
             conv_wgt_vec_q <= 128'd0;
             conv_elem_count_q <= 8'd0;
+            conv_workload_bytes_q <= 32'd0;
+            conv_workload_outputs_q <= 32'd0;
             conv_read_sample_from_l1_q <= 1'b0;
             conv_fp_mode_q <= 1'b0;
             conv_int16_mode_q <= 1'b0;
@@ -1264,6 +1272,8 @@ module mdla7_top #(
                         conv_act_vec_q <= conv_act_vec;
                         conv_wgt_vec_q <= conv_wgt_vec;
                         conv_elem_count_q <= conv_elem_count;
+                        conv_workload_bytes_q <= conv_workload_bytes;
+                        conv_workload_outputs_q <= conv_workload_outputs;
                         conv_read_sample_from_l1_q <= conv_read_sample_from_l1;
                         conv_fp_mode_q <= conv_fp_mode;
                         conv_int16_mode_q <= conv_int16_mode;

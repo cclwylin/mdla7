@@ -82,6 +82,9 @@ DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
 DEFAULT_CONV_SRAM_WINDOW_COUNT = 3
+CONV_TILE_MAX_ELEMS = 255
+CONV_TILE_MAX_OUTPUTS = 32768
+BYTE_TILE_SWEEP_PROBES = 4
 MICRO_TILE_BYTES = 1 << 20
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 16777619
@@ -862,7 +865,7 @@ def closed_loop_tnps_probes(layer: Layer, ordinal: int, result_dram_off: int,
     start_candidates = [
         elem_index * elem
         for elem_index in closed_loop_output_indices(output_elems, command_budget, 4)
-    ][:1]
+    ][:BYTE_TILE_SWEEP_PROBES]
     for start_out_byte in start_candidates:
         probe = closed_loop_tnps_probe(
             layer,
@@ -1893,12 +1896,28 @@ def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int
     op = desc[0] & 0xF
     if op not in (OP_POOL, OP_CONV):
         return []
-    byte_count = desc[1]
-    if byte_count <= 0 or byte_count > 16:
+    sample_byte_count = desc[1]
+    if sample_byte_count <= 0 or sample_byte_count > 16:
         return []
     data = descriptor_for_layer.program_bytes
     l1_base = 0x50000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
     l1_result = l1_base if op == OP_CONV else l1_base + 0x80
+    load_byte_count = sample_byte_count
+    if op == OP_CONV:
+        tile_elem_count = min(
+            layer.in_size // 2,
+            layer.wgt_size // 2,
+            CONV_TILE_MAX_ELEMS,
+        )
+        tile_elem_count -= tile_elem_count % 8
+        if tile_elem_count == 0:
+            tile_elem_count = sample_byte_count // 2
+        if tile_elem_count <= 0:
+            return []
+        load_byte_count = tile_elem_count * 2
+        desc[1] = load_byte_count
+        output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+        desc[31] = min(output_elems, CONV_TILE_MAX_OUTPUTS)
     descs = []
     descs.append(
         udma_dram_to_l1_descriptor(
@@ -1906,22 +1925,22 @@ def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int
             ordinal,
             layer.in_off,
             l1_base,
-            byte_count,
+            load_byte_count,
             SMF_LOAD_A,
         )
     )
-    if data[layer.in_off:layer.in_off + byte_count] != descriptor_payload_bytes(desc, 4, byte_count):
+    if data[layer.in_off:layer.in_off + sample_byte_count] != descriptor_payload_bytes(desc, 4, sample_byte_count):
         return []
     if op == OP_CONV:
-        if data[layer.wgt_off:layer.wgt_off + byte_count] != descriptor_payload_bytes(desc, 8, byte_count):
+        if data[layer.wgt_off:layer.wgt_off + sample_byte_count] != descriptor_payload_bytes(desc, 8, sample_byte_count):
             return []
         descs.append(
             udma_dram_to_l1_descriptor(
                 layer,
                 ordinal + len(descs),
                 layer.wgt_off,
-                l1_base + byte_count,
-                byte_count,
+                l1_base + load_byte_count,
+                load_byte_count,
                 SMF_LOAD_B,
             )
         )
@@ -1962,8 +1981,6 @@ def closed_loop_conv_probe(
         return []
     in_per_group = layer.in_c // group
     total_lanes = max(layer.k_h or 1, 1) * max(layer.k_w or 1, 1) * max(in_per_group, 1)
-    if total_lanes > 8:
-        return []
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
     if out_elem_index < 0 or out_elem_index >= output_elems:
         return []
@@ -1995,19 +2012,33 @@ def closed_loop_conv_probe(
     if sample is None:
         return []
     desc, _ = sample
-    elem_count = desc[12] & 0xFF
-    if elem_count == 0:
+    sample_elem_count = desc[12] & 0xFF
+    if sample_elem_count == 0:
         return []
-    if ((desc[3] & (1 << 3)) == 0) or ((desc[30] & 0xFF) != elem_count):
+    if ((desc[3] & (1 << 3)) == 0) or ((desc[30] & 0xFF) != sample_elem_count):
         return []
     act_src = desc[28]
     wgt_src = desc[29]
-    act_expected = descriptor_payload_bytes(desc, 4, elem_count)
-    wgt_expected = descriptor_payload_bytes(desc, 8, elem_count)
-    if data[layer.in_off + act_src:layer.in_off + act_src + elem_count] != act_expected:
+    act_expected = descriptor_payload_bytes(desc, 4, sample_elem_count)
+    wgt_expected = descriptor_payload_bytes(desc, 8, sample_elem_count)
+    if data[layer.in_off + act_src:layer.in_off + act_src + sample_elem_count] != act_expected:
         return []
-    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + elem_count] != wgt_expected:
+    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + sample_elem_count] != wgt_expected:
         return []
+    tile_elem_count = min(
+        total_lanes,
+        layer.in_size - act_src,
+        layer.wgt_size - wgt_src,
+        CONV_TILE_MAX_ELEMS,
+    )
+    tile_elem_count -= tile_elem_count % 16
+    if tile_elem_count == 0:
+        tile_elem_count = sample_elem_count
+    if tile_elem_count < sample_elem_count:
+        return []
+    desc[1] = tile_elem_count
+    desc[30] = (desc[30] & ~0xFF) | sample_elem_count
+    desc[31] = min(output_elems - out_elem_index, CONV_TILE_MAX_OUTPUTS)
     l1_base = 0x40000 + ((layer.index * 0x100 + out_elem_index * 0x20) & 0x2FFFF)
     l1_result = l1_base
     descs = [
@@ -2016,15 +2047,15 @@ def closed_loop_conv_probe(
             ordinal,
             layer.in_off + act_src,
             l1_base,
-            elem_count,
+            tile_elem_count,
             SMF_LOAD_A,
         ),
         udma_dram_to_l1_descriptor(
             layer,
             ordinal + 1,
             layer.wgt_off + wgt_src,
-            l1_base + elem_count,
-            elem_count,
+            l1_base + tile_elem_count,
+            tile_elem_count,
             SMF_LOAD_B,
         ),
     ]
@@ -2358,7 +2389,7 @@ def closed_loop_pool_probes(layer: Layer, ordinal: int, result_dram_off: int,
                             command_budget: int) -> list[list[int]]:
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 0)
     descs: list[list[int]] = []
-    indices = closed_loop_output_indices(output_elems, command_budget, 20)[:1]
+    indices = closed_loop_output_indices(output_elems, command_budget, 20)[:BYTE_TILE_SWEEP_PROBES]
     for out_elem_index in indices:
         probe = closed_loop_pool_probe(
             layer, ordinal + len(descs), result_dram_off, out_elem_index)
@@ -2541,7 +2572,7 @@ def closed_loop_ewe_probes(layer: Layer, ordinal: int, result_dram_off: int,
                            command_budget: int) -> list[list[int]]:
     output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
     descs: list[list[int]] = []
-    indices = closed_loop_output_indices(output_elems, command_budget, 5)[:1]
+    indices = closed_loop_output_indices(output_elems, command_budget, 5)[:BYTE_TILE_SWEEP_PROBES]
     for out_elem_index in indices:
         probe = closed_loop_ewe_probe(
             layer, ordinal + len(descs), result_dram_off, out_elem_index)

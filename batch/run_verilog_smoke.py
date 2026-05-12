@@ -174,7 +174,7 @@ def make_closed_loop_program(obj_root: Path) -> tuple[Path, Path]:
     words[15] = 1
     words[16] = -128 & 0xFFFFFFFF
     words[17] = 127
-    words[18] = 244
+    words[18] = 60
     words[20] = 0x00060001
     words[21] = 0x00010001
     words[22] = 0x01010601
@@ -182,11 +182,11 @@ def make_closed_loop_program(obj_root: Path) -> tuple[Path, Path]:
     words[24] = 0x00030000
     words[27] = 0
     words[30] = 6
-    words[31] = (1 << 16) | (4 << 8) | 3
+    words[31] = 3
     commands.append(words)
-    udma_store(0x0, 0x600, 1)
+    udma_store(0x4000, 0x600, 1)
     udma_load(0x600, 0x4200, 1)
-    l1crc(0x4200, bytes([244]))
+    l1crc(0x4200, bytes([60]))
 
     commands.append(command(OP_DONE))
     write_hex(program_path, commands)

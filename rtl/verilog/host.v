@@ -50,6 +50,8 @@ module host #(
     output reg [127:0] conv_act_vec,
     output reg [127:0] conv_wgt_vec,
     output reg [7:0]   conv_elem_count,
+    output reg [31:0]  conv_workload_bytes,
+    output reg [31:0]  conv_workload_outputs,
     output reg         conv_read_sample_from_l1,
     output reg         conv_fp_mode,
     output reg         conv_int16_mode,
@@ -346,6 +348,8 @@ module host #(
             conv_wgt_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
                              cmd_mem[base + 9], cmd_mem[base + 8]};
             conv_elem_count <= cmd_mem[base + 12][7:0];
+            conv_workload_bytes <= cmd_mem[base + 1];
+            conv_workload_outputs <= cmd_mem[base + 31];
             conv_read_sample_from_l1 <= cmd_mem[base + 3][11];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
@@ -650,6 +654,8 @@ module host #(
             conv_act_vec <= 128'd0;
             conv_wgt_vec <= 128'd0;
             conv_elem_count <= 8'd0;
+            conv_workload_bytes <= 32'd0;
+            conv_workload_outputs <= 32'd0;
             conv_read_sample_from_l1 <= 1'b0;
             conv_fp_mode <= 1'b0;
             conv_int16_mode <= 1'b0;

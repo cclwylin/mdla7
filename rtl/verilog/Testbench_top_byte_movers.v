@@ -42,6 +42,8 @@ module Testbench_top_byte_movers;
     reg [127:0] conv_act_vec;
     reg [127:0] conv_wgt_vec;
     reg [7:0] conv_elem_count;
+    reg [31:0] conv_workload_bytes;
+    reg [31:0] conv_workload_outputs;
     reg conv_read_sample_from_l1;
     reg conv_fp_mode;
     reg conv_int16_mode;
@@ -213,6 +215,8 @@ module Testbench_top_byte_movers;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_workload_bytes(conv_workload_bytes),
+        .conv_workload_outputs(conv_workload_outputs),
         .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
@@ -430,6 +434,8 @@ module Testbench_top_byte_movers;
         conv_act_vec = 128'd0;
         conv_wgt_vec = 128'd0;
         conv_elem_count = 8'd0;
+        conv_workload_bytes = 32'd0;
+        conv_workload_outputs = 32'd0;
         conv_read_sample_from_l1 = 1'b0;
         conv_fp_mode = 1'b0;
         conv_int16_mode = 1'b0;

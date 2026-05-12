@@ -131,6 +131,8 @@ module Testbench_host_program;
     wire [127:0] conv_act_vec;
     wire [127:0] conv_wgt_vec;
     wire [7:0] conv_elem_count;
+    wire [31:0] conv_workload_bytes;
+    wire [31:0] conv_workload_outputs;
     wire conv_read_sample_from_l1;
     wire conv_fp_mode;
     wire conv_int16_mode;
@@ -362,6 +364,8 @@ module Testbench_host_program;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_workload_bytes(conv_workload_bytes),
+        .conv_workload_outputs(conv_workload_outputs),
         .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
@@ -577,6 +581,8 @@ module Testbench_host_program;
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
+        .conv_workload_bytes(conv_workload_bytes),
+        .conv_workload_outputs(conv_workload_outputs),
         .conv_read_sample_from_l1(conv_read_sample_from_l1),
         .conv_fp_mode(conv_fp_mode),
         .conv_int16_mode(conv_int16_mode),
