@@ -31,6 +31,61 @@ PLOT_PY = SYSTEMC_DIR / "scripts" / "plot_profile.py"
 MODEL_PROFILE_PY = HERE / "gen_model_profile.py"
 MODEL_RUNNER = SYSTEMC_DIR / "build" / "mdla7_model_runner"
 
+ETHZ_V6_MDLA6_CX: tuple[tuple[str, float], ...] = (
+    ("resnet_quant", 0.02),
+    ("resnet_float", 0.02),
+    ("mobilenet_v3_quant", 0.25),
+    ("xlsr_quant", 0.33),
+    ("mv3_depth_quant", 0.6),
+    ("yolo_v8_quant", 0.6),
+    ("mobilenet_v3_float", 0.61),
+    ("inception_v3_quant", 0.62),
+    ("midas_v3_quant", 0.66),
+    ("llama2_quant.cut", 0.71),
+    ("mobilenet_v3_b4_quant", 0.77),
+    ("vsr_quant", 0.77),
+    ("efficientnet_b4_quant", 0.96),
+    ("esrgan_quant", 0.97),
+    ("swin_quant", 1.0),
+    ("xlsr_float", 1.14),
+    ("mobilebert_quant.cut", 1.2),
+    ("gpt2_quant.cut", 1.44),
+    ("midas_v3_float", 1.54),
+    ("inception_v3_float", 1.56),
+    ("mv3_depth_float", 1.59),
+    ("sd_diffusion_quant", 1.61),
+    ("swin_float", 1.68),
+    ("unet_quant", 1.84),
+    ("deeplab_v3_plus_quant", 1.86),
+    ("sam_quant.cut", 2.03),
+    ("mobilenet_v3_b4_float", 2.13),
+    ("yolo_v8_float", 2.16),
+    ("mobilevit_v2_float", 2.16),
+    ("efficientnet_b4_float", 2.16),
+    ("esrgan_float", 2.22),
+    ("vsr_float", 2.37),
+    ("imdn_quant", 2.46),
+    ("esrgan__int16", 3.05),
+    ("sd_encoder_quant", 3.22),
+    ("unet_int16", 3.39),
+    ("srgan_quant", 3.4),
+    ("sam_float.cut", 3.49),
+    ("unet_float", 4.81),
+    ("vit_b16_quant", 4.83),
+    ("deeplab_v3_plus_float", 4.87),
+    ("dped_int16", 5.42),
+    ("microisp_quant", 5.42),
+    ("imdn_float", 5.58),
+    ("sd_decoder_quant", 6.53),
+    ("microisp_int16", 7.11),
+    ("microisp_float", 8.39),
+    ("pynet_v2_quant", 9.2),
+    ("srgan_float", 9.31),
+    ("pynet_v2_float", 14.38),
+    ("dped_quant", 23.27),
+    ("dped_float", 33.4),
+)
+
 VENV_DIR = Path(os.environ.get("MDLA7_VENV") or
                 Path.home() / ".venvs/mdla7").expanduser()
 VENV_PY = VENV_DIR / "bin" / "python"
@@ -2277,7 +2332,19 @@ def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False)
     return patterns
 
 
-def _load_pattern_order(csv_path: Path) -> dict[str, tuple[float, int]]:
+def _builtin_pattern_order(name: str) -> dict[str, tuple[float, int]]:
+    if name != "ethz_v6":
+        return {}
+    return {
+        _normalise_pattern(pattern): (mdla6_cx, idx)
+        for idx, (pattern, mdla6_cx) in enumerate(ETHZ_V6_MDLA6_CX)
+    }
+
+
+def _load_pattern_order(source: Path | str) -> dict[str, tuple[float, int]]:
+    if isinstance(source, str):
+        return _builtin_pattern_order(source)
+    csv_path = source
     if not csv_path.exists():
         raise SystemExit(f"pattern order CSV not found: {csv_path}")
     out: dict[str, tuple[float, int]] = {}
@@ -2296,10 +2363,10 @@ def _load_pattern_order(csv_path: Path) -> dict[str, tuple[float, int]]:
     return out
 
 
-def _apply_pattern_order(patterns: list[str], order_csv: Path | None) -> list[str]:
-    if not order_csv:
+def _apply_pattern_order(patterns: list[str], order_source: Path | str | None) -> list[str]:
+    if not order_source:
         return patterns
-    order = _load_pattern_order(order_csv)
+    order = _load_pattern_order(order_source)
 
     def key(item: tuple[int, str]) -> tuple[int, float, int, str]:
         original_idx, pattern = item
@@ -2361,8 +2428,16 @@ def _format_ms(value: float | None) -> str:
     return f"{value:.3f}" if value is not None else ""
 
 
-def _load_mdla6_cx_ms(csv_path: Path | None) -> dict[str, float]:
-    if not csv_path or not csv_path.exists():
+def _load_mdla6_cx_ms(source: Path | str | None) -> dict[str, float]:
+    if not source:
+        return {}
+    if isinstance(source, str):
+        return {
+            pattern: mdla6_cx
+            for pattern, (mdla6_cx, _) in _builtin_pattern_order(source).items()
+        }
+    csv_path = source
+    if not csv_path.exists():
         return {}
     out: dict[str, float] = {}
     with csv_path.open(newline="") as f:
@@ -2712,7 +2787,7 @@ def run_corpus(*,
                default_csv_out: Path,
                profile_html: str,
                profile_title: str,
-               pattern_order_csv: Path | None = None,
+               pattern_order_csv: Path | str | None = None,
                recursive: bool = False,
                microblock_metrics: bool = False) -> None:
     ap = argparse.ArgumentParser()
@@ -2723,7 +2798,7 @@ def run_corpus(*,
                     help="output regression CSV")
     ap.add_argument("--filter", default="",
                     help="substring filter on model name")
-    ap.add_argument("--pattern-order-csv", default=str(pattern_order_csv or ""),
+    ap.add_argument("--pattern-order-csv", default="",
                     help="optional CSV with Pattern,mdla6_cx columns used to order selected models")
     ap.add_argument("--limit", type=int, default=0,
                     help="only run the first N selected models (0 = no limit)")
@@ -2803,8 +2878,12 @@ def run_corpus(*,
         profile_html = f"{profile_path.stem}.{suffix}{profile_path.suffix}"
     model_dir = Path(args.model_dir)
     patterns = _discover_models(model_dir, args.filter, recursive=recursive)
-    order_csv = Path(args.pattern_order_csv) if args.pattern_order_csv else None
-    patterns = _apply_pattern_order(patterns, order_csv)
+    order_source: Path | str | None
+    if args.pattern_order_csv:
+        order_source = Path(args.pattern_order_csv)
+    else:
+        order_source = pattern_order_csv
+    patterns = _apply_pattern_order(patterns, order_source)
     if args.offset:
         patterns = patterns[args.offset:]
     if args.limit:
@@ -2837,7 +2916,7 @@ def run_corpus(*,
         }
         profile_path = Path(profile_html)
         compare_html = f"{profile_path.stem}.rtl_compare{profile_path.suffix}"
-        mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_csv)
+        mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_source)
 
         def _mdla6_cx_ms_for(pattern: str) -> float | None:
             return mdla6_cx_ms_by_pattern.get(_normalise_pattern(pattern))
@@ -2996,7 +3075,7 @@ def run_corpus(*,
         }
         profile_path = Path(profile_html)
         compare_html = f"{profile_path.stem}.cx_rtl_compare{profile_path.suffix}"
-        mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_csv)
+        mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_source)
         rtl_suffix = _mode_suffix("rtl", "rtl")
         cx_suffix = _mode_suffix("cx", "cx")
 
@@ -3149,7 +3228,7 @@ def run_corpus(*,
     if prior_ok:
         print(f"  (cache: {len(prior_ok)} prior ok rows in {csv_path.name}; "
               f"--rerun-all to ignore)", flush=True)
-    mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_csv)
+    mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_source)
     has_mdla6_cx = bool(mdla6_cx_ms_by_pattern)
 
     def _mdla6_cx_ms_for(pattern: str) -> float | None:
@@ -3354,7 +3433,7 @@ CORPORA = {
         "csv": OUT_DIR / "ethz_v6_regression.csv",
         "profile": "profile_ethz_v6.html",
         "title": "MDLA7 ETHZ_v6 Profiles",
-        "order": REPO_ROOT / "batch" / "mdla6_ethz_v6_sorted.csv",
+        "order": "ethz_v6",
     },
     "ethz_v6": {
         "name": "ETHZ_v6",
@@ -3362,7 +3441,7 @@ CORPORA = {
         "csv": OUT_DIR / "ethz_v6_regression.csv",
         "profile": "profile_ethz_v6.html",
         "title": "MDLA7 ETHZ_v6 Profiles",
-        "order": REPO_ROOT / "batch" / "mdla6_ethz_v6_sorted.csv",
+        "order": "ethz_v6",
     },
     "ethz_v5": {
         "name": "ETHZ_v5",

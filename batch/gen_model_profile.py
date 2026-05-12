@@ -21,7 +21,6 @@ SYSTEMC = REPO_ROOT / "systemc"
 OUT_DIR = HERE / "output"
 DEFAULT_HTML_OUT = HERE / "profile_mdla6_pattern.html"
 DEFAULT_REGRESSION_CSV = OUT_DIR / "mdla6_pattern_regression.csv"
-DEFAULT_BASELINE_CSV = HERE / "mdla6_ethz_v6_sorted.csv"
 TRANSFORMER_PATTERNS = {
     "gpt2_quant",
     "llama2_quant",
@@ -325,7 +324,7 @@ def main() -> None:
 
     metrics_csvs = [Path(p) for p in args.metrics_csv]
     if not metrics_csvs:
-        metrics_csvs = [DEFAULT_BASELINE_CSV, DEFAULT_REGRESSION_CSV]
+        metrics_csvs = [DEFAULT_REGRESSION_CSV]
 
     html_out = Path(args.html_out)
     if not html_out.is_absolute():
