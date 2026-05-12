@@ -1921,13 +1921,18 @@ def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
     return words
 
 
-def requant_output_descriptor_from_conv_final(layer: Layer, ordinal: int, conv_desc: list[int]) -> list[int]:
+def requant_output_descriptor_from_conv_final(
+    layer: Layer,
+    ordinal: int,
+    conv_desc: list[int],
+    read_input_from_l1: bool = False,
+) -> list[int]:
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x18) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_REQUANT
     words[1] = 1
     words[2] = addr
-    words[3] = 1 << 6
+    words[3] = (1 << 6) | ((1 << 11) if read_input_from_l1 else 0)
     words[4] = conv_desc[19]
     words[14] = conv_desc[14]
     words[15] = conv_desc[15]
@@ -1944,6 +1949,8 @@ def requant_output_descriptors_for_conv(
     ordinal: int,
     max_output_elems: int,
     start_output_elem: int = 0,
+    read_input_from_l1: bool = False,
+    max_commands: int | None = None,
 ) -> list[list[int]]:
     conv_descs = conv_real_partial_psum_descriptors(
         layer,
@@ -1954,18 +1961,39 @@ def requant_output_descriptors_for_conv(
     descs: list[list[int]] = []
     for conv_desc in conv_descs:
         if conv_desc[3] & (1 << 6):
+            out_byte_offset = conv_desc[27] & 0xFFFF_FFFF
+            if read_input_from_l1:
+                if (out_byte_offset & 0xF) > 12:
+                    break
+                if max_commands is not None and len(descs) + 5 > max_commands:
+                    break
+                acc_value = conv_desc[19] & 0xFFFF_FFFF
+                for byte_idx in range(4):
+                    descs.append(
+                        l1_preload_byte_descriptor(
+                            ordinal + len(descs),
+                            out_byte_offset + byte_idx,
+                            (acc_value >> (byte_idx * 8)) & 0xFF,
+                            layer.index,
+                        )
+                    )
             descs.append(
                 requant_output_descriptor_from_conv_final(
                     layer,
                     ordinal + len(descs),
                     conv_desc,
+                    read_input_from_l1=read_input_from_l1,
                 )
             )
     return descs
 
 
 def requant_final_q_bytes(final_descs: list[list[int]]) -> bytes:
-    return bytes(desc[18] & 0xFF for desc in final_descs)
+    return bytes(
+        desc[18] & 0xFF
+        for desc in final_descs
+        if (desc[0] & 0xF) == OP_REQUANT and (desc[3] & (1 << 6))
+    )
 
 
 def requant_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
@@ -2180,11 +2208,14 @@ def main() -> int:
             requant_output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if remaining_commands > 2:
-                max_requant_outputs = min(requant_output_elems, remaining_commands - 2, 512)
+                available_requant_output_cmds = max(remaining_commands - 2, 0)
+                max_requant_outputs = min(requant_output_elems, available_requant_output_cmds, 512)
                 requant_sram_descs = requant_output_descriptors_for_conv(
                     layer,
                     len(commands) + len(descs),
                     max_output_elems=max_requant_outputs,
+                    read_input_from_l1=True,
+                    max_commands=available_requant_output_cmds,
                 )
                 generated_requant = requant_final_q_bytes(requant_sram_descs)
                 ref_requant = descriptor_for_layer.program_bytes[

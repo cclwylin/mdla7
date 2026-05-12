@@ -82,6 +82,7 @@ module mdla7_top_final #(
     input      [15:0]           conv_sample_kw,
     input      [15:0]           conv_sample_ic,
     input signed [31:0]         requant_input_value,
+    input                       requant_read_input_from_l1,
     input                       requant_sramcrc_mode,
     input      [31:0]           requant_sramcrc_expected_count,
     input      [31:0]           requant_out_byte_offset,
@@ -277,6 +278,7 @@ module mdla7_top_final #(
     reg [15:0] conv_sample_kw_q;
     reg [15:0] conv_sample_ic_q;
     reg signed [31:0] requant_input_value_q;
+    reg requant_read_input_from_l1_q;
     reg requant_sramcrc_mode_q;
     reg [31:0] requant_sramcrc_expected_count_q;
     reg [31:0] requant_out_byte_offset_q;
@@ -602,9 +604,12 @@ module mdla7_top_final #(
         .zp_out(conv_zp_out_q),
         .act_min(conv_act_min_q),
         .act_max(conv_act_max_q),
+        .read_input_from_l1(requant_read_input_from_l1_q),
         .sramcrc_mode(requant_sramcrc_mode_q),
         .sramcrc_expected_count(requant_sramcrc_expected_count_q),
         .out_byte_offset(requant_out_byte_offset_q),
+        .l1_resp_valid(run_requant && l1mesh_resp_valid),
+        .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(requant_l1_req_valid),
         .l1_req_ready(requant_l1_req_ready),
         .l1_req_write(requant_l1_req_write),
@@ -945,6 +950,7 @@ module mdla7_top_final #(
             conv_sample_kw_q <= 16'd0;
             conv_sample_ic_q <= 16'd0;
             requant_input_value_q <= 32'sd0;
+            requant_read_input_from_l1_q <= 1'b0;
             requant_sramcrc_mode_q <= 1'b0;
             requant_sramcrc_expected_count_q <= 32'd0;
             requant_out_byte_offset_q <= 32'd0;
@@ -1057,6 +1063,7 @@ module mdla7_top_final #(
                         conv_sample_kw_q <= conv_sample_kw;
                         conv_sample_ic_q <= conv_sample_ic;
                         requant_input_value_q <= requant_input_value;
+                        requant_read_input_from_l1_q <= requant_read_input_from_l1;
                         requant_sramcrc_mode_q <= requant_sramcrc_mode;
                         requant_sramcrc_expected_count_q <= requant_sramcrc_expected_count;
                         requant_out_byte_offset_q <= requant_out_byte_offset;

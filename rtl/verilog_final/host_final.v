@@ -81,6 +81,7 @@ module host_final #(
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
     output reg signed [31:0] requant_input_value,
+    output reg         requant_read_input_from_l1,
     output reg         requant_sramcrc_mode,
     output reg [31:0]  requant_sramcrc_expected_crc,
     output reg [31:0]  requant_sramcrc_expected_count,
@@ -345,6 +346,7 @@ module host_final #(
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
             requant_input_value <= cmd_mem[base + 4];
+            requant_read_input_from_l1 <= cmd_mem[base + 3][11];
             requant_sramcrc_mode <= cmd_mem[base + 3][10];
             requant_sramcrc_expected_crc <= cmd_mem[base + 28];
             requant_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -637,6 +639,7 @@ module host_final #(
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;
             requant_input_value <= 32'sd0;
+            requant_read_input_from_l1 <= 1'b0;
             requant_sramcrc_mode <= 1'b0;
             requant_sramcrc_expected_crc <= 32'd0;
             requant_sramcrc_expected_count <= 32'd0;

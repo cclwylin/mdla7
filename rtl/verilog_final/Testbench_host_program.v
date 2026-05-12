@@ -78,6 +78,7 @@ module Testbench_host_program;
     wire [15:0] conv_sample_kw;
     wire [15:0] conv_sample_ic;
     wire signed [31:0] requant_input_value;
+    wire requant_read_input_from_l1;
     wire requant_sramcrc_mode;
     wire [31:0] requant_sramcrc_expected_crc;
     wire [31:0] requant_sramcrc_expected_count;
@@ -272,6 +273,7 @@ module Testbench_host_program;
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
+        .requant_read_input_from_l1(requant_read_input_from_l1),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
@@ -462,6 +464,7 @@ module Testbench_host_program;
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
+        .requant_read_input_from_l1(requant_read_input_from_l1),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
         .requant_out_byte_offset(requant_out_byte_offset),

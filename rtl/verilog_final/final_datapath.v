@@ -1126,9 +1126,12 @@ module vf_requant_sample_engine #(
     input signed [31:0]    zp_out,
     input signed [31:0]    act_min,
     input signed [31:0]    act_max,
+    input                  read_input_from_l1,
     input                  sramcrc_mode,
     input      [31:0]      sramcrc_expected_count,
     input      [31:0]      out_byte_offset,
+    input                  l1_resp_valid,
+    input      [127:0]     l1_resp_rdata,
     output                 l1_req_valid,
     input                  l1_req_ready,
     output                 l1_req_write,
@@ -1169,6 +1172,8 @@ module vf_requant_sample_engine #(
     reg [31:0] sramcrc_crc_value;
     reg [31:0] sramcrc_count_value;
     reg [7:0] output_sram [0:MAX_REQUANT_OUTPUT_SRAM_BYTES-1];
+    reg param_req_sent;
+    reg signed [31:0] active_input_value;
     integer sramcrc_i;
 
     function [31:0] fnv_byte;
@@ -1253,15 +1258,16 @@ module vf_requant_sample_engine #(
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
-    assign l1_req_valid = (state == ST_STORE);
-    assign l1_req_write = 1'b1;
-    assign l1_req_bytes = 32'd1;
+    assign l1_req_valid = ((state == ST_PARAM) && read_input_from_l1 && !param_req_sent) ||
+                          (state == ST_STORE);
+    assign l1_req_write = (state == ST_STORE);
+    assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 : 32'd1;
     assign l1_req_payload_cycles = 32'd2;
     assign scaled_out = clamped;
     assign out_q = clamped[7:0];
 
     always @* begin
-        quantized = mbqm(input_value, multiplier, shift) + zp_out;
+        quantized = mbqm(active_input_value, multiplier, shift) + zp_out;
         if (quantized < act_min)
             clamped = act_min;
         else if (quantized > act_max)
@@ -1287,10 +1293,13 @@ module vf_requant_sample_engine #(
             sramcrc_index <= 32'd0;
             sramcrc_crc <= FNV_OFFSET;
             sramcrc_count <= 32'd0;
+            param_req_sent <= 1'b0;
+            active_input_value <= 32'sd0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
+                    param_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
                         if (sramcrc_mode) begin
                             sramcrc_crc <= FNV_OFFSET;
@@ -1299,13 +1308,39 @@ module vf_requant_sample_engine #(
                             sramcrc_remaining <= sramcrc_expected_count;
                             state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
+                            active_input_value <= input_value;
                             state <= ST_PARAM;
                         end
                     end
                 end
                 ST_PARAM: begin
-                    pipe_remaining <= 32'd2;
-                    state <= ST_PIPE;
+                    if (read_input_from_l1) begin
+                        if (!param_req_sent && l1_req_ready)
+                            param_req_sent <= 1'b1;
+                        if (l1_resp_valid) begin
+                            case (out_byte_offset[3:0])
+                                4'h0: active_input_value <= l1_resp_rdata[31:0];
+                                4'h1: active_input_value <= l1_resp_rdata[39:8];
+                                4'h2: active_input_value <= l1_resp_rdata[47:16];
+                                4'h3: active_input_value <= l1_resp_rdata[55:24];
+                                4'h4: active_input_value <= l1_resp_rdata[63:32];
+                                4'h5: active_input_value <= l1_resp_rdata[71:40];
+                                4'h6: active_input_value <= l1_resp_rdata[79:48];
+                                4'h7: active_input_value <= l1_resp_rdata[87:56];
+                                4'h8: active_input_value <= l1_resp_rdata[95:64];
+                                4'h9: active_input_value <= l1_resp_rdata[103:72];
+                                4'ha: active_input_value <= l1_resp_rdata[111:80];
+                                4'hb: active_input_value <= l1_resp_rdata[119:88];
+                                4'hc: active_input_value <= l1_resp_rdata[127:96];
+                                default: active_input_value <= 32'sd0;
+                            endcase
+                            pipe_remaining <= 32'd2;
+                            state <= ST_PIPE;
+                        end
+                    end else begin
+                        pipe_remaining <= 32'd2;
+                        state <= ST_PIPE;
+                    end
                 end
                 ST_PIPE: begin
                     if (pipe_remaining > 32'd1)

@@ -71,6 +71,7 @@ module Testbench_top_byte_movers;
     reg [15:0] conv_sample_kw;
     reg [15:0] conv_sample_ic;
     reg signed [31:0] requant_input_value;
+    reg requant_read_input_from_l1;
     wire [31:0] requant_sramcrc_crc;
     wire [31:0] requant_sramcrc_count;
     reg pool_avg_mode;
@@ -227,6 +228,7 @@ module Testbench_top_byte_movers;
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
+        .requant_read_input_from_l1(requant_read_input_from_l1),
         .requant_sramcrc_mode(1'b0),
         .requant_sramcrc_expected_count(32'd0),
         .requant_out_byte_offset(32'd0),
@@ -425,6 +427,7 @@ module Testbench_top_byte_movers;
         conv_sample_kw = 16'd0;
         conv_sample_ic = 16'd0;
         requant_input_value = 32'sd0;
+        requant_read_input_from_l1 = 1'b0;
         pool_avg_mode = 1'b0;
         pool_fp_mode = 1'b0;
         pool_int16_mode = 1'b0;
