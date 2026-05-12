@@ -487,6 +487,47 @@ module mdla7_top_final #(
     assign block_busy = {l1mesh_busy, l1mgr_busy, udma_busy, tnps_busy, pool_busy, ewe_busy, requant_busy, conv_busy, 1'b0};
     assign block_done_valid = {l1mesh_resp_valid, l1mgr_resp_valid, udma_done_valid, tnps_done_valid, pool_done_valid, ewe_done_valid, requant_done_valid, conv_done_valid, 1'b0};
 
+    function [DATA_WIDTH-1:0] byte_lane_wdata;
+        input [7:0] value;
+        input [3:0] lane;
+        begin
+            byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
+        end
+    endfunction
+
+    wire [7:0] conv_l1_write_byte = conv_out_q[7:0];
+    wire [7:0] requant_l1_write_byte = requant_out_q[7:0];
+    wire [7:0] pool_l1_write_byte = pool_out_q[7:0];
+    wire [7:0] ewe_l1_write_byte = ewe_out_q[7:0];
+    wire [7:0] udma_l1_write_byte = udma_input_byte_q;
+    wire [7:0] tnps_l1_write_byte = tnps_input_byte_q;
+
+    wire [DATA_WIDTH-1:0] conv_l1_write_wdata =
+        byte_lane_wdata(conv_l1_write_byte, l1mesh_addr_q[3:0]);
+    wire [DATA_WIDTH-1:0] requant_l1_write_wdata =
+        byte_lane_wdata(requant_l1_write_byte, l1mesh_addr_q[3:0]);
+    wire [DATA_WIDTH-1:0] pool_l1_write_wdata =
+        byte_lane_wdata(pool_l1_write_byte, l1mesh_addr_q[3:0]);
+    wire [DATA_WIDTH-1:0] ewe_l1_write_wdata =
+        byte_lane_wdata(ewe_l1_write_byte, l1mesh_addr_q[3:0]);
+    wire [DATA_WIDTH-1:0] udma_l1_write_wdata =
+        byte_lane_wdata(udma_l1_write_byte, l1mesh_addr_q[3:0]);
+    wire [DATA_WIDTH-1:0] tnps_l1_write_wdata =
+        byte_lane_wdata(tnps_l1_write_byte, l1mesh_addr_q[3:0]);
+
+    wire [DATA_WIDTH-1:0] conv_l1_req_wdata =
+        conv_l1_req_write ? conv_l1_write_wdata : l1mesh_wdata_q;
+    wire [DATA_WIDTH-1:0] requant_l1_req_wdata =
+        requant_l1_req_write ? requant_l1_write_wdata : l1mesh_wdata_q;
+    wire [DATA_WIDTH-1:0] pool_l1_req_wdata =
+        pool_l1_req_write ? pool_l1_write_wdata : l1mesh_wdata_q;
+    wire [DATA_WIDTH-1:0] ewe_l1_req_wdata =
+        ewe_l1_req_write ? ewe_l1_write_wdata : l1mesh_wdata_q;
+    wire [DATA_WIDTH-1:0] udma_l1_req_wdata =
+        udma_l1_req_write ? udma_l1_write_wdata : l1mesh_wdata_q;
+    wire [DATA_WIDTH-1:0] tnps_l1_req_wdata =
+        tnps_l1_req_write ? tnps_l1_write_wdata : l1mesh_wdata_q;
+
     vf_l1mesh_route_estimator u_route (
         .source_id(op_class_q),
         .addr(l1mesh_addr_q),
@@ -796,7 +837,7 @@ module mdla7_top_final #(
         .udma_req_bytes(udma_l1_req_bytes),
         .udma_req_payload_cycles(udma_l1_req_payload_cycles),
         .udma_req_addr(l1mesh_addr_q),
-        .udma_req_wdata(l1mesh_wdata_q),
+        .udma_req_wdata(udma_l1_req_wdata),
         .udma_req_wstrb(l1mesh_wstrb_q),
         .requant_req_valid(requant_l1_req_valid),
         .requant_req_ready(requant_l1_req_ready),
@@ -805,7 +846,7 @@ module mdla7_top_final #(
         .requant_req_bytes(requant_l1_req_bytes),
         .requant_req_payload_cycles(requant_l1_req_payload_cycles),
         .requant_req_addr(l1mesh_addr_q),
-        .requant_req_wdata(l1mesh_wdata_q),
+        .requant_req_wdata(requant_l1_req_wdata),
         .requant_req_wstrb(l1mesh_wstrb_q),
         .ewe_req_valid(ewe_l1_req_valid),
         .ewe_req_ready(ewe_l1_req_ready),
@@ -814,7 +855,7 @@ module mdla7_top_final #(
         .ewe_req_bytes(ewe_l1_req_bytes),
         .ewe_req_payload_cycles(ewe_l1_req_payload_cycles),
         .ewe_req_addr(l1mesh_addr_q),
-        .ewe_req_wdata(l1mesh_wdata_q),
+        .ewe_req_wdata(ewe_l1_req_wdata),
         .ewe_req_wstrb(l1mesh_wstrb_q),
         .pool_req_valid(pool_l1_req_valid),
         .pool_req_ready(pool_l1_req_ready),
@@ -823,7 +864,7 @@ module mdla7_top_final #(
         .pool_req_bytes(pool_l1_req_bytes),
         .pool_req_payload_cycles(pool_l1_req_payload_cycles),
         .pool_req_addr(l1mesh_addr_q),
-        .pool_req_wdata(l1mesh_wdata_q),
+        .pool_req_wdata(pool_l1_req_wdata),
         .pool_req_wstrb(l1mesh_wstrb_q),
         .tnps_req_valid(tnps_l1_req_valid),
         .tnps_req_ready(tnps_l1_req_ready),
@@ -832,7 +873,7 @@ module mdla7_top_final #(
         .tnps_req_bytes(tnps_l1_req_bytes),
         .tnps_req_payload_cycles(tnps_l1_req_payload_cycles),
         .tnps_req_addr(l1mesh_addr_q),
-        .tnps_req_wdata(l1mesh_wdata_q),
+        .tnps_req_wdata(tnps_l1_req_wdata),
         .tnps_req_wstrb(l1mesh_wstrb_q),
         .mesh_req_write(l1mgr_mesh_req_write),
         .mesh_req_addr(l1mgr_mesh_req_addr),
@@ -857,7 +898,7 @@ module mdla7_top_final #(
         .req_addr(run_conv ? l1mesh_addr_q : l1mgr_mesh_req_addr),
         .req_bytes(run_conv ? conv_l1_req_bytes : l1mgr_mesh_req_bytes),
         .route_cycles(placement_route_cycles),
-        .req_wdata(run_conv ? l1mesh_wdata_q : l1mgr_mesh_req_wdata),
+        .req_wdata(run_conv ? conv_l1_req_wdata : l1mgr_mesh_req_wdata),
         .req_wstrb(run_conv ? l1mesh_wstrb_q : l1mgr_mesh_req_wstrb),
         .debug_crc_start(l1mesh_crc_start),
         .debug_crc_addr(l1mesh_addr_q),
