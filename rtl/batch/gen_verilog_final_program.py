@@ -2089,6 +2089,30 @@ def pool_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None
     return words
 
 
+def generic_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return None
+    ref_bytes = data[layer.ref_off:layer.ref_off + layer.ref_size]
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_CONV
+    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = 1 << 9
+    words[19] = layer.index
+    words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+    words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+    words[25] = layer.ref_off & 0xFFFF_FFFF
+    words[26] = layer.ref_size & 0xFFFF_FFFF
+    words[27] = (layer.ref_size - 1) & 0xFFFF_FFFF
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    words[30] = (layer.out_c & 0xFFFF) | ((layer.out_h & 0xFFFF) << 16)
+    words[31] = layer.out_w & 0xFFFF
+    return words
+
+
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
     elem = elem_bytes(layer.dtype)
     if layer.op_kind not in OK_CONV or elem != 1 or layer.in_size == 0 or layer.wgt_size == 0:
@@ -2292,6 +2316,9 @@ def main() -> int:
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
         if args.microblock_descriptors:
             descs = synth_microblock_descriptors(layer, len(commands))
+            crc_desc = generic_full_ref_crc_descriptor(layer, len(commands) + len(descs))
+            if crc_desc is not None:
+                descs.append(crc_desc)
         elif (
             args.emit_conv_partial_psum and
             desc is not None and
