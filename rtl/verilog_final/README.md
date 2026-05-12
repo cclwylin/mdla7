@@ -75,9 +75,12 @@ TNPS/UDMA layers do not dominate early `verilog_final` regressions while the pat
 is still checking sample correctness. Pass `--max-payload-bytes 0` to
 `gen_verilog_final_program.py` to disable the cap for timing experiments.
 
-The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`, and
-`udma` counts per `.bin`, so slice coverage is visible while the final datapath
-is still growing. Layers with no final descriptor are reported as `SKIP`.
+The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`,
+`udma`, `refcrc`, `sramcrc`, `refB`, and `sramB` counts per `.bin`, so slice
+coverage is visible while the final datapath is still growing. `refB` is the
+number of full-ref walker bytes checked from the original `.bin`; `sramB` is the
+number of output SRAM image bytes checked by the SRAM walker. Layers with no
+final descriptor are reported as `SKIP`.
 
 `--emit-conv-partial-psum` expands INT8 CONV descriptors into partial-K output
 tiles and checks the output SRAM image CRC/count. The host program now
@@ -92,12 +95,14 @@ output-window paths: the generator splits the `MAX_REFCRC_PREFIX_COMMANDS`
 budget across head/middle/tail output windows, validates that each generated
 final q byte slice matches the corresponding golden ref tensor slice, writes
 the accepted slices into the output SRAM image, and checks each slice with the
-same SRAM walker. These rows retain a compact full-ref CRC descriptor too:
+same SRAM walker. The runner reports the accepted window byte total in `sramB`.
+These rows retain a compact full-ref CRC descriptor too:
 word 25 carries `ref_off`, words 28/29 carry the expected CRC/count, and the
 final datapath opens the original `.bin` through `+FINAL_REF_PROGRAM`, seeks to
 `ref_off`, walks the full tensor bytes in Verilog, and updates the same FNV
-CRC/count registers. If a window does not match its golden slice, the generator
-skips that window and still emits the compact full-ref `refcrc` descriptor.
+CRC/count registers; the runner reports those bytes in `refB`. If a window does
+not match its golden slice, the generator skips that window and still emits the
+compact full-ref `refcrc` descriptor.
 
 Current converter behavior:
 

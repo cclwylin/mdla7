@@ -1445,6 +1445,8 @@ def main() -> int:
     udma_count = 0
     refcrc_count = 0
     sramcrc_count = 0
+    refcrc_bytes = 0
+    sramcrc_bytes = 0
     command_limit = max(args.max_commands - 1, 0)
     for layer in layers:
         if len(commands) >= command_limit:
@@ -1551,8 +1553,10 @@ def main() -> int:
                 udma_count += 1
             if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 9)):
                 refcrc_count += 1
+                refcrc_bytes += desc[29]
             if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
+                sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:
             break
     commands.append([0] * WORDS_PER_COMMAND)
@@ -1570,7 +1574,8 @@ def main() -> int:
         f"[gen_verilog_final_program] wrote {out} "
         f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
         f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count} "
-        f"refcrc={refcrc_count} sramcrc={sramcrc_count}"
+        f"refcrc={refcrc_count} sramcrc={sramcrc_count} "
+        f"refbytes={refcrc_bytes} srambytes={sramcrc_bytes}"
     )
     return 0
 
