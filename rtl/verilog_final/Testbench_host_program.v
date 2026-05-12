@@ -97,6 +97,7 @@ module Testbench_host_program;
     wire ewe_fp_mode;
     wire ewe_int16_mode;
     wire ewe_final_q_mode;
+    wire ewe_read_a_from_l1;
     wire ewe_sramcrc_mode;
     wire [31:0] ewe_sramcrc_expected_crc;
     wire [31:0] ewe_sramcrc_expected_count;
@@ -289,6 +290,7 @@ module Testbench_host_program;
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
         .ewe_final_q_mode(ewe_final_q_mode),
+        .ewe_read_a_from_l1(ewe_read_a_from_l1),
         .ewe_sramcrc_mode(ewe_sramcrc_mode),
         .ewe_sramcrc_expected_crc(ewe_sramcrc_expected_crc),
         .ewe_sramcrc_expected_count(ewe_sramcrc_expected_count),
@@ -475,6 +477,7 @@ module Testbench_host_program;
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
         .ewe_final_q_mode(ewe_final_q_mode),
+        .ewe_read_a_from_l1(ewe_read_a_from_l1),
         .ewe_sramcrc_mode(ewe_sramcrc_mode),
         .ewe_sramcrc_expected_count(ewe_sramcrc_expected_count),
         .ewe_out_byte_offset(ewe_out_byte_offset),

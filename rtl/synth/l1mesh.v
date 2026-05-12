@@ -107,10 +107,12 @@ module l1mesh #(
     reg [31:0] debug_crc_count_value;
     integer debug_crc_i;
 
+    /* verilator lint_off UNUSEDSIGNAL */
     wire [DATA_WIDTH-1:0] tile_rdata0;
     wire [DATA_WIDTH-1:0] tile_rdata1;
     wire [DATA_WIDTH-1:0] tile_rdata2;
     wire [DATA_WIDTH-1:0] tile_rdata3;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -228,13 +230,7 @@ module l1mesh #(
             debug_crc_scan_addr <= {ADDR_WIDTH{1'b0}};
             debug_crc_remaining <= 32'd0;
         end else if (start_fire && !req_write) begin
-            case (tile_id)
-                2'd0: resp_rdata <= tile_rdata0;
-                2'd1: resp_rdata <= tile_rdata1;
-                2'd2: resp_rdata <= tile_rdata2;
-                2'd3: resp_rdata <= tile_rdata3;
-                default: resp_rdata <= {DATA_WIDTH{1'b0}};
-            endcase
+            resp_rdata <= debug_read_word(req_addr);
         end else begin
             debug_crc_done <= 1'b0;
             if (debug_crc_start && !debug_crc_busy) begin
@@ -305,6 +301,35 @@ module l1mesh #(
                     2'd2: debug_read_byte = u_tile2.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
                     2'd3: debug_read_byte = u_tile3.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
                     default: debug_read_byte = 8'd0;
+                endcase
+            end
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] debug_read_word;
+        input [ADDR_WIDTH-1:0] byte_addr;
+        reg [31:0] dbg_word_addr;
+        reg [5:0] dbg_bank_global;
+        reg [1:0] dbg_tile_id;
+        reg [3:0] dbg_bank_id;
+        reg [27:0] dbg_local_word_addr;
+        reg [31:0] dbg_tile_word_addr;
+        begin
+            dbg_word_addr = {10'd0, byte_addr} / STRB_WIDTH;
+            dbg_bank_global = dbg_word_addr[5:0];
+            dbg_tile_id = dbg_bank_global[5:4];
+            dbg_bank_id = dbg_bank_global[3:0];
+            dbg_local_word_addr = {2'd0, dbg_word_addr[31:6]};
+            dbg_tile_word_addr = {dbg_local_word_addr, dbg_bank_id};
+            if (dbg_tile_word_addr >= TILE_WORDS) begin
+                debug_read_word = {DATA_WIDTH{1'b0}};
+            end else begin
+                case (dbg_tile_id)
+                    2'd0: debug_read_word = u_tile0.mem[dbg_tile_word_addr];
+                    2'd1: debug_read_word = u_tile1.mem[dbg_tile_word_addr];
+                    2'd2: debug_read_word = u_tile2.mem[dbg_tile_word_addr];
+                    2'd3: debug_read_word = u_tile3.mem[dbg_tile_word_addr];
+                    default: debug_read_word = {DATA_WIDTH{1'b0}};
                 endcase
             end
         end

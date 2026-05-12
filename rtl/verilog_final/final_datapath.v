@@ -1707,6 +1707,7 @@ module vf_ewe_sample_engine #(
     input                         fp_mode,
     input                         int16_mode,
     input                         final_q_mode,
+    input                         read_a_from_l1,
     input                         sramcrc_mode,
     input      [31:0]             sramcrc_expected_count,
     input      [31:0]             out_byte_offset,
@@ -1725,6 +1726,8 @@ module vf_ewe_sample_engine #(
     input      [MAX_ELEMS*8-1:0]  a_vec,
     input      [MAX_ELEMS*8-1:0]  b_vec,
     input      [7:0]              elem_count,
+    input                         l1_resp_valid,
+    input      [127:0]            l1_resp_rdata,
     output                        l1_req_valid,
     input                         l1_req_ready,
     output                        l1_req_write,
@@ -1786,6 +1789,9 @@ module vf_ewe_sample_engine #(
     reg signed [31:0] i16_raw;
     reg signed [31:0] i16_first_lane_value;
     reg signed [31:0] i16_sum;
+    reg a_req_sent;
+    reg [MAX_ELEMS*8-1:0] active_a_vec;
+    reg [7:0] l1_resp_byte;
     wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 :
                              (elem_count > MAX_COUNT) ? MAX_COUNT :
                              elem_count;
@@ -1933,7 +1939,7 @@ module vf_ewe_sample_engine #(
     task compute_lane;
         input integer lane_idx;
         begin
-            av = {{24{a_vec[lane_idx*8 + 7]}}, a_vec[lane_idx*8 +: 8]};
+            av = {{24{active_a_vec[lane_idx*8 + 7]}}, active_a_vec[lane_idx*8 +: 8]};
             bv = {{24{b_vec[lane_idx*8 + 7]}}, b_vec[lane_idx*8 +: 8]};
             case (op_mode)
                 2'd1: raw = av * bv;
@@ -1974,10 +1980,32 @@ module vf_ewe_sample_engine #(
         end
     endtask
 
+    always @* begin
+        case (out_byte_offset[3:0])
+            4'h0: l1_resp_byte = l1_resp_rdata[7:0];
+            4'h1: l1_resp_byte = l1_resp_rdata[15:8];
+            4'h2: l1_resp_byte = l1_resp_rdata[23:16];
+            4'h3: l1_resp_byte = l1_resp_rdata[31:24];
+            4'h4: l1_resp_byte = l1_resp_rdata[39:32];
+            4'h5: l1_resp_byte = l1_resp_rdata[47:40];
+            4'h6: l1_resp_byte = l1_resp_rdata[55:48];
+            4'h7: l1_resp_byte = l1_resp_rdata[63:56];
+            4'h8: l1_resp_byte = l1_resp_rdata[71:64];
+            4'h9: l1_resp_byte = l1_resp_rdata[79:72];
+            4'ha: l1_resp_byte = l1_resp_rdata[87:80];
+            4'hb: l1_resp_byte = l1_resp_rdata[95:88];
+            4'hc: l1_resp_byte = l1_resp_rdata[103:96];
+            4'hd: l1_resp_byte = l1_resp_rdata[111:104];
+            4'he: l1_resp_byte = l1_resp_rdata[119:112];
+            default: l1_resp_byte = l1_resp_rdata[127:120];
+        endcase
+    end
+
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
-    assign l1_req_valid = (state == ST_A) || (state == ST_B) || (state == ST_STORE);
+    assign l1_req_valid = ((state == ST_A) && (!read_a_from_l1 || !a_req_sent)) ||
+                          (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                                    {24'd0, safe_count};
@@ -2010,7 +2038,7 @@ module vf_ewe_sample_engine #(
         end
         for (fp_lane = 0; fp_lane < (MAX_ELEMS/2); fp_lane = fp_lane + 1) begin
             if (fp_lane < safe_fp_count) begin
-                fp_av = fp16_to_real(a_vec[fp_lane*16 +: 16]);
+                fp_av = fp16_to_real(active_a_vec[fp_lane*16 +: 16]);
                 fp_bv = fp16_to_real(b_vec[fp_lane*16 +: 16]);
                 case (op_mode)
                     2'd1: fp_raw = fp_av * fp_bv;
@@ -2024,7 +2052,7 @@ module vf_ewe_sample_engine #(
         fp_ewe_bits = $realtobits(fp_sum);
         for (i16_lane = 0; i16_lane < (MAX_ELEMS/2); i16_lane = i16_lane + 1) begin
             if (i16_lane < safe_fp_count) begin
-                i16_av = {{16{a_vec[i16_lane*16 + 15]}}, a_vec[i16_lane*16 +: 16]};
+                i16_av = {{16{active_a_vec[i16_lane*16 + 15]}}, active_a_vec[i16_lane*16 +: 16]};
                 i16_bv = {{16{b_vec[i16_lane*16 + 15]}}, b_vec[i16_lane*16 +: 16]};
                 case (op_mode)
                     2'd1: i16_raw = i16_av * i16_bv;
@@ -2060,10 +2088,13 @@ module vf_ewe_sample_engine #(
             sramcrc_index <= 32'd0;
             sramcrc_crc <= FNV_OFFSET;
             sramcrc_count <= 32'd0;
+            a_req_sent <= 1'b0;
+            active_a_vec <= {MAX_ELEMS*8{1'b0}};
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
+                    a_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
                         if (sramcrc_mode) begin
                             sramcrc_crc <= FNV_OFFSET;
@@ -2072,13 +2103,23 @@ module vf_ewe_sample_engine #(
                             sramcrc_remaining <= sramcrc_expected_count;
                             state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
+                            active_a_vec <= a_vec;
                             state <= ST_A;
                         end
                     end
                 end
                 ST_A: begin
-                    if (l1_req_ready)
+                    if (read_a_from_l1) begin
+                        if (!a_req_sent && l1_req_ready)
+                            a_req_sent <= 1'b1;
+                        if (l1_resp_valid) begin
+                            active_a_vec <= {MAX_ELEMS*8{1'b0}};
+                            active_a_vec[7:0] <= l1_resp_byte;
+                            state <= ST_B;
+                        end
+                    end else if (l1_req_ready) begin
                         state <= ST_B;
+                    end
                 end
                 ST_B: begin
                     if (l1_req_ready) begin

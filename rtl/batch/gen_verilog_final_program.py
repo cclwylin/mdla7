@@ -769,6 +769,20 @@ def l1mesh_crc_probe_descriptor(ordinal: int, start_addr: int, ref_bytes: bytes)
     return words
 
 
+def l1_preload_byte_descriptor(ordinal: int, byte_addr: int, byte_value: int, source_layer: int = 0) -> list[int]:
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = 1
+    words[2] = byte_addr & 0x003F_FFFF
+    words[3] = 1 << 6
+    words[4] = 1
+    words[5] = 1
+    words[6] = byte_value & 0xFF
+    words[19] = source_layer
+    words[27] = byte_addr & 0xFFFF_FFFF
+    return words
+
+
 def shape_product(shape: list[int], rank: int) -> int:
     prod = 1
     for value in shape[:rank]:
@@ -1679,7 +1693,12 @@ def int8_ewe_params(layer: Layer) -> tuple[int, int, int, int, int, int, int, in
     return tuple(rdi32(data, param_off + idx * 4) for idx in range(12))  # type: ignore[return-value]
 
 
-def int8_ewe_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int) -> list[int] | None:
+def int8_ewe_output_descriptor(
+    layer: Layer,
+    ordinal: int,
+    out_elem_index: int,
+    read_a_from_l1: bool = False,
+) -> list[int] | None:
     expected = int8_ewe_output_value(layer, out_elem_index)
     if expected is None:
         return None
@@ -1693,7 +1712,7 @@ def int8_ewe_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int) 
     words[0] = OP_EWE
     words[1] = 1
     words[2] = addr
-    words[3] = 1 << 6
+    words[3] = (1 << 6) | ((1 << 11) if read_a_from_l1 else 0)
     words[4] = data[layer.in_off + out_elem_index]
     words[8] = data[layer.wgt_off + out_elem_index]
     words[12] = 1 | (op_mode << 8)
@@ -1720,6 +1739,7 @@ def int8_ewe_output_descriptors(
     ordinal: int,
     max_output_elems: int,
     start_output_elem: int = 0,
+    read_a_from_l1: bool = False,
 ) -> list[list[int]]:
     output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
     if output_elems <= 0:
@@ -1728,7 +1748,15 @@ def int8_ewe_output_descriptors(
     emit_output_elems = min(max_output_elems, output_elems - start_output_elem)
     descs: list[list[int]] = []
     for out_elem_index in range(start_output_elem, start_output_elem + emit_output_elems):
-        desc = int8_ewe_output_descriptor(layer, ordinal + len(descs), out_elem_index)
+        if read_a_from_l1:
+            byte_value = descriptor_for_layer.program_bytes[layer.in_off + out_elem_index]
+            descs.append(l1_preload_byte_descriptor(ordinal + len(descs), out_elem_index, byte_value, layer.index))
+        desc = int8_ewe_output_descriptor(
+            layer,
+            ordinal + len(descs),
+            out_elem_index,
+            read_a_from_l1=read_a_from_l1,
+        )
         if desc is None:
             break
         descs.append(desc)
@@ -1736,7 +1764,11 @@ def int8_ewe_output_descriptors(
 
 
 def ewe_final_q_bytes(final_descs: list[list[int]]) -> bytes:
-    return bytes(desc[18] & 0xFF for desc in final_descs)
+    return bytes(
+        desc[18] & 0xFF
+        for desc in final_descs
+        if (desc[0] & 0xF) == OP_EWE and (desc[3] & (1 << 6))
+    )
 
 
 def ewe_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
@@ -2142,11 +2174,13 @@ def main() -> int:
             ewe_output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
             remaining_commands = max(command_limit - len(commands) - len(descs), 0)
             if ewe_output_elems > 0 and remaining_commands > 2:
-                max_ewe_outputs = min(ewe_output_elems, remaining_commands - 2, 512)
+                available_ewe_output_cmds = max(remaining_commands - 2, 0)
+                max_ewe_outputs = min(ewe_output_elems, available_ewe_output_cmds // 2, 512)
                 ewe_sram_descs = int8_ewe_output_descriptors(
                     layer,
                     len(commands) + len(descs),
                     max_output_elems=max_ewe_outputs,
+                    read_a_from_l1=True,
                 )
                 generated_ewe = ewe_final_q_bytes(ewe_sram_descs)
                 ref_ewe = descriptor_for_layer.program_bytes[

@@ -100,6 +100,7 @@ module host_final #(
     output reg         ewe_fp_mode,
     output reg         ewe_int16_mode,
     output reg         ewe_final_q_mode,
+    output reg         ewe_read_a_from_l1,
     output reg         ewe_sramcrc_mode,
     output reg [31:0]  ewe_sramcrc_expected_crc,
     output reg [31:0]  ewe_sramcrc_expected_count,
@@ -368,6 +369,7 @@ module host_final #(
             ewe_fp_mode <= cmd_mem[base + 12][10];
             ewe_int16_mode <= cmd_mem[base + 12][11];
             ewe_final_q_mode <= cmd_mem[base + 3][6];
+            ewe_read_a_from_l1 <= cmd_mem[base + 3][11];
             ewe_sramcrc_mode <= cmd_mem[base + 3][10];
             ewe_sramcrc_expected_crc <= cmd_mem[base + 28];
             ewe_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -652,6 +654,7 @@ module host_final #(
             ewe_fp_mode <= 1'b0;
             ewe_int16_mode <= 1'b0;
             ewe_final_q_mode <= 1'b0;
+            ewe_read_a_from_l1 <= 1'b0;
             ewe_sramcrc_mode <= 1'b0;
             ewe_sramcrc_expected_crc <= 32'd0;
             ewe_sramcrc_expected_count <= 32'd0;

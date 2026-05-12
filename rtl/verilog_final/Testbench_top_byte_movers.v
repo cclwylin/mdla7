@@ -82,6 +82,7 @@ module Testbench_top_byte_movers;
     reg ewe_fp_mode;
     reg ewe_int16_mode;
     reg ewe_final_q_mode;
+    reg ewe_read_a_from_l1;
     wire [31:0] ewe_sramcrc_crc;
     wire [31:0] ewe_sramcrc_count;
     reg [127:0] ewe_a_vec;
@@ -242,6 +243,7 @@ module Testbench_top_byte_movers;
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
         .ewe_final_q_mode(ewe_final_q_mode),
+        .ewe_read_a_from_l1(ewe_read_a_from_l1),
         .ewe_sramcrc_mode(1'b0),
         .ewe_sramcrc_expected_count(32'd0),
         .ewe_out_byte_offset(32'd0),
@@ -430,6 +432,7 @@ module Testbench_top_byte_movers;
         ewe_fp_mode = 1'b0;
         ewe_int16_mode = 1'b0;
         ewe_final_q_mode = 1'b0;
+        ewe_read_a_from_l1 = 1'b0;
         ewe_a_vec = 128'd0;
         ewe_b_vec = 128'd0;
         ewe_elem_count = 8'd0;

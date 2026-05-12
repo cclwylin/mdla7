@@ -99,6 +99,7 @@ module mdla7_top_final #(
     input                       ewe_fp_mode,
     input                       ewe_int16_mode,
     input                       ewe_final_q_mode,
+    input                       ewe_read_a_from_l1,
     input                       ewe_sramcrc_mode,
     input      [31:0]           ewe_sramcrc_expected_count,
     input      [31:0]           ewe_out_byte_offset,
@@ -292,6 +293,7 @@ module mdla7_top_final #(
     reg ewe_fp_mode_q;
     reg ewe_int16_mode_q;
     reg ewe_final_q_mode_q;
+    reg ewe_read_a_from_l1_q;
     reg ewe_sramcrc_mode_q;
     reg [31:0] ewe_sramcrc_expected_count_q;
     reg [31:0] ewe_out_byte_offset_q;
@@ -658,6 +660,7 @@ module mdla7_top_final #(
         .fp_mode(ewe_fp_mode_q),
         .int16_mode(ewe_int16_mode_q),
         .final_q_mode(ewe_final_q_mode_q),
+        .read_a_from_l1(ewe_read_a_from_l1_q),
         .sramcrc_mode(ewe_sramcrc_mode_q),
         .sramcrc_expected_count(ewe_sramcrc_expected_count_q),
         .out_byte_offset(ewe_out_byte_offset_q),
@@ -676,6 +679,8 @@ module mdla7_top_final #(
         .a_vec(ewe_a_vec_q),
         .b_vec(ewe_b_vec_q),
         .elem_count(ewe_elem_count_q),
+        .l1_resp_valid(run_ewe && l1mesh_resp_valid),
+        .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(ewe_l1_req_valid),
         .l1_req_ready(ewe_l1_req_ready),
         .l1_req_write(ewe_l1_req_write),
@@ -952,6 +957,7 @@ module mdla7_top_final #(
             ewe_fp_mode_q <= 1'b0;
             ewe_int16_mode_q <= 1'b0;
             ewe_final_q_mode_q <= 1'b0;
+            ewe_read_a_from_l1_q <= 1'b0;
             ewe_sramcrc_mode_q <= 1'b0;
             ewe_sramcrc_expected_count_q <= 32'd0;
             ewe_out_byte_offset_q <= 32'd0;
@@ -1062,6 +1068,7 @@ module mdla7_top_final #(
                         ewe_fp_mode_q <= ewe_fp_mode;
                         ewe_int16_mode_q <= ewe_int16_mode;
                         ewe_final_q_mode_q <= ewe_final_q_mode;
+                        ewe_read_a_from_l1_q <= ewe_read_a_from_l1;
                         ewe_sramcrc_mode_q <= ewe_sramcrc_mode;
                         ewe_sramcrc_expected_count_q <= ewe_sramcrc_expected_count;
                         ewe_out_byte_offset_q <= ewe_out_byte_offset;
