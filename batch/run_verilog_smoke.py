@@ -265,7 +265,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--ref-program", type=Path, default=None,
                     help="original MDL7 .bin passed to the host smoke test as +VERILOG_REF_PROGRAM")
     ap.add_argument("--option", action="append", default=[],
-                    help="verilog option. Use dpi (or dpd alias) to enable DPI datapath helpers.")
+                    help="verilog option. Use dpi to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     return ap.parse_args(argv)
 
@@ -277,8 +277,6 @@ def normalized_options(options: list[str]) -> set[str]:
             opt = item.strip().lower()
             if not opt:
                 continue
-            if opt == "dpd":
-                opt = "dpi"
             out.add(opt)
     return out
 

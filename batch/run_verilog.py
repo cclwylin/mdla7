@@ -426,7 +426,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--profile-root", type=Path, default=repo_root / "batch" / "output",
                     help="Profile directory for synth_ms. Default: batch/output")
     ap.add_argument("--option", action="append", default=[],
-                    help="verilog option. Use dpi (or dpd alias) to enable DPI datapath helpers.")
+                    help="verilog option. Use dpi to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     args = ap.parse_args(argv)
     if args.crc_coverage:
@@ -451,8 +451,6 @@ def normalized_options(options: list[str]) -> set[str]:
             opt = item.strip().lower()
             if not opt:
                 continue
-            if opt == "dpd":
-                opt = "dpi"
             out.add(opt)
     return out
 
