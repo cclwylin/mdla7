@@ -90,6 +90,9 @@ module vf_ewe_sample_engine #(
     reg [31:0] sramcrc_crc_value;
     reg [31:0] sramcrc_count_value;
     reg [7:0] output_sram [0:MAX_EWE_OUTPUT_SRAM_BYTES-1];
+    reg [DATA_WIDTH-1:0] store_wdata_value;
+    reg [DATA_WIDTH/8-1:0] store_wstrb_value;
+    reg [31:0] store_byte_count_value;
     integer lane;
     integer fp_lane;
     integer i16_lane;
@@ -126,6 +129,31 @@ module vf_ewe_sample_engine #(
         input [3:0] lane;
         begin
             byte_lane_wdata = {{(DATA_WIDTH-8){1'b0}}, value} << ({lane, 3'd0});
+        end
+    endfunction
+
+    function [DATA_WIDTH-1:0] vector_lane_wdata;
+        input [DATA_WIDTH-1:0] value;
+        input [3:0] lane;
+        begin
+            vector_lane_wdata = value << ({lane, 3'd0});
+        end
+    endfunction
+
+    function [DATA_WIDTH/8-1:0] vector_lane_wstrb;
+        input [31:0] byte_count;
+        input [3:0] lane;
+        integer idx;
+        integer absolute_lane;
+        reg [DATA_WIDTH/8-1:0] mask;
+        begin
+            mask = {DATA_WIDTH/8{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                absolute_lane = lane + idx;
+                if ((idx < byte_count) && (absolute_lane < DATA_WIDTH/8))
+                    mask[absolute_lane] = 1'b1;
+            end
+            vector_lane_wstrb = mask;
         end
     endfunction
 
@@ -330,15 +358,12 @@ module vf_ewe_sample_engine #(
                           (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
-    assign l1_req_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
-                                                   {24'd0, safe_count};
+    assign l1_req_bytes = (state == ST_STORE) ? store_byte_count_value :
+                          ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
+                                                     {24'd0, safe_count});
     assign l1_req_payload_cycles = 32'd2;
-    assign l1_req_wdata = l1_req_write
-        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
-        : {DATA_WIDTH{1'b0}};
-    assign l1_req_wstrb = l1_req_write
-        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
-        : {DATA_WIDTH/8{1'b0}};
+    assign l1_req_wdata = l1_req_write ? store_wdata_value : {DATA_WIDTH{1'b0}};
+    assign l1_req_wstrb = l1_req_write ? store_wstrb_value : {DATA_WIDTH/8{1'b0}};
     assign out_q = first_lane_value[7:0];
 
     always @* begin
@@ -397,6 +422,14 @@ module vf_ewe_sample_engine #(
             first_lane_value = i16_first_lane_value;
             ewe_out = i16_sum;
         end
+        store_byte_count_value = fp_mode ? 32'd8 : (int16_mode ? 32'd2 : 32'd1);
+        if (fp_mode)
+            store_wdata_value = vector_lane_wdata(fp_ewe_bits, out_byte_offset[3:0]);
+        else if (int16_mode)
+            store_wdata_value = vector_lane_wdata({112'd0, first_lane_value[15:0]}, out_byte_offset[3:0]);
+        else
+            store_wdata_value = byte_lane_wdata(out_q[7:0], out_byte_offset[3:0]);
+        store_wstrb_value = vector_lane_wstrb(store_byte_count_value, out_byte_offset[3:0]);
 
         case (state)
             ST_A: begin phase_id = PH_A_READ; remaining_cycles = l1_req_payload_cycles; end
@@ -464,8 +497,12 @@ module vf_ewe_sample_engine #(
                 end
                 ST_STORE: begin
                     if (l1_req_ready) begin
-                        if (out_byte_offset < MAX_EWE_OUTPUT_SRAM_BYTES)
-                            output_sram[out_byte_offset] <= out_q;
+                        for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                            if ((sramcrc_i < store_byte_count_value) &&
+                                ((out_byte_offset + sramcrc_i[31:0]) < MAX_EWE_OUTPUT_SRAM_BYTES))
+                                output_sram[out_byte_offset + sramcrc_i[31:0]] <=
+                                    store_wdata_value[(out_byte_offset[3:0] + sramcrc_i[3:0]) * 8 +: 8];
+                        end
                         state <= ST_DONE;
                     end
                 end
