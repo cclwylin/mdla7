@@ -424,12 +424,23 @@ module vf_conv_sample_engine #(
     reg [7:0] conv_output_sram [0:MAX_CONV_OUTPUT_SRAM_BYTES-1];
     reg [MAX_ELEMS*8-1:0] active_act_vec;
     reg [MAX_ELEMS*8-1:0] active_wgt_vec;
+    reg [31:0] mac_byte_offset;
+    reg [31:0] mac_output_index;
+    reg result_valid;
+    reg signed [31:0] result_acc_out;
+    reg signed [31:0] result_scaled_out;
+    reg signed [7:0] result_out_q;
+    reg [63:0] result_fp_sum_bits;
+    reg signed [31:0] result_int16_acc_out;
     reg act_req_sent;
     reg wgt_req_sent;
     wire [MAX_ELEMS*8-1:0] conv_mac_act_vec = read_sample_from_l1 ? active_act_vec : act_vec;
     wire [MAX_ELEMS*8-1:0] conv_mac_wgt_vec = read_sample_from_l1 ? active_wgt_vec : wgt_vec;
     wire [31:0] conv_read_output_byte_offset;
     wire [3:0] conv_shadow_read_slot;
+    wire signed [31:0] mac_acc_out;
+    wire signed [31:0] mac_scaled_out;
+    wire signed [7:0] mac_out_q;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -607,7 +618,12 @@ module vf_conv_sample_engine #(
     wire [31:0] workload_output_count = (workload_outputs == 32'd0) ? {24'd0, safe_tile_output_count} :
                                                                          workload_outputs;
     wire [31:0] workload_mac_ops = workload_lane_count * workload_output_count;
-    wire [31:0] mac_cycles = ceil_div(workload_mac_ops, 32'd16) + 32'd1;
+    wire [31:0] mac_chunk_remaining_bytes =
+        (workload_sample_bytes > mac_byte_offset) ? (workload_sample_bytes - mac_byte_offset) : 32'd0;
+    wire [31:0] mac_chunk_bytes =
+        (mac_chunk_remaining_bytes > sample_bytes) ? sample_bytes : mac_chunk_remaining_bytes;
+    wire [31:0] mac_chunk_lanes = (fp_mode || int16_mode) ? (mac_chunk_bytes >> 1) : mac_chunk_bytes;
+    wire [31:0] mac_cycles = ceil_div(mac_chunk_lanes, 32'd16) + 32'd1;
     wire req_state = ((state == ST_ACT) && (!read_sample_from_l1 || !act_req_sent)) ||
                      ((state == ST_WGT) && (!read_sample_from_l1 || !wgt_req_sent)) ||
                      (state == ST_STORE);
@@ -620,14 +636,17 @@ module vf_conv_sample_engine #(
     assign l1_req_addr =
         ((state == ST_STORE) && conv_partial_final && !read_sample_from_l1) ?
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
-        (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0]) :
+        (state == ST_WGT) ? (l1_req_base_addr +
+                              workload_sample_bytes[ADDR_WIDTH-1:0] +
+                              mac_byte_offset[ADDR_WIDTH-1:0]) :
+        (state == ST_ACT) ? (l1_req_base_addr + mac_byte_offset[ADDR_WIDTH-1:0]) :
         l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
                           (state == ST_STORE) ? store_bytes :
-                          workload_sample_bytes;
+                          mac_chunk_bytes;
     assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 :
                                    (state == ST_STORE) ? store_payload_cycles :
-                                   payload_cycles;
+                                   (ceil_div(mac_chunk_bytes, L1_BYTES_PER_CYCLE) + 32'd1);
     assign l1_req_wdata = l1_req_write
         ? (fp_mode ? vector_lane_wdata(fp_sum_bits, l1_req_addr[3:0]) :
            int16_mode ? vector_lane_wdata({32'd0, int16_acc_out}, l1_req_addr[3:0]) :
@@ -724,9 +743,9 @@ module vf_conv_sample_engine #(
         .zp_out(zp_out),
         .act_min(act_min),
         .act_max(act_max),
-        .acc_out(acc_out),
-        .scaled_out(scaled_out),
-        .out_q(out_q)
+        .acc_out(mac_acc_out),
+        .scaled_out(mac_scaled_out),
+        .out_q(mac_out_q)
     );
 
     vf_conv2d_addrgen u_conv_sample_addrgen (
@@ -935,6 +954,8 @@ module vf_conv_sample_engine #(
             fp_sum_bits = dpi_fp_sum_bits;
         end
 `endif
+        if (result_valid)
+            fp_sum_bits = result_fp_sum_bits;
         for (i16_i = 0; i16_i < (MAX_ELEMS/2); i16_i = i16_i + 1) begin
             if (i16_i < safe_fp_count) begin
                 i16_av = {{16{conv_mac_act_vec[i16_i*16 + 15]}},
@@ -982,7 +1003,10 @@ module vf_conv_sample_engine #(
         endcase
     end
 
-    assign int16_acc_out = i16_acc;
+    assign acc_out = result_valid ? result_acc_out : mac_acc_out;
+    assign scaled_out = result_valid ? result_scaled_out : mac_scaled_out;
+    assign out_q = result_valid ? result_out_q : mac_out_q;
+    assign int16_acc_out = result_valid ? result_int16_acc_out : i16_acc;
     assign conv_read_output_byte_offset =
         conv_out_elem_index * {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
     assign conv_shadow_read_slot = conv_read_output_byte_offset[3:0];
@@ -998,6 +1022,14 @@ module vf_conv_sample_engine #(
             compute_remaining <= 32'd0;
             active_act_vec <= {MAX_ELEMS*8{1'b0}};
             active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
+            mac_byte_offset <= 32'd0;
+            mac_output_index <= 32'd0;
+            result_valid <= 1'b0;
+            result_acc_out <= 32'sd0;
+            result_scaled_out <= 32'sd0;
+            result_out_q <= 8'sd0;
+            result_fp_sum_bits <= 64'd0;
+            result_int16_acc_out <= 32'sd0;
             act_req_sent <= 1'b0;
             wgt_req_sent <= 1'b0;
             conv_psum_valid_mask <= 4'd0;
@@ -1021,6 +1053,9 @@ module vf_conv_sample_engine #(
             case (state)
                 ST_IDLE: begin
                     compute_remaining <= 32'd0;
+                    mac_byte_offset <= 32'd0;
+                    mac_output_index <= 32'd0;
+                    result_valid <= 1'b0;
                     act_req_sent <= 1'b0;
                     wgt_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
@@ -1067,6 +1102,7 @@ module vf_conv_sample_engine #(
                             active_act_vec <= compact_l1_response(
                                 l1_resp_rdata, l1_req_addr[3:0], sample_bytes
                             );
+                            act_req_sent <= 1'b0;
                             state <= ST_WGT;
                         end
                     end else if (l1_req_ready) begin
@@ -1081,6 +1117,7 @@ module vf_conv_sample_engine #(
                             active_wgt_vec <= compact_l1_response(
                                 l1_resp_rdata, l1_req_addr[3:0], sample_bytes
                             );
+                            wgt_req_sent <= 1'b0;
                             compute_remaining <= mac_cycles;
                             state <= ST_COMPUTE;
                         end
@@ -1090,10 +1127,34 @@ module vf_conv_sample_engine #(
                     end
                 end
                 ST_COMPUTE: begin
-                    if (compute_remaining > 32'd1)
+                    if (compute_remaining > 32'd1) begin
                         compute_remaining <= compute_remaining - 32'd1;
-                    else
-                        state <= ST_STORE;
+                    end else begin
+                        if (!result_valid) begin
+                            result_valid <= 1'b1;
+                            result_acc_out <= mac_acc_out;
+                            result_scaled_out <= mac_scaled_out;
+                            result_out_q <= mac_out_q;
+                            result_fp_sum_bits <= fp_sum_bits;
+                            result_int16_acc_out <= i16_acc;
+                        end
+                        if (read_sample_from_l1 &&
+                            ((mac_byte_offset + mac_chunk_bytes) < workload_sample_bytes)) begin
+                            mac_byte_offset <= mac_byte_offset + mac_chunk_bytes;
+                            act_req_sent <= 1'b0;
+                            wgt_req_sent <= 1'b0;
+                            state <= ST_ACT;
+                        end else if (read_sample_from_l1 &&
+                                     ((mac_output_index + 32'd1) < workload_output_count)) begin
+                            mac_byte_offset <= 32'd0;
+                            mac_output_index <= mac_output_index + 32'd1;
+                            act_req_sent <= 1'b0;
+                            wgt_req_sent <= 1'b0;
+                            state <= ST_ACT;
+                        end else begin
+                            state <= ST_STORE;
+                        end
+                    end
                 end
                 ST_STORE: begin
                     if (l1_req_ready) begin
