@@ -67,6 +67,13 @@ For small byte-moving regression batches, use:
 ./rtl/batch/run_verilog_final.py --filter dped_float_L1.bin --filter esrgan_quant_L10_11.bin
 ```
 
+To spend more commands on oversized INT8 CONV output SRAM windows:
+
+```sh
+./rtl/batch/run_verilog_final.py --filter slice --rerun-all \
+  --emit-conv-partial-psum --conv-sram-window-commands 1024 --conv-sram-window-count 5
+```
+
 Generated descriptor hex files and Verilator build directories are kept under
 `rtl/obj/verilog_final/`.
 
@@ -92,12 +99,13 @@ and output activation clamp, writes final q bytes into the datapath output SRAM
 image, then runs a Verilog SRAM walker and checks its CRC against the golden
 tensor at `ref_off/ref_size`. These rows are reported in the batch table as
 `sramcrc`. Layers that would exceed the full command budget first try budgeted
-output-window paths: the generator splits the `MAX_REFCRC_PREFIX_COMMANDS`
-budget across head/middle/tail output windows, validates that each generated
-final q byte slice matches the corresponding golden ref tensor slice, writes
-the accepted slices into the output SRAM image, and checks each slice with the
-same SRAM walker. The runner reports the accepted window byte total in `sramB`.
-These rows retain a compact full-ref CRC descriptor too:
+output-window paths: the generator splits `--conv-sram-window-commands` across
+up to `--conv-sram-window-count` head/middle/tail output windows, validates that
+each generated final q byte slice matches the corresponding golden ref tensor
+slice, writes the accepted slices into the output SRAM image, and checks each
+slice with the same SRAM walker. The defaults are 512 window commands and three
+windows; raise those knobs to trade runtime for more `sramB` coverage. These
+rows retain a compact full-ref CRC descriptor too:
 word 25 carries `ref_off`, words 28/29 carry the expected CRC/count, and the
 final datapath opens the original `.bin` through `+FINAL_REF_PROGRAM`, seeks to
 `ref_off`, walks the full tensor bytes in Verilog, and updates the same FNV

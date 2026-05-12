@@ -69,7 +69,8 @@ DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
-MAX_REFCRC_PREFIX_COMMANDS = 512
+DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
+DEFAULT_CONV_SRAM_WINDOW_COUNT = 3
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 16777619
 
@@ -1329,10 +1330,12 @@ def conv_sramcrc_window_starts(output_elems: int, window_elems: int, window_coun
     window_elems = min(window_elems, output_elems)
     if window_count == 1:
         candidates = [0]
-    elif window_count == 2:
-        candidates = [0, output_elems - window_elems]
     else:
-        candidates = [0, (output_elems - window_elems) // 2, output_elems - window_elems]
+        span = output_elems - window_elems
+        candidates = [
+            round((span * idx) / (window_count - 1))
+            for idx in range(window_count)
+        ]
     starts: list[int] = []
     for start in candidates:
         start = max(min(start, output_elems - window_elems), 0)
@@ -1428,6 +1431,21 @@ def parse_args() -> argparse.Namespace:
             "psum first/accumulate pairs."
         ),
     )
+    ap.add_argument(
+        "--conv-sram-window-commands",
+        type=int,
+        default=DEFAULT_CONV_SRAM_WINDOW_COMMANDS,
+        help=(
+            "Command budget for validated INT8 CONV output SRAM windows when "
+            "a full layer does not fit. Default: 512"
+        ),
+    )
+    ap.add_argument(
+        "--conv-sram-window-count",
+        type=int,
+        default=DEFAULT_CONV_SRAM_WINDOW_COUNT,
+        help="Maximum validated INT8 CONV output SRAM windows per oversized layer. Default: 3",
+    )
     return ap.parse_args()
 
 
@@ -1475,9 +1493,12 @@ def main() -> int:
                 lane_chunks = conv_real_lane_chunk_count(layer)
                 descs = []
                 append_probe = False
-                max_window_count = 3
+                max_window_count = max(args.conv_sram_window_count, 0)
                 available_for_windows = max(remaining_commands - 1 - max_window_count, 0)
-                window_command_budget = min(available_for_windows, MAX_REFCRC_PREFIX_COMMANDS)
+                window_command_budget = min(
+                    available_for_windows,
+                    max(args.conv_sram_window_commands, 0),
+                )
                 total_window_outputs = window_command_budget // lane_chunks
                 window_count = min(max_window_count, total_window_outputs, output_elems)
                 if window_count > 0:

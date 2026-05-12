@@ -194,6 +194,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--emit-conv-partial-psum", action="store_true",
                     help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
+    ap.add_argument("--conv-sram-window-commands", type=int, default=0,
+                    help="Pass through SRAM-window command budget for oversized INT8 CONV layers.")
+    ap.add_argument("--conv-sram-window-count", type=int, default=0,
+                    help="Pass through max SRAM-window count for oversized INT8 CONV layers.")
     ap.add_argument("--rerun-all", action="store_true",
                     help="Ignore cached PASS/SKIP results and rerun every matched .bin.")
     ap.add_argument("--cache-file", type=Path,
@@ -335,6 +339,10 @@ def main(argv: list[str]) -> int:
         ]
         if args.emit_conv_partial_psum:
             gen_cmd.append("--emit-conv-partial-psum")
+        if args.conv_sram_window_commands > 0:
+            gen_cmd.extend(["--conv-sram-window-commands", str(args.conv_sram_window_commands)])
+        if args.conv_sram_window_count > 0:
+            gen_cmd.extend(["--conv-sram-window-count", str(args.conv_sram_window_count)])
         rc, gen_out, _ = run(gen_cmd, repo_root, timeout=args.timeout)
         if rc != 0:
             failed += 1
