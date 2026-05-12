@@ -849,6 +849,8 @@ def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]
         desc[19] = cumulative_acc & 0xFFFF_FFFF
         descs.append(desc)
         start_lane += elem_count
+    if descs:
+        descs[-1][3] |= 1 << 6
     return descs
 
 

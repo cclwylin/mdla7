@@ -56,6 +56,7 @@ module Testbench_host_program;
     wire [7:0] conv_tile_output_count;
     wire conv_partial_first;
     wire conv_partial_accumulate;
+    wire conv_partial_final;
     wire [15:0] conv_sample_kh;
     wire [15:0] conv_sample_kw;
     wire [15:0] conv_sample_ic;
@@ -177,6 +178,7 @@ module Testbench_host_program;
         .conv_tile_output_count(conv_tile_output_count),
         .conv_partial_first(conv_partial_first),
         .conv_partial_accumulate(conv_partial_accumulate),
+        .conv_partial_final(conv_partial_final),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
@@ -296,6 +298,7 @@ module Testbench_host_program;
         .conv_tile_output_count(conv_tile_output_count),
         .conv_partial_first(conv_partial_first),
         .conv_partial_accumulate(conv_partial_accumulate),
+        .conv_partial_final(conv_partial_final),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),

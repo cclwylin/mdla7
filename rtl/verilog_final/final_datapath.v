@@ -338,6 +338,7 @@ module vf_conv_sample_engine #(
     input      [7:0]              conv_tile_output_count,
     input                         conv_partial_first,
     input                         conv_partial_accumulate,
+    input                         conv_partial_final,
     input      [15:0]             conv_sample_kh,
     input      [15:0]             conv_sample_kw,
     input      [15:0]             conv_sample_ic,
@@ -402,6 +403,7 @@ module vf_conv_sample_engine #(
     reg signed [31:0] i16_acc;
     integer tile_i;
     integer psum_i;
+    reg signed [31:0] tile_result_acc_value;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -670,7 +672,13 @@ module vf_conv_sample_engine #(
         conv_tile_result_acc_values = 128'd0;
         conv_tile_result_q_values = 128'd0;
         for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
+            tile_result_acc_value = 32'sd0;
             if (tile_i < scoreboard_tile_output_count) begin
+                if (conv_partial_final)
+                    tile_result_acc_value = conv_psum_valid_mask[tile_i] ?
+                        $signed(conv_psum_acc_values[tile_i*32 +: 32]) : acc_out;
+                else
+                    tile_result_acc_value = acc_out;
                 conv_tile_scoreboard_valid_mask[tile_i] = 1'b1;
                 conv_tile_scoreboard_q_sum = conv_tile_scoreboard_q_sum + $signed(out_q);
                 conv_tile_result_out_elem_indices[tile_i*32 +: 32] =
@@ -678,7 +686,7 @@ module vf_conv_sample_engine #(
                 conv_tile_result_output_byte_offsets[tile_i*32 +: 32] =
                     (conv_out_elem_index + tile_i[31:0]) *
                     {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
-                conv_tile_result_acc_values[tile_i*32 +: 32] = acc_out;
+                conv_tile_result_acc_values[tile_i*32 +: 32] = tile_result_acc_value;
                 conv_tile_result_q_values[tile_i*32 +: 32] =
                     {{24{out_q[7]}}, out_q};
             end

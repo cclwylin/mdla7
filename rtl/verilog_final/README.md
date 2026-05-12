@@ -141,8 +141,9 @@ Conv datapath status:
   activation/weight/output L1Mesh tokens, and is now reachable from generated
   `.bin` descriptors.
 - INT8 CONV carries a 4-entry psum skeleton for partial-K bring-up: descriptor
-  word 3 bit 4 seeds the psum entries, and bit 5 accumulates another tile into
-  the same entries.
+  word 3 bit 4 seeds the psum entries, bit 5 accumulates another tile into
+  the same entries, and bit 6 marks the final partial so the result buffer
+  reports the cumulative accumulator.
 - The same sample engine also has an FP16 input / real-valued MAC path for float
   CONV descriptors. This is a simulator bring-up primitive, not yet a
   synthesizable IEEE754 pipeline.
@@ -200,7 +201,7 @@ Descriptor word layout:
 | 16 | CONV activation min or expected TNPS sample source byte offset |
 | 17 | CONV activation max or expected TNPS sample destination byte offset |
 | 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
-| 19 | source layer index, or expected psum accumulator when CONV word 3 bit4/bit5 is set |
+| 19 | source layer index, or expected psum accumulator when CONV word 3 bit4/bit5/bit6 is set |
 | 20 | CONV 2D sample shape `{in_w, in_h}` |
 | 21 | CONV 2D sample shape `{out_c, in_c}` |
 | 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
@@ -227,4 +228,5 @@ accumulators, sample output values, and sample-output sum. This is the
 result-stream skeleton before full psum/writeback buffering.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
-pairs to exercise the partial-K psum state.
+pairs to exercise the partial-K psum state. The last partial is marked final so
+the host checks the cumulative accumulator through the result-buffer skeleton.

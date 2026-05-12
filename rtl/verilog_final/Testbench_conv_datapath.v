@@ -154,6 +154,7 @@ module Testbench_conv_datapath;
         .conv_tile_output_count(tile_output_count),
         .conv_partial_first(1'b0),
         .conv_partial_accumulate(1'b0),
+        .conv_partial_final(1'b0),
         .conv_sample_kh(sample_kh),
         .conv_sample_kw(sample_kw),
         .conv_sample_ic(sample_ic),

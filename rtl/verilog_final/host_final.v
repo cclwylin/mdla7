@@ -59,6 +59,7 @@ module host_final #(
     output reg [7:0]   conv_tile_output_count,
     output reg         conv_partial_first,
     output reg         conv_partial_accumulate,
+    output reg         conv_partial_final,
     output reg [15:0]  conv_sample_kh,
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
@@ -166,7 +167,8 @@ module host_final #(
         {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)};
     wire [31:0] expected_conv_tile_q_value =
         {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
-    wire [31:0] expected_conv_tile_acc_value = conv_acc_out;
+    wire [31:0] expected_conv_tile_acc_value =
+        cmd_mem[base + 3][6] ? cmd_mem[base + 19] : conv_acc_out;
     wire [31:0] expected_conv_psum_acc_value =
         (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) ? cmd_mem[base + 19] : conv_acc_out;
 
@@ -224,6 +226,7 @@ module host_final #(
             conv_tile_output_count <= (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0];
             conv_partial_first <= cmd_mem[base + 3][4];
             conv_partial_accumulate <= cmd_mem[base + 3][5];
+            conv_partial_final <= cmd_mem[base + 3][6];
             conv_sample_kh <= {8'd0, cmd_mem[base + 23][23:16]};
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
@@ -286,7 +289,7 @@ module host_final #(
         cmd_mem[32] = {28'd0, OP_CONV};
         cmd_mem[33] = 32'd16;
         cmd_mem[34] = 32'h0000_02a0;
-        cmd_mem[35] = 32'd44;
+        cmd_mem[35] = 32'd108;
         cmd_mem[36] = 32'h0102_0304;
         cmd_mem[37] = 32'hfc07_0000;
         cmd_mem[40] = 32'h0201_ff03;
@@ -432,6 +435,7 @@ module host_final #(
             conv_tile_output_count <= 8'd1;
             conv_partial_first <= 1'b0;
             conv_partial_accumulate <= 1'b0;
+            conv_partial_final <= 1'b0;
             conv_sample_kh <= 16'd0;
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;

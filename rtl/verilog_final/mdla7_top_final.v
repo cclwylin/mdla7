@@ -62,6 +62,7 @@ module mdla7_top_final #(
     input      [7:0]            conv_tile_output_count,
     input                       conv_partial_first,
     input                       conv_partial_accumulate,
+    input                       conv_partial_final,
     input      [15:0]           conv_sample_kh,
     input      [15:0]           conv_sample_kw,
     input      [15:0]           conv_sample_ic,
@@ -188,6 +189,7 @@ module mdla7_top_final #(
     reg [7:0] conv_tile_output_count_q;
     reg conv_partial_first_q;
     reg conv_partial_accumulate_q;
+    reg conv_partial_final_q;
     reg [15:0] conv_sample_kh_q;
     reg [15:0] conv_sample_kw_q;
     reg [15:0] conv_sample_ic_q;
@@ -415,6 +417,7 @@ module mdla7_top_final #(
         .conv_tile_output_count(conv_tile_output_count_q),
         .conv_partial_first(conv_partial_first_q),
         .conv_partial_accumulate(conv_partial_accumulate_q),
+        .conv_partial_final(conv_partial_final_q),
         .conv_sample_kh(conv_sample_kh_q),
         .conv_sample_kw(conv_sample_kw_q),
         .conv_sample_ic(conv_sample_ic_q),
@@ -730,6 +733,7 @@ module mdla7_top_final #(
             conv_tile_output_count_q <= 8'd1;
             conv_partial_first_q <= 1'b0;
             conv_partial_accumulate_q <= 1'b0;
+            conv_partial_final_q <= 1'b0;
             conv_sample_kh_q <= 16'd0;
             conv_sample_kw_q <= 16'd0;
             conv_sample_ic_q <= 16'd0;
@@ -800,6 +804,7 @@ module mdla7_top_final #(
                         conv_tile_output_count_q <= conv_tile_output_count;
                         conv_partial_first_q <= conv_partial_first;
                         conv_partial_accumulate_q <= conv_partial_accumulate;
+                        conv_partial_final_q <= conv_partial_final;
                         conv_sample_kh_q <= conv_sample_kh;
                         conv_sample_kw_q <= conv_sample_kw;
                         conv_sample_ic_q <= conv_sample_ic;
