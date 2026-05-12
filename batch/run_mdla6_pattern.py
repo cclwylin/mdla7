@@ -69,7 +69,7 @@ DEFAULT_CSV_OUT = OUT_DIR / "mdla6_pattern_regression.csv"
 DEFAULT_MODEL_DIR = REPO_ROOT / "model" / "ETHZ_v6"
 EXCLUDED_PATTERNS = {"dped_float"}
 
-# Re-exec into the venv (mirrors run_ethz_v6.py / run_model.py).
+# Re-exec into the venv (mirrors run_systemc.py / run_model.py).
 VENV_DIR = Path(os.environ.get("MDLA7_VENV") or
                 Path.home() / ".venvs/mdla7").expanduser()
 VENV_PY  = VENV_DIR / "bin" / "python"
