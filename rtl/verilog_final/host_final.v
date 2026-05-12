@@ -73,9 +73,11 @@ module host_final #(
     output reg         pool_fp_mode,
     output reg         pool_int16_mode,
     output reg         pool_refcrc_mode,
+    output reg         pool_sramcrc_mode,
     output reg [31:0]  pool_refcrc_expected_crc,
     output reg [31:0]  pool_refcrc_expected_count,
     output reg [31:0]  pool_refcrc_ref_off,
+    output reg [31:0]  pool_out_byte_offset,
     output reg [127:0] pool_sample_vec,
     output reg [7:0]   pool_elem_count,
     output reg [1:0]   ewe_op_mode,
@@ -273,9 +275,11 @@ module host_final #(
             pool_fp_mode <= cmd_mem[base + 12][9];
             pool_int16_mode <= cmd_mem[base + 12][11];
             pool_refcrc_mode <= cmd_mem[base + 3][9];
+            pool_sramcrc_mode <= cmd_mem[base + 3][10];
             pool_refcrc_expected_crc <= cmd_mem[base + 28];
             pool_refcrc_expected_count <= cmd_mem[base + 29];
             pool_refcrc_ref_off <= cmd_mem[base + 25];
+            pool_out_byte_offset <= cmd_mem[base + 27];
             ewe_a_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                           cmd_mem[base + 5], cmd_mem[base + 4]};
             ewe_b_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
@@ -518,9 +522,11 @@ module host_final #(
             pool_fp_mode <= 1'b0;
             pool_int16_mode <= 1'b0;
             pool_refcrc_mode <= 1'b0;
+            pool_sramcrc_mode <= 1'b0;
             pool_refcrc_expected_crc <= 32'd0;
             pool_refcrc_expected_count <= 32'd0;
             pool_refcrc_ref_off <= 32'd0;
+            pool_out_byte_offset <= 32'd0;
             pool_sample_vec <= 128'd0;
             pool_elem_count <= 8'd0;
             ewe_op_mode <= 2'd0;
@@ -786,16 +792,17 @@ module host_final #(
                                      requant_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && pool_refcrc_mode &&
+                        if ((desc_op_class == OP_POOL) && (pool_refcrc_mode || pool_sramcrc_mode) &&
                             ((pool_refcrc_crc !== pool_refcrc_expected_crc) ||
                              (pool_refcrc_count !== pool_refcrc_expected_count))) begin
-                            $display("HOST_FINAL_FAIL: POOL compact refcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                            $display("HOST_FINAL_FAIL: POOL crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d sram=%0d",
                                      command_index, pool_refcrc_crc,
                                      pool_refcrc_expected_crc,
-                                     pool_refcrc_count, pool_refcrc_expected_count);
+                                     pool_refcrc_count, pool_refcrc_expected_count,
+                                     pool_sramcrc_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && pool_fp_mode &&
+                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
                             (pool_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_FINAL_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
                                      command_index, pool_fp_bits,
@@ -803,7 +810,7 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && pool_int16_mode &&
+                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
                             (pool_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -811,7 +818,7 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_fp_mode && !pool_int16_mode &&
+                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,

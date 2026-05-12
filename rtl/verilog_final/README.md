@@ -138,9 +138,13 @@ Current converter behavior:
   computes the expected double-precision sample MAC, and `host_final.v` checks
   the Verilog FP sample result.
 - POOL op kinds `2/3`: emitted as sample descriptors in default mode. With
-  `--crc-coverage`, the generator also emits a compact full-ref CRC descriptor;
-  `vf_pool_sample_engine` walks the golden tensor bytes in Verilog through
-  `+FINAL_REF_PROGRAM`, and `host_final.v` checks the CRC/count.
+  `--crc-coverage`, INT8 POOL layers also emit a validated output SRAM prefix
+  when each sampled output window fits the 16-lane pool datapath. The pool
+  datapath writes those q bytes into its output SRAM image, then a Verilog SRAM
+  walker checks CRC/count against the matched golden tensor slice as `sramcrc`.
+  The generator still emits a compact full-ref `refcrc` descriptor for full
+  tensor coverage; FP16/float and INT16/hybrid POOL layers use that ref walker
+  path without SRAM image emission.
 - INT16/hybrid CONV op kinds `0/1/6`: emitted as CONV INT16 sample descriptors.
   The generator takes up to 8 signed 16-bit activation values and 8 signed
   16-bit weight values, computes the expected sample MAC accumulator, and

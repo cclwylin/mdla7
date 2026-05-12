@@ -70,9 +70,11 @@ module Testbench_host_program;
     wire pool_fp_mode;
     wire pool_int16_mode;
     wire pool_refcrc_mode;
+    wire pool_sramcrc_mode;
     wire [31:0] pool_refcrc_expected_crc;
     wire [31:0] pool_refcrc_expected_count;
     wire [31:0] pool_refcrc_ref_off;
+    wire [31:0] pool_out_byte_offset;
     wire [127:0] pool_sample_vec;
     wire [7:0] pool_elem_count;
     wire [1:0] ewe_op_mode;
@@ -217,9 +219,11 @@ module Testbench_host_program;
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
         .pool_refcrc_mode(pool_refcrc_mode),
+        .pool_sramcrc_mode(pool_sramcrc_mode),
         .pool_refcrc_expected_crc(pool_refcrc_expected_crc),
         .pool_refcrc_expected_count(pool_refcrc_expected_count),
         .pool_refcrc_ref_off(pool_refcrc_ref_off),
+        .pool_out_byte_offset(pool_out_byte_offset),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),
@@ -362,8 +366,10 @@ module Testbench_host_program;
         .pool_fp_mode(pool_fp_mode),
         .pool_int16_mode(pool_int16_mode),
         .pool_refcrc_mode(pool_refcrc_mode),
+        .pool_sramcrc_mode(pool_sramcrc_mode),
         .pool_refcrc_expected_count(pool_refcrc_expected_count),
         .pool_refcrc_ref_off(pool_refcrc_ref_off),
+        .pool_out_byte_offset(pool_out_byte_offset),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
         .ewe_op_mode(ewe_op_mode),

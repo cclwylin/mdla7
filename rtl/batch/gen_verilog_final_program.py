@@ -1344,6 +1344,106 @@ def conv_sramcrc_window_starts(output_elems: int, window_elems: int, window_coun
     return starts
 
 
+def int8_pool_output_sample(layer: Layer, out_elem_index: int) -> tuple[bytes, int, int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.op_kind not in OK_POOL or elem_bytes(layer.dtype) != 1:
+        return None
+    if (
+        layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+        layer.out_h <= 0 or layer.out_w <= 0 or layer.out_c <= 0
+    ):
+        return None
+    output_elems = layer.out_h * layer.out_w * layer.out_c
+    if out_elem_index < 0 or out_elem_index >= output_elems:
+        return None
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+    oc = out_elem_index % max(layer.out_c, 1)
+    kh_size = max(layer.k_h, 1)
+    kw_size = max(layer.k_w, 1)
+    sh = layer.s_h or 1
+    sw = layer.s_w or 1
+    values: list[int] = []
+    sample = bytearray()
+    for kh in range(kh_size):
+        for kw in range(kw_size):
+            ih = oh * sh + kh - layer.p_t
+            iw = ow * sw + kw - layer.p_l
+            if 0 <= ih < layer.in_h and 0 <= iw < layer.in_w:
+                input_elem = ((ih * layer.in_w + iw) * layer.in_c) + oc
+                if 0 <= input_elem < layer.in_size:
+                    byte_value = data[layer.in_off + input_elem]
+                    values.append(i8(byte_value))
+                    if len(sample) < 16:
+                        sample.append(byte_value)
+    if not values or len(values) > 16:
+        return None
+    if layer.op_kind == 2:
+        expected = int(sum(values) / len(values))
+    else:
+        expected = max(values)
+    expected = max(-128, min(127, expected))
+    return bytes(sample).ljust(16, b"\x00"), len(values), expected & 0xFF
+
+
+def pool_int8_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int) -> list[int] | None:
+    sample = int8_pool_output_sample(layer, out_elem_index)
+    if sample is None:
+        return None
+    sample_bytes_value, elem_count, expected_q = sample
+    avg_mode = 1 if layer.op_kind == 2 else 0
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_POOL
+    words[1] = elem_count
+    words[2] = addr
+    words[3] = 1 << 6
+    for idx in range(4):
+        words[4 + idx] = pack_word(sample_bytes_value[idx * 4:(idx + 1) * 4])
+    words[12] = elem_count | (avg_mode << 8)
+    words[18] = expected_q
+    words[19] = layer.index
+    words[27] = out_elem_index & 0xFFFF_FFFF
+    return words
+
+
+def pool_int8_output_descriptors(
+    layer: Layer,
+    ordinal: int,
+    max_output_elems: int,
+    start_output_elem: int = 0,
+) -> list[list[int]]:
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    start_output_elem = max(min(start_output_elem, output_elems - 1), 0)
+    emit_output_elems = min(max_output_elems, output_elems - start_output_elem)
+    descs: list[list[int]] = []
+    for out_elem_index in range(start_output_elem, start_output_elem + emit_output_elems):
+        desc = pool_int8_output_descriptor(layer, ordinal + len(descs), out_elem_index)
+        if desc is None:
+            break
+        descs.append(desc)
+    return descs
+
+
+def pool_final_q_bytes(final_descs: list[list[int]]) -> bytes:
+    return bytes(desc[18] & 0xFF for desc in final_descs)
+
+
+def pool_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
+    if not ref_bytes:
+        return None
+    desc = descriptor_for_layer(layer, ordinal, False)
+    if desc is None or (desc[0] & 0xF) != OP_POOL:
+        return None
+    desc[3] = (desc[3] & ~((1 << 9) | (1 << 6))) | (1 << 10)
+    desc[25] = (layer.ref_off + start_output_elem) & 0xFFFF_FFFF
+    desc[27] = start_output_elem & 0xFFFF_FFFF
+    desc[28] = fnv_bytes(ref_bytes)
+    desc[29] = len(ref_bytes)
+    return desc
+
+
 def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
@@ -1577,6 +1677,29 @@ def main() -> int:
         else:
             descs = [desc] if desc is not None else []
         if args.emit_conv_partial_psum and layer.op_kind in OK_POOL:
+            pool_output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            if elem_bytes(layer.dtype) == 1 and remaining_commands > 2:
+                max_pool_outputs = min(pool_output_elems, remaining_commands - 2, 512)
+                pool_sram_descs = pool_int8_output_descriptors(
+                    layer,
+                    len(commands) + len(descs),
+                    max_output_elems=max_pool_outputs,
+                )
+                generated_pool = pool_final_q_bytes(pool_sram_descs)
+                ref_pool = descriptor_for_layer.program_bytes[
+                    layer.ref_off:layer.ref_off + min(len(generated_pool), layer.ref_size)
+                ]
+                if generated_pool and generated_pool == ref_pool:
+                    descs.extend(pool_sram_descs)
+                    pool_probe_desc = pool_sramcrc_probe_descriptor(
+                        layer,
+                        len(commands) + len(descs),
+                        0,
+                        ref_pool,
+                    )
+                    if pool_probe_desc is not None:
+                        descs.append(pool_probe_desc)
             pool_crc_desc = pool_full_ref_crc_descriptor(layer, len(commands) + len(descs))
             if pool_crc_desc is not None:
                 descs.append(pool_crc_desc)

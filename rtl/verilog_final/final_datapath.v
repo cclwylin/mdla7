@@ -1304,8 +1304,10 @@ module vf_pool_sample_engine #(
     input                         fp_mode,
     input                         int16_mode,
     input                         refcrc_mode,
+    input                         sramcrc_mode,
     input      [31:0]             refcrc_expected_count,
     input      [31:0]             refcrc_ref_off,
+    input      [31:0]             out_byte_offset,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
     output                        l1_req_valid,
@@ -1336,8 +1338,10 @@ module vf_pool_sample_engine #(
     localparam [2:0] ST_STORE = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
     localparam [2:0] ST_REFCRC = 3'd5;
+    localparam [2:0] ST_SRAMCRC = 3'd6;
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
     localparam [31:0] FNV_PRIME = 32'd16777619;
+    localparam integer MAX_POOL_OUTPUT_SRAM_BYTES = 16777216;
     localparam [7:0] MAX_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
@@ -1350,6 +1354,7 @@ module vf_pool_sample_engine #(
     integer refcrc_fd;
     integer refcrc_byte;
     integer refcrc_seek_rc;
+    integer sramcrc_i;
     reg [1023:0] refcrc_program_path;
     reg signed [31:0] value;
     reg signed [31:0] sum;
@@ -1364,6 +1369,11 @@ module vf_pool_sample_engine #(
     reg [31:0] refcrc_remaining;
     reg [31:0] refcrc_crc_value;
     reg [31:0] refcrc_count_value;
+    reg [31:0] sramcrc_remaining;
+    reg [31:0] sramcrc_index;
+    reg [31:0] sramcrc_crc_value;
+    reg [31:0] sramcrc_count_value;
+    reg [7:0] output_sram [0:MAX_POOL_OUTPUT_SRAM_BYTES-1];
     real fp_sum;
     real fp_value;
     real fp_max_value;
@@ -1481,6 +1491,7 @@ module vf_pool_sample_engine #(
             ST_PIPE: begin phase_id = PH_REDUCE_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
             ST_REFCRC: begin phase_id = PH_REDUCE_PIPE; remaining_cycles = refcrc_remaining; end
+            ST_SRAMCRC: begin phase_id = PH_REDUCE_PIPE; remaining_cycles = sramcrc_remaining; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -1493,6 +1504,8 @@ module vf_pool_sample_engine #(
             refcrc_crc <= FNV_OFFSET;
             refcrc_count <= 32'd0;
             refcrc_remaining <= 32'd0;
+            sramcrc_remaining <= 32'd0;
+            sramcrc_index <= 32'd0;
             if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
                 refcrc_program_path = "";
             refcrc_fd = 0;
@@ -1515,6 +1528,14 @@ module vf_pool_sample_engine #(
                             if (refcrc_fd != 0)
                                 refcrc_seek_rc = $fseek(refcrc_fd, refcrc_ref_off, 0);
                             state <= (refcrc_expected_count == 32'd0) ? ST_DONE : ST_REFCRC;
+                        end else if (sramcrc_mode) begin
+                            refcrc_crc <= FNV_OFFSET;
+                            refcrc_count <= 32'd0;
+                            sramcrc_crc_value = FNV_OFFSET;
+                            sramcrc_count_value = 32'd0;
+                            sramcrc_index <= out_byte_offset;
+                            sramcrc_remaining <= refcrc_expected_count;
+                            state <= (refcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
                             state <= ST_FETCH;
                         end
@@ -1533,8 +1554,11 @@ module vf_pool_sample_engine #(
                         state <= ST_STORE;
                 end
                 ST_STORE: begin
-                    if (l1_req_ready)
+                    if (l1_req_ready) begin
+                        if (out_byte_offset < MAX_POOL_OUTPUT_SRAM_BYTES)
+                            output_sram[out_byte_offset] <= out_q;
                         state <= ST_DONE;
+                    end
                 end
                 ST_REFCRC: begin
                     if ((refcrc_remaining != 32'd0) && (refcrc_fd != 0)) begin
@@ -1564,6 +1588,32 @@ module vf_pool_sample_engine #(
                             $fclose(refcrc_fd);
                             refcrc_fd = 0;
                         end
+                        state <= ST_DONE;
+                    end
+                end
+                ST_SRAMCRC: begin
+                    if (sramcrc_remaining != 32'd0) begin
+                        sramcrc_crc_value = refcrc_crc;
+                        sramcrc_count_value = refcrc_count;
+                        for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                            if ((sramcrc_i < sramcrc_remaining) &&
+                                ((sramcrc_index + sramcrc_i[31:0]) < MAX_POOL_OUTPUT_SRAM_BYTES)) begin
+                                sramcrc_crc_value =
+                                    fnv_byte(sramcrc_crc_value,
+                                             output_sram[sramcrc_index + sramcrc_i[31:0]]);
+                                sramcrc_count_value = sramcrc_count_value + 32'd1;
+                            end
+                        end
+                        refcrc_crc <= sramcrc_crc_value;
+                        refcrc_count <= sramcrc_count_value;
+                        if (sramcrc_remaining <= 32'd16) begin
+                            sramcrc_remaining <= 32'd0;
+                            state <= ST_DONE;
+                        end else begin
+                            sramcrc_remaining <= sramcrc_remaining - 32'd16;
+                            sramcrc_index <= sramcrc_index + 32'd16;
+                        end
+                    end else begin
                         state <= ST_DONE;
                     end
                 end

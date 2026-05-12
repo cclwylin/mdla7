@@ -76,8 +76,10 @@ module mdla7_top_final #(
     input                       pool_fp_mode,
     input                       pool_int16_mode,
     input                       pool_refcrc_mode,
+    input                       pool_sramcrc_mode,
     input      [31:0]           pool_refcrc_expected_count,
     input      [31:0]           pool_refcrc_ref_off,
+    input      [31:0]           pool_out_byte_offset,
     input      [127:0]          pool_sample_vec,
     input      [7:0]            pool_elem_count,
     input      [1:0]            ewe_op_mode,
@@ -227,8 +229,10 @@ module mdla7_top_final #(
     reg pool_fp_mode_q;
     reg pool_int16_mode_q;
     reg pool_refcrc_mode_q;
+    reg pool_sramcrc_mode_q;
     reg [31:0] pool_refcrc_expected_count_q;
     reg [31:0] pool_refcrc_ref_off_q;
+    reg [31:0] pool_out_byte_offset_q;
     reg [127:0] pool_sample_vec_q;
     reg [7:0] pool_elem_count_q;
     reg [1:0] ewe_op_mode_q;
@@ -541,8 +545,10 @@ module mdla7_top_final #(
         .fp_mode(pool_fp_mode_q),
         .int16_mode(pool_int16_mode_q),
         .refcrc_mode(pool_refcrc_mode_q),
+        .sramcrc_mode(pool_sramcrc_mode_q),
         .refcrc_expected_count(pool_refcrc_expected_count_q),
         .refcrc_ref_off(pool_refcrc_ref_off_q),
+        .out_byte_offset(pool_out_byte_offset_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
         .l1_req_valid(pool_l1_req_valid),
@@ -803,8 +809,10 @@ module mdla7_top_final #(
             pool_fp_mode_q <= 1'b0;
             pool_int16_mode_q <= 1'b0;
             pool_refcrc_mode_q <= 1'b0;
+            pool_sramcrc_mode_q <= 1'b0;
             pool_refcrc_expected_count_q <= 32'd0;
             pool_refcrc_ref_off_q <= 32'd0;
+            pool_out_byte_offset_q <= 32'd0;
             pool_sample_vec_q <= 128'd0;
             pool_elem_count_q <= 8'd0;
             ewe_op_mode_q <= 2'd0;
@@ -882,8 +890,10 @@ module mdla7_top_final #(
                         pool_fp_mode_q <= pool_fp_mode;
                         pool_int16_mode_q <= pool_int16_mode;
                         pool_refcrc_mode_q <= pool_refcrc_mode;
+                        pool_sramcrc_mode_q <= pool_sramcrc_mode;
                         pool_refcrc_expected_count_q <= pool_refcrc_expected_count;
                         pool_refcrc_ref_off_q <= pool_refcrc_ref_off;
+                        pool_out_byte_offset_q <= pool_out_byte_offset;
                         pool_sample_vec_q <= pool_sample_vec;
                         pool_elem_count_q <= pool_elem_count;
                         ewe_op_mode_q <= ewe_op_mode;
