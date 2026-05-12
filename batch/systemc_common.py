@@ -1,45 +1,13 @@
 #!/usr/bin/env python3
-"""Regression sweep restricted to the patterns listed in `mdla6_ethz_v6_sorted.csv`.
+"""Shared SystemC compile/simulate helpers.
 
-For each (pattern, mdla6_cx) row in the input CSV, locates the matching
-`.tflite` under `model/ETHZ_v6/`, runs compile_model.py + mdla7_model_runner, and
-emits a CSV next to the regular ETHZ sweep that pairs the MDLA7 sim time
-with the MDLA6 baseline:
+The old MDLA6-pattern CLI has been merged into `run_systemc.py`:
 
-    output/mdla6_pattern_regression.csv
-        pattern,mdla6_cx,mdla7_ms,mdla7_conflict_ms,mdla7_mesh_ms,status,conflict_status,mesh_status
+    ./batch/run_systemc.py --filter ethz
+    ./batch/run_systemc.py --filter ethz --model-filter mobilenet --rerun-all
 
-    output/<model>.html
-        per-model profile report, matching run_model.py's HTML view
-
-Suffix `.cut` in the input CSV (llama2_quant.cut, mobilebert_quant.cut, …)
-is stripped before model lookup — those rows in the MDLA6 sheet referred to
-truncated/partial graphs; on the MDLA7 side we use the full `.tflite` and let
-compile_model skip its unsupported ops via the existing v8.24+ skip paths.
-
-Typos in the input CSV (e.g. `esrgan__int16` with a double underscore) are
-normalised to `esrgan_int16`.
-
-By default the script reuses prior `ok` rows from `--csv-out` so a re-run
-only re-tests patterns that previously failed (or are new). Pass
-`--rerun-all` to ignore the cache and re-compile + re-simulate every row
-(useful when a sim or compile-side change might shift cycle counts).
-
-`dped_float` is excluded from the default sweep because its generated program
-exceeds the practical 32-bit descriptor/file-offset budget and produces
-multi-GB artifacts.
-
-Usage:
-    ./batch/run_mdla6_pattern.py                    # default: cache prior ok
-    ./batch/run_mdla6_pattern.py --rerun-all        # force re-test all rows
-    ./batch/run_mdla6_pattern.py --fast-only        # run fast mode only
-    ./batch/run_mdla6_pattern.py --L1 cx --engine cx
-    ./batch/run_mdla6_pattern.py --csv-in  <path>   # override input
-    ./batch/run_mdla6_pattern.py --csv-out <path>   # override output cache
-    ./batch/run_mdla6_pattern.py --filter mobilenet # substring filter
-    ./batch/run_mdla6_pattern.py --limit 5          # only run first 5 rows
-    ./batch/run_mdla6_pattern.py --offset 10 --limit 5
-    ./batch/run_mdla6_pattern.py --include-excluded # debug excluded rows
+This module intentionally is not a public `run_*.py` entrypoint; corpus
+selection and user-facing argument handling live in `run_systemc.py`.
 """
 
 from __future__ import annotations
@@ -735,7 +703,3 @@ def main():
     print(f"csv: {csv_path}", flush=True)
     _refresh_model_profile_index()
     print(f"html: {HERE / 'profile' / 'profile_mdla6_pattern.html'}", flush=True)
-
-
-if __name__ == "__main__":
-    main()

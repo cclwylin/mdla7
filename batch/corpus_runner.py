@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from run_mdla6_pattern import (  # noqa: E402
+from systemc_common import (  # noqa: E402
     OUT_DIR,
     REPO_ROOT,
     MODEL_RUNNER,
