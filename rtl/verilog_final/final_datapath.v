@@ -368,6 +368,7 @@ module vf_conv_sample_engine #(
     output reg signed [31:0]      conv_tile_scoreboard_q_sum,
     output reg [127:0]            conv_tile_result_out_elem_indices,
     output reg [127:0]            conv_tile_result_output_byte_offsets,
+    output reg [127:0]            conv_tile_result_acc_values,
     output reg [127:0]            conv_tile_result_q_values
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
@@ -657,6 +658,7 @@ module vf_conv_sample_engine #(
         conv_tile_scoreboard_q_sum = 32'sd0;
         conv_tile_result_out_elem_indices = 128'd0;
         conv_tile_result_output_byte_offsets = 128'd0;
+        conv_tile_result_acc_values = 128'd0;
         conv_tile_result_q_values = 128'd0;
         for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
             if (tile_i < scoreboard_tile_output_count) begin
@@ -667,6 +669,7 @@ module vf_conv_sample_engine #(
                 conv_tile_result_output_byte_offsets[tile_i*32 +: 32] =
                     (conv_out_elem_index + tile_i[31:0]) *
                     {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
+                conv_tile_result_acc_values[tile_i*32 +: 32] = acc_out;
                 conv_tile_result_q_values[tile_i*32 +: 32] =
                     {{24{out_q[7]}}, out_q};
             end

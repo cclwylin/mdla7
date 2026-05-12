@@ -68,6 +68,7 @@ module Testbench_conv_datapath;
     wire signed [31:0] engine_tile_scoreboard_q_sum;
     wire [127:0] engine_tile_result_out_elem_indices;
     wire [127:0] engine_tile_result_output_byte_offsets;
+    wire [127:0] engine_tile_result_acc_values;
     wire [127:0] engine_tile_result_q_values;
     integer failures;
 
@@ -183,6 +184,7 @@ module Testbench_conv_datapath;
         .conv_tile_scoreboard_q_sum(engine_tile_scoreboard_q_sum),
         .conv_tile_result_out_elem_indices(engine_tile_result_out_elem_indices),
         .conv_tile_result_output_byte_offsets(engine_tile_result_output_byte_offsets),
+        .conv_tile_result_acc_values(engine_tile_result_acc_values),
         .conv_tile_result_q_values(engine_tile_result_q_values)
     );
 
@@ -275,8 +277,9 @@ module Testbench_conv_datapath;
                 (engine_tile_result_out_elem_indices[31:0] !== 32'd0) ||
                 (engine_tile_result_out_elem_indices[95:64] !== 32'd2) ||
                 (engine_tile_result_output_byte_offsets[95:64] !== exp_tile_last_output) ||
+                ($signed(engine_tile_result_acc_values[95:64]) !== exp_acc) ||
                 ($signed(engine_tile_result_q_values[95:64]) !== exp_out)) begin
-                $display("FAIL: %0s engine valid=%0d exp=%0d in=%0d exp=%0d wgt=%0d exp=%0d out_off=%0d exp=%0d acc=%0d exp=%0d q=%0d exp=%0d first_in=%0d exp=%0d first_wgt=%0d exp=%0d valid_count=%0d exp=%0d tile_last_out=%0d exp=%0d tile_valid=%0d exp=%0d tile_count=%0d exp=%0d tile_mask=%04b exp=%04b tile_q_sum=%0d exp=%0d entry0_idx=%0d entry2_idx=%0d entry2_off=%0d entry2_q=%0d",
+                $display("FAIL: %0s engine valid=%0d exp=%0d in=%0d exp=%0d wgt=%0d exp=%0d out_off=%0d exp=%0d acc=%0d exp=%0d q=%0d exp=%0d first_in=%0d exp=%0d first_wgt=%0d exp=%0d valid_count=%0d exp=%0d tile_last_out=%0d exp=%0d tile_valid=%0d exp=%0d tile_count=%0d exp=%0d tile_mask=%04b exp=%04b tile_q_sum=%0d exp=%0d entry0_idx=%0d entry2_idx=%0d entry2_off=%0d entry2_acc=%0d entry2_q=%0d",
                          name, engine_input_valid, exp_valid,
                          engine_input_byte_offset, exp_input,
                          engine_weight_byte_offset, exp_weight,
@@ -294,6 +297,7 @@ module Testbench_conv_datapath;
                          engine_tile_result_out_elem_indices[31:0],
                          engine_tile_result_out_elem_indices[95:64],
                          engine_tile_result_output_byte_offsets[95:64],
+                         $signed(engine_tile_result_acc_values[95:64]),
                          $signed(engine_tile_result_q_values[95:64]));
                 failures = failures + 1;
             end

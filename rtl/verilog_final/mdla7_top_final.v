@@ -107,6 +107,7 @@ module mdla7_top_final #(
     output signed [31:0]        conv_tile_scoreboard_q_sum,
     output     [127:0]          conv_tile_result_out_elem_indices,
     output     [127:0]          conv_tile_result_output_byte_offsets,
+    output     [127:0]          conv_tile_result_acc_values,
     output     [127:0]          conv_tile_result_q_values,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
@@ -438,6 +439,7 @@ module mdla7_top_final #(
         .conv_tile_scoreboard_q_sum(conv_tile_scoreboard_q_sum),
         .conv_tile_result_out_elem_indices(conv_tile_result_out_elem_indices),
         .conv_tile_result_output_byte_offsets(conv_tile_result_output_byte_offsets),
+        .conv_tile_result_acc_values(conv_tile_result_acc_values),
         .conv_tile_result_q_values(conv_tile_result_q_values)
     );
 
