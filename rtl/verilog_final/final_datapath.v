@@ -2381,6 +2381,12 @@ module vf_udma_engine #(
     output     [31:0] l1_req_payload_cycles,
     output     [DATA_WIDTH-1:0] l1_req_wdata,
     output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
+    output            dram_req_valid,
+    output            dram_req_write,
+    output     [31:0] dram_req_addr,
+    output     [31:0] dram_req_bytes,
+    output     [DATA_WIDTH-1:0] dram_req_wdata,
+    output     [DATA_WIDTH/8-1:0] dram_req_wstrb,
     output            busy,
     output            done_valid,
     input             done_ready,
@@ -2471,6 +2477,15 @@ module vf_udma_engine #(
     assign l1_req_wstrb = l1_req_write
         ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
         : {DATA_WIDTH/8{1'b0}};
+    assign dram_req_valid = busy &&
+        ((phase_id == PH_DRAM_CMD) ||
+         (phase_id == PH_DRAM_WRITE_DATA) ||
+         (phase_id == PH_DRAM_READ_DATA));
+    assign dram_req_write = direction_write;
+    assign dram_req_addr = 32'd0;
+    assign dram_req_bytes = direction_write ? bytes : effective_dram_read_bytes;
+    assign dram_req_wdata = direction_write ? {DATA_WIDTH{1'b0}} : {DATA_WIDTH{1'b0}};
+    assign dram_req_wstrb = direction_write ? {DATA_WIDTH/8{1'b1}} : {DATA_WIDTH/8{1'b0}};
 
     function [31:0] fnv_byte;
         input [31:0] crc;
