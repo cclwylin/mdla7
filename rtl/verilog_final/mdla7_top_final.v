@@ -88,9 +88,25 @@ module mdla7_top_final #(
     input      [1:0]            ewe_op_mode,
     input                       ewe_fp_mode,
     input                       ewe_int16_mode,
+    input                       ewe_final_q_mode,
+    input                       ewe_sramcrc_mode,
+    input      [31:0]           ewe_sramcrc_expected_count,
+    input      [31:0]           ewe_out_byte_offset,
     input      [127:0]          ewe_a_vec,
     input      [127:0]          ewe_b_vec,
     input      [7:0]            ewe_elem_count,
+    input signed [31:0]         ewe_zp_a,
+    input signed [31:0]         ewe_zp_b,
+    input signed [31:0]         ewe_zp_out,
+    input signed [31:0]         ewe_mult_a,
+    input signed [7:0]          ewe_shift_a,
+    input signed [31:0]         ewe_mult_b,
+    input signed [7:0]          ewe_shift_b,
+    input signed [31:0]         ewe_mult_out,
+    input signed [7:0]          ewe_shift_out,
+    input signed [31:0]         ewe_left_shift,
+    input signed [31:0]         ewe_act_min,
+    input signed [31:0]         ewe_act_max,
 
     output                      done_valid,
     input                       done_ready,
@@ -152,6 +168,8 @@ module mdla7_top_final #(
     output     [31:0]           pool_refcrc_count,
     output signed [31:0]        ewe_out,
     output signed [7:0]         ewe_out_q,
+    output     [31:0]           ewe_sramcrc_crc,
+    output     [31:0]           ewe_sramcrc_count,
     output     [63:0]           ewe_fp_bits
 );
     localparam [3:0] OP_CONV = 4'd1;
@@ -246,9 +264,25 @@ module mdla7_top_final #(
     reg [1:0] ewe_op_mode_q;
     reg ewe_fp_mode_q;
     reg ewe_int16_mode_q;
+    reg ewe_final_q_mode_q;
+    reg ewe_sramcrc_mode_q;
+    reg [31:0] ewe_sramcrc_expected_count_q;
+    reg [31:0] ewe_out_byte_offset_q;
     reg [127:0] ewe_a_vec_q;
     reg [127:0] ewe_b_vec_q;
     reg [7:0] ewe_elem_count_q;
+    reg signed [31:0] ewe_zp_a_q;
+    reg signed [31:0] ewe_zp_b_q;
+    reg signed [31:0] ewe_zp_out_q;
+    reg signed [31:0] ewe_mult_a_q;
+    reg signed [7:0] ewe_shift_a_q;
+    reg signed [31:0] ewe_mult_b_q;
+    reg signed [7:0] ewe_shift_b_q;
+    reg signed [31:0] ewe_mult_out_q;
+    reg signed [7:0] ewe_shift_out_q;
+    reg signed [31:0] ewe_left_shift_q;
+    reg signed [31:0] ewe_act_min_q;
+    reg signed [31:0] ewe_act_max_q;
 
     wire conv_start_ready;
     wire conv_busy;
@@ -589,6 +623,22 @@ module mdla7_top_final #(
         .op_mode(ewe_op_mode_q),
         .fp_mode(ewe_fp_mode_q),
         .int16_mode(ewe_int16_mode_q),
+        .final_q_mode(ewe_final_q_mode_q),
+        .sramcrc_mode(ewe_sramcrc_mode_q),
+        .sramcrc_expected_count(ewe_sramcrc_expected_count_q),
+        .out_byte_offset(ewe_out_byte_offset_q),
+        .zp_a(ewe_zp_a_q),
+        .zp_b(ewe_zp_b_q),
+        .zp_out(ewe_zp_out_q),
+        .mult_a(ewe_mult_a_q),
+        .shift_a(ewe_shift_a_q),
+        .mult_b(ewe_mult_b_q),
+        .shift_b(ewe_shift_b_q),
+        .mult_out(ewe_mult_out_q),
+        .shift_out(ewe_shift_out_q),
+        .left_shift(ewe_left_shift_q),
+        .act_min(ewe_act_min_q),
+        .act_max(ewe_act_max_q),
         .a_vec(ewe_a_vec_q),
         .b_vec(ewe_b_vec_q),
         .elem_count(ewe_elem_count_q),
@@ -604,6 +654,8 @@ module mdla7_top_final #(
         .remaining_cycles(ewe_remaining_cycles),
         .ewe_out(ewe_out),
         .out_q(ewe_out_q),
+        .sramcrc_crc(ewe_sramcrc_crc),
+        .sramcrc_count(ewe_sramcrc_count),
         .fp_ewe_bits(ewe_fp_bits)
     );
 
@@ -834,9 +886,25 @@ module mdla7_top_final #(
             ewe_op_mode_q <= 2'd0;
             ewe_fp_mode_q <= 1'b0;
             ewe_int16_mode_q <= 1'b0;
+            ewe_final_q_mode_q <= 1'b0;
+            ewe_sramcrc_mode_q <= 1'b0;
+            ewe_sramcrc_expected_count_q <= 32'd0;
+            ewe_out_byte_offset_q <= 32'd0;
             ewe_a_vec_q <= 128'd0;
             ewe_b_vec_q <= 128'd0;
             ewe_elem_count_q <= 8'd0;
+            ewe_zp_a_q <= 32'sd0;
+            ewe_zp_b_q <= 32'sd0;
+            ewe_zp_out_q <= 32'sd0;
+            ewe_mult_a_q <= 32'sd1073741824;
+            ewe_shift_a_q <= 8'sd0;
+            ewe_mult_b_q <= 32'sd1073741824;
+            ewe_shift_b_q <= 8'sd0;
+            ewe_mult_out_q <= 32'sd1073741824;
+            ewe_shift_out_q <= 8'sd0;
+            ewe_left_shift_q <= 32'sd0;
+            ewe_act_min_q <= -32'sd128;
+            ewe_act_max_q <= 32'sd127;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -918,9 +986,25 @@ module mdla7_top_final #(
                         ewe_op_mode_q <= ewe_op_mode;
                         ewe_fp_mode_q <= ewe_fp_mode;
                         ewe_int16_mode_q <= ewe_int16_mode;
+                        ewe_final_q_mode_q <= ewe_final_q_mode;
+                        ewe_sramcrc_mode_q <= ewe_sramcrc_mode;
+                        ewe_sramcrc_expected_count_q <= ewe_sramcrc_expected_count;
+                        ewe_out_byte_offset_q <= ewe_out_byte_offset;
                         ewe_a_vec_q <= ewe_a_vec;
                         ewe_b_vec_q <= ewe_b_vec;
                         ewe_elem_count_q <= ewe_elem_count;
+                        ewe_zp_a_q <= ewe_zp_a;
+                        ewe_zp_b_q <= ewe_zp_b;
+                        ewe_zp_out_q <= ewe_zp_out;
+                        ewe_mult_a_q <= ewe_mult_a;
+                        ewe_shift_a_q <= ewe_shift_a;
+                        ewe_mult_b_q <= ewe_mult_b;
+                        ewe_shift_b_q <= ewe_shift_b;
+                        ewe_mult_out_q <= ewe_mult_out;
+                        ewe_shift_out_q <= ewe_shift_out;
+                        ewe_left_shift_q <= ewe_left_shift;
+                        ewe_act_min_q <= ewe_act_min;
+                        ewe_act_max_q <= ewe_act_max;
                         start_pending <= 1'b1;
                         engine_done_seen <= 1'b0;
                         state <= ST_RUN;

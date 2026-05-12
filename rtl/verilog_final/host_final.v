@@ -87,9 +87,26 @@ module host_final #(
     output reg [1:0]   ewe_op_mode,
     output reg         ewe_fp_mode,
     output reg         ewe_int16_mode,
+    output reg         ewe_final_q_mode,
+    output reg         ewe_sramcrc_mode,
+    output reg [31:0]  ewe_sramcrc_expected_crc,
+    output reg [31:0]  ewe_sramcrc_expected_count,
+    output reg [31:0]  ewe_out_byte_offset,
     output reg [127:0] ewe_a_vec,
     output reg [127:0] ewe_b_vec,
     output reg [7:0]   ewe_elem_count,
+    output reg signed [31:0] ewe_zp_a,
+    output reg signed [31:0] ewe_zp_b,
+    output reg signed [31:0] ewe_zp_out,
+    output reg signed [31:0] ewe_mult_a,
+    output reg signed [7:0]  ewe_shift_a,
+    output reg signed [31:0] ewe_mult_b,
+    output reg signed [7:0]  ewe_shift_b,
+    output reg signed [31:0] ewe_mult_out,
+    output reg signed [7:0]  ewe_shift_out,
+    output reg signed [31:0] ewe_left_shift,
+    output reg signed [31:0] ewe_act_min,
+    output reg signed [31:0] ewe_act_max,
 
     input              top_done_valid,
     output             top_done_ready,
@@ -149,6 +166,8 @@ module host_final #(
     input      [31:0]   pool_refcrc_count,
     input signed [31:0] ewe_out,
     input signed [7:0]  ewe_out_q,
+    input      [31:0]   ewe_sramcrc_crc,
+    input      [31:0]   ewe_sramcrc_count,
     input      [63:0]   ewe_fp_bits,
     input      [8:0]   block_busy,
     input      [8:0]   block_done_valid,
@@ -298,6 +317,23 @@ module host_final #(
             ewe_op_mode <= cmd_mem[base + 12][9:8];
             ewe_fp_mode <= cmd_mem[base + 12][10];
             ewe_int16_mode <= cmd_mem[base + 12][11];
+            ewe_final_q_mode <= cmd_mem[base + 3][6];
+            ewe_sramcrc_mode <= cmd_mem[base + 3][10];
+            ewe_sramcrc_expected_crc <= cmd_mem[base + 28];
+            ewe_sramcrc_expected_count <= cmd_mem[base + 29];
+            ewe_out_byte_offset <= cmd_mem[base + 27];
+            ewe_zp_a <= cmd_mem[base + 13];
+            ewe_zp_b <= cmd_mem[base + 14];
+            ewe_zp_out <= cmd_mem[base + 15];
+            ewe_mult_a <= cmd_mem[base + 16];
+            ewe_shift_a <= cmd_mem[base + 17][7:0];
+            ewe_mult_b <= cmd_mem[base + 20];
+            ewe_shift_b <= cmd_mem[base + 21][7:0];
+            ewe_mult_out <= cmd_mem[base + 22];
+            ewe_shift_out <= cmd_mem[base + 23][7:0];
+            ewe_left_shift <= cmd_mem[base + 24];
+            ewe_act_min <= cmd_mem[base + 25];
+            ewe_act_max <= cmd_mem[base + 26];
             l1mesh_wdata <= {cmd_mem[base + 2], cmd_mem[base + 1],
                              cmd_mem[base + 14], cmd_mem[base + 15]};
             l1mesh_wstrb <= 16'hffff;
@@ -546,9 +582,26 @@ module host_final #(
             ewe_op_mode <= 2'd0;
             ewe_fp_mode <= 1'b0;
             ewe_int16_mode <= 1'b0;
+            ewe_final_q_mode <= 1'b0;
+            ewe_sramcrc_mode <= 1'b0;
+            ewe_sramcrc_expected_crc <= 32'd0;
+            ewe_sramcrc_expected_count <= 32'd0;
+            ewe_out_byte_offset <= 32'd0;
             ewe_a_vec <= 128'd0;
             ewe_b_vec <= 128'd0;
             ewe_elem_count <= 8'd0;
+            ewe_zp_a <= 32'sd0;
+            ewe_zp_b <= 32'sd0;
+            ewe_zp_out <= 32'sd0;
+            ewe_mult_a <= 32'sd1073741824;
+            ewe_shift_a <= 8'sd0;
+            ewe_mult_b <= 32'sd1073741824;
+            ewe_shift_b <= 8'sd0;
+            ewe_mult_out <= 32'sd1073741824;
+            ewe_shift_out <= 8'sd0;
+            ewe_left_shift <= 32'sd0;
+            ewe_act_min <= -32'sd128;
+            ewe_act_max <= 32'sd127;
             test_done <= 1'b0;
             test_fail <= 1'b0;
             issued_count <= 32'd0;
@@ -850,7 +903,17 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) && ewe_fp_mode &&
+                        if ((desc_op_class == OP_EWE) && ewe_sramcrc_mode &&
+                            ((ewe_sramcrc_crc !== ewe_sramcrc_expected_crc) ||
+                             (ewe_sramcrc_count !== ewe_sramcrc_expected_count))) begin
+                            $display("HOST_FINAL_FAIL: EWE sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                                     command_index, ewe_sramcrc_crc,
+                                     ewe_sramcrc_expected_crc,
+                                     ewe_sramcrc_count,
+                                     ewe_sramcrc_expected_count);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
                             (ewe_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_FINAL_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
                                      command_index, ewe_fp_bits,
@@ -858,7 +921,7 @@ module host_final #(
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) && !ewe_fp_mode &&
+                        if ((desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
                             (ewe_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
                                      command_index, ewe_out, ewe_out_q,

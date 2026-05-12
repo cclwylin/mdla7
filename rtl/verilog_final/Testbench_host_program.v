@@ -84,9 +84,26 @@ module Testbench_host_program;
     wire [1:0] ewe_op_mode;
     wire ewe_fp_mode;
     wire ewe_int16_mode;
+    wire ewe_final_q_mode;
+    wire ewe_sramcrc_mode;
+    wire [31:0] ewe_sramcrc_expected_crc;
+    wire [31:0] ewe_sramcrc_expected_count;
+    wire [31:0] ewe_out_byte_offset;
     wire [127:0] ewe_a_vec;
     wire [127:0] ewe_b_vec;
     wire [7:0] ewe_elem_count;
+    wire signed [31:0] ewe_zp_a;
+    wire signed [31:0] ewe_zp_b;
+    wire signed [31:0] ewe_zp_out;
+    wire signed [31:0] ewe_mult_a;
+    wire signed [7:0] ewe_shift_a;
+    wire signed [31:0] ewe_mult_b;
+    wire signed [7:0] ewe_shift_b;
+    wire signed [31:0] ewe_mult_out;
+    wire signed [7:0] ewe_shift_out;
+    wire signed [31:0] ewe_left_shift;
+    wire signed [31:0] ewe_act_min;
+    wire signed [31:0] ewe_act_max;
     wire done_valid;
     wire busy;
     wire [3:0] active_op_class;
@@ -143,6 +160,8 @@ module Testbench_host_program;
     wire [31:0] pool_refcrc_count;
     wire signed [31:0] ewe_out;
     wire signed [7:0] ewe_out_q;
+    wire [31:0] ewe_sramcrc_crc;
+    wire [31:0] ewe_sramcrc_count;
     wire [63:0] ewe_fp_bits;
     wire [31:0] placement_route_cycles;
     wire [8:0] block_busy;
@@ -239,9 +258,26 @@ module Testbench_host_program;
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
+        .ewe_final_q_mode(ewe_final_q_mode),
+        .ewe_sramcrc_mode(ewe_sramcrc_mode),
+        .ewe_sramcrc_expected_crc(ewe_sramcrc_expected_crc),
+        .ewe_sramcrc_expected_count(ewe_sramcrc_expected_count),
+        .ewe_out_byte_offset(ewe_out_byte_offset),
         .ewe_a_vec(ewe_a_vec),
         .ewe_b_vec(ewe_b_vec),
         .ewe_elem_count(ewe_elem_count),
+        .ewe_zp_a(ewe_zp_a),
+        .ewe_zp_b(ewe_zp_b),
+        .ewe_zp_out(ewe_zp_out),
+        .ewe_mult_a(ewe_mult_a),
+        .ewe_shift_a(ewe_shift_a),
+        .ewe_mult_b(ewe_mult_b),
+        .ewe_shift_b(ewe_shift_b),
+        .ewe_mult_out(ewe_mult_out),
+        .ewe_shift_out(ewe_shift_out),
+        .ewe_left_shift(ewe_left_shift),
+        .ewe_act_min(ewe_act_min),
+        .ewe_act_max(ewe_act_max),
         .top_done_valid(done_valid),
         .top_done_ready(top_done_ready_unused),
         .top_busy(busy),
@@ -300,6 +336,8 @@ module Testbench_host_program;
         .pool_refcrc_count(pool_refcrc_count),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
+        .ewe_sramcrc_crc(ewe_sramcrc_crc),
+        .ewe_sramcrc_count(ewe_sramcrc_count),
         .ewe_fp_bits(ewe_fp_bits),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),
@@ -390,9 +428,25 @@ module Testbench_host_program;
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
+        .ewe_final_q_mode(ewe_final_q_mode),
+        .ewe_sramcrc_mode(ewe_sramcrc_mode),
+        .ewe_sramcrc_expected_count(ewe_sramcrc_expected_count),
+        .ewe_out_byte_offset(ewe_out_byte_offset),
         .ewe_a_vec(ewe_a_vec),
         .ewe_b_vec(ewe_b_vec),
         .ewe_elem_count(ewe_elem_count),
+        .ewe_zp_a(ewe_zp_a),
+        .ewe_zp_b(ewe_zp_b),
+        .ewe_zp_out(ewe_zp_out),
+        .ewe_mult_a(ewe_mult_a),
+        .ewe_shift_a(ewe_shift_a),
+        .ewe_mult_b(ewe_mult_b),
+        .ewe_shift_b(ewe_shift_b),
+        .ewe_mult_out(ewe_mult_out),
+        .ewe_shift_out(ewe_shift_out),
+        .ewe_left_shift(ewe_left_shift),
+        .ewe_act_min(ewe_act_min),
+        .ewe_act_max(ewe_act_max),
         .done_valid(done_valid),
         .done_ready(1'b1),
         .busy(busy),
@@ -453,6 +507,8 @@ module Testbench_host_program;
         .pool_refcrc_count(pool_refcrc_count),
         .ewe_out(ewe_out),
         .ewe_out_q(ewe_out_q),
+        .ewe_sramcrc_crc(ewe_sramcrc_crc),
+        .ewe_sramcrc_count(ewe_sramcrc_count),
         .ewe_fp_bits(ewe_fp_bits)
     );
 

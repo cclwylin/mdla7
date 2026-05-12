@@ -1706,6 +1706,22 @@ module vf_ewe_sample_engine #(
     input      [1:0]              op_mode,
     input                         fp_mode,
     input                         int16_mode,
+    input                         final_q_mode,
+    input                         sramcrc_mode,
+    input      [31:0]             sramcrc_expected_count,
+    input      [31:0]             out_byte_offset,
+    input signed [31:0]           zp_a,
+    input signed [31:0]           zp_b,
+    input signed [31:0]           zp_out,
+    input signed [31:0]           mult_a,
+    input signed [7:0]            shift_a,
+    input signed [31:0]           mult_b,
+    input signed [7:0]            shift_b,
+    input signed [31:0]           mult_out,
+    input signed [7:0]            shift_out,
+    input signed [31:0]           left_shift,
+    input signed [31:0]           act_min,
+    input signed [31:0]           act_max,
     input      [MAX_ELEMS*8-1:0]  a_vec,
     input      [MAX_ELEMS*8-1:0]  b_vec,
     input      [7:0]              elem_count,
@@ -1721,6 +1737,8 @@ module vf_ewe_sample_engine #(
     output reg [31:0]             remaining_cycles,
     output reg signed [31:0]      ewe_out,
     output signed [7:0]           out_q,
+    output reg [31:0]             sramcrc_crc,
+    output reg [31:0]             sramcrc_count,
     output reg [63:0]             fp_ewe_bits
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
@@ -1736,6 +1754,10 @@ module vf_ewe_sample_engine #(
     localparam [2:0] ST_PIPE  = 3'd3;
     localparam [2:0] ST_STORE = 3'd4;
     localparam [2:0] ST_DONE  = 3'd5;
+    localparam [2:0] ST_SRAMCRC = 3'd6;
+    localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
+    localparam [31:0] FNV_PRIME = 32'd16777619;
+    localparam integer MAX_EWE_OUTPUT_SRAM_BYTES = 16777216;
     localparam [7:0] MAX_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
@@ -1746,9 +1768,15 @@ module vf_ewe_sample_engine #(
     reg signed [31:0] raw;
     reg signed [31:0] lane_value;
     reg signed [31:0] first_lane_value;
+    reg [31:0] sramcrc_remaining;
+    reg [31:0] sramcrc_index;
+    reg [31:0] sramcrc_crc_value;
+    reg [31:0] sramcrc_count_value;
+    reg [7:0] output_sram [0:MAX_EWE_OUTPUT_SRAM_BYTES-1];
     integer lane;
     integer fp_lane;
     integer i16_lane;
+    integer sramcrc_i;
     real fp_av;
     real fp_bv;
     real fp_raw;
@@ -1765,6 +1793,14 @@ module vf_ewe_sample_engine #(
                                (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
                                elem_count;
 
+    function [31:0] fnv_byte;
+        input [31:0] crc;
+        input [7:0] byte_value;
+        begin
+            fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
+        end
+    endfunction
+
     function signed [31:0] clamp_i8;
         input signed [31:0] value;
         begin
@@ -1774,6 +1810,77 @@ module vf_ewe_sample_engine #(
                 clamp_i8 = 32'sd127;
             else
                 clamp_i8 = value;
+        end
+    endfunction
+
+    function signed [31:0] clamp_i32;
+        input signed [63:0] value;
+        begin
+            if (value < -64'sd2147483648)
+                clamp_i32 = -32'sd2147483648;
+            else if (value > 64'sd2147483647)
+                clamp_i32 = 32'sd2147483647;
+            else
+                clamp_i32 = value[31:0];
+        end
+    endfunction
+
+    function signed [31:0] saturating_doubling_high_mul;
+        input signed [31:0] a;
+        input signed [31:0] b;
+        reg signed [63:0] p;
+        reg signed [63:0] nudge;
+        reg signed [63:0] r;
+        begin
+            if ((a == -32'sd2147483648) && (b == -32'sd2147483648)) begin
+                saturating_doubling_high_mul = 32'sd2147483647;
+            end else begin
+                p = $signed(a) * $signed(b);
+                nudge = (p >= 0) ? 64'sd1073741824 : -64'sd1073741823;
+                r = (p + nudge) >>> 31;
+                saturating_doubling_high_mul = clamp_i32(r);
+            end
+        end
+    endfunction
+
+    function signed [31:0] rounding_divide_by_pot;
+        input signed [31:0] x;
+        input integer exponent;
+        reg signed [63:0] x64;
+        reg signed [63:0] mask;
+        reg signed [63:0] remainder;
+        reg signed [63:0] threshold;
+        reg signed [63:0] shifted;
+        begin
+            if (exponent <= 0) begin
+                rounding_divide_by_pot = x;
+            end else begin
+                x64 = {{32{x[31]}}, x};
+                mask = (64'sd1 <<< exponent) - 64'sd1;
+                remainder = x64 & mask;
+                threshold = (mask >>> 1) + ((x < 0) ? 64'sd1 : 64'sd0);
+                shifted = x64 >>> exponent;
+                rounding_divide_by_pot = (remainder > threshold)
+                    ? clamp_i32(shifted + 64'sd1)
+                    : clamp_i32(shifted);
+            end
+        end
+    endfunction
+
+    function signed [31:0] mbqm;
+        input signed [31:0] x;
+        input signed [31:0] mult;
+        input signed [7:0] sh;
+        integer ls;
+        integer rs;
+        reg signed [31:0] shifted;
+        reg signed [31:0] high;
+        begin
+            ls = (sh > 0) ? {{24{sh[7]}}, sh} : 0;
+            rs = (sh > 0) ? 0 : -{{24{sh[7]}}, sh};
+            shifted = (ls > 0) ? clamp_i32({{32{x[31]}}, x} <<< ls) : x;
+            high = saturating_doubling_high_mul(shifted, mult);
+            mbqm = rounding_divide_by_pot(high, rs);
         end
     endfunction
 
@@ -1833,7 +1940,37 @@ module vf_ewe_sample_engine #(
                 2'd2: raw = av - bv;
                 default: raw = av + bv;
             endcase
-            lane_value = clamp_i8(raw);
+            if (final_q_mode) begin
+                case (op_mode)
+                    2'd1: begin
+                        raw = mbqm(clamp_i32((av - zp_a) * (bv - zp_b)), mult_out, shift_out) + zp_out;
+                    end
+                    2'd2: begin
+                        raw = mbqm(
+                            clamp_i32(mbqm(clamp_i32((av - zp_a) <<< left_shift), mult_a, shift_a) -
+                                      mbqm(clamp_i32((bv - zp_b) <<< left_shift), mult_b, shift_b)),
+                            mult_out,
+                            shift_out
+                        ) + zp_out;
+                    end
+                    default: begin
+                        raw = mbqm(
+                            clamp_i32(mbqm(clamp_i32((av - zp_a) <<< left_shift), mult_a, shift_a) +
+                                      mbqm(clamp_i32((bv - zp_b) <<< left_shift), mult_b, shift_b)),
+                            mult_out,
+                            shift_out
+                        ) + zp_out;
+                    end
+                endcase
+                if (raw < act_min)
+                    lane_value = act_min;
+                else if (raw > act_max)
+                    lane_value = act_max;
+                else
+                    lane_value = raw;
+            end else begin
+                lane_value = clamp_i8(raw);
+            end
         end
     endtask
 
@@ -1909,6 +2046,7 @@ module vf_ewe_sample_engine #(
             ST_B: begin phase_id = PH_B_READ; remaining_cycles = l1_req_payload_cycles; end
             ST_PIPE: begin phase_id = PH_LANE_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
+            ST_SRAMCRC: begin phase_id = PH_LANE_PIPE; remaining_cycles = sramcrc_remaining; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -1918,12 +2056,25 @@ module vf_ewe_sample_engine #(
         if (!rst_n) begin
             state <= ST_IDLE;
             pipe_remaining <= 32'd0;
+            sramcrc_remaining <= 32'd0;
+            sramcrc_index <= 32'd0;
+            sramcrc_crc <= FNV_OFFSET;
+            sramcrc_count <= 32'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
-                    if (start_valid && start_ready)
-                        state <= ST_A;
+                    if (start_valid && start_ready) begin
+                        if (sramcrc_mode) begin
+                            sramcrc_crc <= FNV_OFFSET;
+                            sramcrc_count <= 32'd0;
+                            sramcrc_index <= out_byte_offset;
+                            sramcrc_remaining <= sramcrc_expected_count;
+                            state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
+                        end else begin
+                            state <= ST_A;
+                        end
+                    end
                 end
                 ST_A: begin
                     if (l1_req_ready)
@@ -1942,8 +2093,37 @@ module vf_ewe_sample_engine #(
                         state <= ST_STORE;
                 end
                 ST_STORE: begin
-                    if (l1_req_ready)
+                    if (l1_req_ready) begin
+                        if (out_byte_offset < MAX_EWE_OUTPUT_SRAM_BYTES)
+                            output_sram[out_byte_offset] <= out_q;
                         state <= ST_DONE;
+                    end
+                end
+                ST_SRAMCRC: begin
+                    if (sramcrc_remaining != 32'd0) begin
+                        sramcrc_crc_value = sramcrc_crc;
+                        sramcrc_count_value = sramcrc_count;
+                        for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                            if ((sramcrc_i < sramcrc_remaining) &&
+                                ((sramcrc_index + sramcrc_i[31:0]) < MAX_EWE_OUTPUT_SRAM_BYTES)) begin
+                                sramcrc_crc_value =
+                                    fnv_byte(sramcrc_crc_value,
+                                             output_sram[sramcrc_index + sramcrc_i[31:0]]);
+                                sramcrc_count_value = sramcrc_count_value + 32'd1;
+                            end
+                        end
+                        sramcrc_crc <= sramcrc_crc_value;
+                        sramcrc_count <= sramcrc_count_value;
+                        if (sramcrc_remaining <= 32'd16) begin
+                            sramcrc_remaining <= 32'd0;
+                            state <= ST_DONE;
+                        end else begin
+                            sramcrc_remaining <= sramcrc_remaining - 32'd16;
+                            sramcrc_index <= sramcrc_index + 32'd16;
+                        end
+                    end else begin
+                        state <= ST_DONE;
+                    end
                 end
                 ST_DONE: begin
                     if (done_ready)

@@ -169,7 +169,11 @@ Current converter behavior:
 - INT8 EWE ADD/MUL/SUB op kinds `7/10/11`: emitted as EWE sample descriptors.
   The generator takes up to 16 bytes from input and weight/parameter payloads,
   computes the expected sum of clamped lane outputs, and `host_final.v` checks
-  the Verilog EWE vector result.
+  the Verilog EWE vector result. With `--crc-coverage`, INT8 EWE layers also
+  emit one-output quantized descriptors using the 48-byte EWE quant parameter
+  block. The EWE datapath writes those q bytes into its output SRAM image, then
+  an EWE SRAM walker checks CRC/count against the matched golden tensor slice as
+  `sramcrc`.
 - FP16/float EWE ADD/MUL/SUB/LOGISTIC op kinds `7/10/11/27`: emitted as EWE FP sample
   descriptors. The generator takes up to 8 input half-floats and 8
   weight/parameter half-floats for binary ops, computes the expected
@@ -233,7 +237,8 @@ EWE datapath status:
 
 - `vf_ewe_sample_engine` runs INT8 ADD/MUL/SUB on a small vector sample, issues
   L1Manager/L1Mesh read/read/write tokens, and is reachable from generated `.bin`
-  descriptors.
+  descriptors. It also has an INT8 final-q mode for ADD/MUL/SUB that consumes
+  the EWE quant params and backs the output SRAM CRC path.
 - The same EWE sample engine also has an FP16 input / real-valued ADD/MUL/SUB/LOGISTIC
   path for float EWE descriptors. This is a simulator bring-up primitive, not
   yet a synthesizable IEEE754 pipeline.

@@ -1444,6 +1444,136 @@ def pool_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem:
     return desc
 
 
+def int8_ewe_output_value(layer: Layer, out_elem_index: int) -> int | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.op_kind not in OK_EWE or elem_bytes(layer.dtype) != 1:
+        return None
+    if out_elem_index < 0 or out_elem_index >= layer.ref_size:
+        return None
+    if out_elem_index >= layer.in_size or out_elem_index >= layer.wgt_size:
+        return None
+    params = int8_ewe_params(layer)
+    if params is None:
+        return None
+    av = i8(data[layer.in_off + out_elem_index])
+    bv = i8(data[layer.wgt_off + out_elem_index])
+    zp_a, zp_b, zp_out, mult_a, shift_a, mult_b, shift_b, mult_o, shift_o, left_shift, act_min, act_max = params
+    if layer.op_kind == OK_MUL:
+        value = mbqm(clamp_i32((av - zp_a) * (bv - zp_b)), mult_o, shift_o) + zp_out
+    elif layer.op_kind == OK_SUB:
+        a = mbqm(clamp_i32((av - zp_a) << left_shift), mult_a, shift_a)
+        b = mbqm(clamp_i32((bv - zp_b) << left_shift), mult_b, shift_b)
+        value = mbqm(clamp_i32(a - b), mult_o, shift_o) + zp_out
+    else:
+        a = mbqm(clamp_i32((av - zp_a) << left_shift), mult_a, shift_a)
+        b = mbqm(clamp_i32((bv - zp_b) << left_shift), mult_b, shift_b)
+        value = mbqm(clamp_i32(a + b), mult_o, shift_o) + zp_out
+    return max(act_min, min(act_max, value)) & 0xFF
+
+
+def int8_ewe_params(layer: Layer) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.wgt_size < 48:
+        return None
+    param_off = layer.wgt_off + layer.wgt_size - 48
+    if param_off < layer.wgt_off or param_off + 48 > len(data):
+        return None
+    return tuple(rdi32(data, param_off + idx * 4) for idx in range(12))  # type: ignore[return-value]
+
+
+def int8_ewe_output_descriptor(layer: Layer, ordinal: int, out_elem_index: int) -> list[int] | None:
+    expected = int8_ewe_output_value(layer, out_elem_index)
+    if expected is None:
+        return None
+    data = descriptor_for_layer.program_bytes
+    params = int8_ewe_params(layer)
+    if params is None:
+        return None
+    op_mode = 1 if layer.op_kind == OK_MUL else 2 if layer.op_kind == OK_SUB else 0
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x20) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_EWE
+    words[1] = 1
+    words[2] = addr
+    words[3] = 1 << 6
+    words[4] = data[layer.in_off + out_elem_index]
+    words[8] = data[layer.wgt_off + out_elem_index]
+    words[12] = 1 | (op_mode << 8)
+    words[13] = params[0] & 0xFFFF_FFFF
+    words[14] = params[1] & 0xFFFF_FFFF
+    words[15] = params[2] & 0xFFFF_FFFF
+    words[16] = params[3] & 0xFFFF_FFFF
+    words[17] = params[4] & 0xFFFF_FFFF
+    words[18] = expected
+    words[19] = layer.index
+    words[20] = params[5] & 0xFFFF_FFFF
+    words[21] = params[6] & 0xFFFF_FFFF
+    words[22] = params[7] & 0xFFFF_FFFF
+    words[23] = params[8] & 0xFFFF_FFFF
+    words[24] = params[9] & 0xFFFF_FFFF
+    words[25] = params[10] & 0xFFFF_FFFF
+    words[26] = params[11] & 0xFFFF_FFFF
+    words[27] = out_elem_index & 0xFFFF_FFFF
+    return words
+
+
+def int8_ewe_output_descriptors(
+    layer: Layer,
+    ordinal: int,
+    max_output_elems: int,
+    start_output_elem: int = 0,
+) -> list[list[int]]:
+    output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
+    if output_elems <= 0:
+        return []
+    start_output_elem = max(min(start_output_elem, output_elems - 1), 0)
+    emit_output_elems = min(max_output_elems, output_elems - start_output_elem)
+    descs: list[list[int]] = []
+    for out_elem_index in range(start_output_elem, start_output_elem + emit_output_elems):
+        desc = int8_ewe_output_descriptor(layer, ordinal + len(descs), out_elem_index)
+        if desc is None:
+            break
+        descs.append(desc)
+    return descs
+
+
+def ewe_final_q_bytes(final_descs: list[list[int]]) -> bytes:
+    return bytes(desc[18] & 0xFF for desc in final_descs)
+
+
+def ewe_sramcrc_probe_descriptor(layer: Layer, ordinal: int, start_output_elem: int, ref_bytes: bytes) -> list[int] | None:
+    if not ref_bytes:
+        return None
+    op_mode = 1 if layer.op_kind == OK_MUL else 2 if layer.op_kind == OK_SUB else 0
+    params = int8_ewe_params(layer)
+    if params is None:
+        return None
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x20) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_EWE
+    words[1] = len(ref_bytes) & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = 1 << 10
+    words[12] = 1 | (op_mode << 8)
+    words[13] = params[0] & 0xFFFF_FFFF
+    words[14] = params[1] & 0xFFFF_FFFF
+    words[15] = params[2] & 0xFFFF_FFFF
+    words[16] = params[3] & 0xFFFF_FFFF
+    words[17] = params[4] & 0xFFFF_FFFF
+    words[19] = layer.index
+    words[20] = params[5] & 0xFFFF_FFFF
+    words[21] = params[6] & 0xFFFF_FFFF
+    words[22] = params[7] & 0xFFFF_FFFF
+    words[23] = params[8] & 0xFFFF_FFFF
+    words[24] = params[9] & 0xFFFF_FFFF
+    words[25] = params[10] & 0xFFFF_FFFF
+    words[26] = params[11] & 0xFFFF_FFFF
+    words[27] = start_output_elem & 0xFFFF_FFFF
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    return words
+
+
 def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
@@ -1795,6 +1925,30 @@ def main() -> int:
                     )
                     if requant_probe_desc is not None:
                         descs.append(requant_probe_desc)
+        if args.emit_conv_partial_psum and layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
+            ewe_output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            if ewe_output_elems > 0 and remaining_commands > 2:
+                max_ewe_outputs = min(ewe_output_elems, remaining_commands - 2, 512)
+                ewe_sram_descs = int8_ewe_output_descriptors(
+                    layer,
+                    len(commands) + len(descs),
+                    max_output_elems=max_ewe_outputs,
+                )
+                generated_ewe = ewe_final_q_bytes(ewe_sram_descs)
+                ref_ewe = descriptor_for_layer.program_bytes[
+                    layer.ref_off:layer.ref_off + min(len(generated_ewe), layer.ref_size)
+                ]
+                if generated_ewe and generated_ewe == ref_ewe:
+                    descs.extend(ewe_sram_descs)
+                    ewe_probe_desc = ewe_sramcrc_probe_descriptor(
+                        layer,
+                        len(commands) + len(descs),
+                        0,
+                        ref_ewe,
+                    )
+                    if ewe_probe_desc is not None:
+                        descs.append(ewe_probe_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -1817,7 +1971,7 @@ def main() -> int:
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
-            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_POOL) and (desc[3] & (1 << 10)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:
