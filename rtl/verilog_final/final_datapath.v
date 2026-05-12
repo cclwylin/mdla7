@@ -2383,6 +2383,8 @@ module vf_udma_engine #(
     output     [31:0] l1_req_payload_cycles,
     output     [DATA_WIDTH-1:0] l1_req_wdata,
     output     [DATA_WIDTH/8-1:0] l1_req_wstrb,
+    input             l1_resp_valid,
+    input      [DATA_WIDTH-1:0] l1_resp_rdata,
     output            dram_req_valid,
     output            dram_req_write,
     output     [31:0] dram_req_addr,
@@ -2457,10 +2459,14 @@ module vf_udma_engine #(
     wire payload_phase_active = busy &&
         ((phase_id == PH_L1_PAYLOAD_READ) || (phase_id == PH_L1_PAYLOAD_WRITE));
     reg payload_token_sent;
+    reg final_l1_write_done;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire start_fire = start_valid && start_ready;
+    wire final_l1_write_pending = final_write_mode && !ref_fill_mode && direction_write;
+    wire final_l1_write_fire = final_l1_write_pending && l1_resp_valid && !final_l1_write_done;
     wire phase_stall =
         (payload_phase_active && !payload_token_sent && !l1_req_ready) ||
+        (payload_phase_active && final_l1_write_pending && payload_token_sent && !final_l1_write_done) ||
         (sramcrc_mode && (sramcrc_remaining != 32'd0));
     wire sramcrc_active = sramcrc_mode && busy;
     reg [7:0] output_sram [0:MAX_UDMA_OUTPUT_SRAM_BYTES-1];
@@ -2473,6 +2479,7 @@ module vf_udma_engine #(
     integer ref_fill_seek_rc;
     integer ref_fill_byte;
     integer ref_fill_i;
+    integer final_write_i;
     integer sramcrc_i;
 
     assign l1_req_valid = payload_phase_active && !payload_token_sent;
@@ -2515,6 +2522,7 @@ module vf_udma_engine #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             payload_token_sent <= 1'b0;
+            final_l1_write_done <= 1'b0;
             sramcrc_crc <= FNV_OFFSET;
             sramcrc_count <= 32'd0;
             sramcrc_remaining <= 32'd0;
@@ -2525,6 +2533,7 @@ module vf_udma_engine #(
             ref_fill_fd = 0;
         end else if (start_fire) begin
             payload_token_sent <= 1'b0;
+            final_l1_write_done <= 1'b0;
             if (sramcrc_mode) begin
                 sramcrc_crc <= FNV_OFFSET;
                 sramcrc_count <= 32'd0;
@@ -2554,8 +2563,18 @@ module vf_udma_engine #(
             end
         end else if (payload_token_fire) begin
             payload_token_sent <= 1'b1;
-            if (final_write_mode && !ref_fill_mode && (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
+            if (final_write_mode && !ref_fill_mode && !direction_write &&
+                (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
                 output_sram[out_byte_offset] <= input_byte;
+        end else if (final_l1_write_fire) begin
+            final_l1_write_done <= 1'b1;
+            for (final_write_i = 0; final_write_i < 16; final_write_i = final_write_i + 1) begin
+                if ((final_write_i < bytes) &&
+                    ((out_byte_offset + final_write_i[31:0]) < MAX_UDMA_OUTPUT_SRAM_BYTES)) begin
+                    output_sram[out_byte_offset + final_write_i[31:0]] <=
+                        l1_resp_rdata[final_write_i*8 +: 8];
+                end
+            end
         end else if (sramcrc_active && (sramcrc_remaining != 32'd0)) begin
             sramcrc_crc_value = sramcrc_crc;
             sramcrc_count_value = sramcrc_count;
@@ -2578,6 +2597,7 @@ module vf_udma_engine #(
             end
         end else if (!payload_phase_active) begin
             payload_token_sent <= 1'b0;
+            final_l1_write_done <= 1'b0;
         end
     end
 

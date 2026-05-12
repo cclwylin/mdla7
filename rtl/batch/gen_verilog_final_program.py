@@ -2108,6 +2108,77 @@ def udma_ref_fill_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     return words
 
 
+def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]:
+    data = descriptor_for_layer.program_bytes
+    if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return []
+
+    ref_bytes = data[layer.ref_off:layer.ref_off + min(16, layer.ref_size)].ljust(16, b"\x00")
+    l1_base = 0
+    out_byte_offset = 0
+    descs: list[list[int]] = []
+
+    for lane, byte_value in enumerate(ref_bytes):
+        words = [0] * WORDS_PER_COMMAND
+        words[0] = OP_UDMA
+        words[1] = 1
+        words[2] = (l1_base + lane) & 0x003F_FFFF
+        words[3] = 1 << 13
+        words[4] = 1
+        words[5] = 1
+        words[6] = byte_value
+        words[19] = layer.index
+        words[27] = out_byte_offset + lane
+        stamp_synth_microblock_metadata(
+            words,
+            layer.index,
+            ordinal + lane,
+            ordinal + lane,
+            SMF_LOAD_A,
+        )
+        descs.append(words)
+
+    store = [0] * WORDS_PER_COMMAND
+    store[0] = OP_UDMA
+    store[1] = len(ref_bytes)
+    store[2] = l1_base & 0x003F_FFFF
+    store[3] = (1 << 0) | (1 << 6) | (1 << 13)
+    store[4] = len(ref_bytes)
+    store[5] = 1
+    store[19] = layer.index
+    store[27] = out_byte_offset
+    stamp_synth_microblock_metadata(
+        store,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_STORE,
+    )
+    descs.append(store)
+
+    crc = [0] * WORDS_PER_COMMAND
+    crc[0] = OP_UDMA
+    crc[1] = len(ref_bytes)
+    crc[2] = l1_base & 0x003F_FFFF
+    crc[3] = (1 << 10) | (1 << 13)
+    crc[4] = len(ref_bytes)
+    crc[5] = 1
+    crc[19] = layer.index
+    crc[27] = out_byte_offset
+    crc[28] = fnv_bytes(ref_bytes)
+    crc[29] = len(ref_bytes)
+    stamp_synth_microblock_metadata(
+        crc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_STORE,
+    )
+    descs.append(crc)
+
+    return descs
+
+
 def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
@@ -2333,6 +2404,7 @@ def main() -> int:
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
         if args.microblock_descriptors:
             descs = synth_microblock_descriptors(layer, len(commands))
+            descs.extend(udma_l1_output_sram_crc_probe(layer, len(commands) + len(descs)))
             fill_desc = udma_ref_fill_descriptor(layer, len(commands) + len(descs))
             if fill_desc is not None:
                 descs.append(fill_desc)

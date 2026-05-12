@@ -793,6 +793,8 @@ module mdla7_top_final #(
         .l1_req_payload_cycles(udma_l1_req_payload_cycles),
         .l1_req_wdata(udma_l1_req_wdata),
         .l1_req_wstrb(udma_l1_req_wstrb),
+        .l1_resp_valid(run_udma && l1mesh_resp_valid),
+        .l1_resp_rdata(l1mesh_rdata),
         .dram_req_valid(udma_dram_req_valid),
         .dram_req_write(udma_dram_req_write),
         .dram_req_addr(udma_dram_req_addr),
