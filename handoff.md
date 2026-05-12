@@ -118,8 +118,13 @@ Completed after this handoff was first written:
 
 1. CONV L1 traffic now goes through `L1Manager` arbitration.
 2. The unused DPI-C CRC/datapath helper was removed from active `rtl/verilog`.
-3. Default `run_verilog.py` mode is now closed-loop dataflow with strict CRC
-   coverage unless `--allow-zero-crc-coverage` is explicitly used.
+3. `run_verilog.py` now has only one real path: closed-loop dataflow.
+   - Removed legacy/sample/microblock-control/full-tensor shortcut modes from
+     the runner and generator CLI.
+   - `run_verilog.py` always emits closed-loop descriptors:
+     `DRAM -> UDMA -> L1 -> engine -> L1 -> UDMA -> DRAM -> L1CRC`.
+   - `--option dpi` only changes arithmetic backend inside the engine datapath;
+     it does not bypass Host / Command / UDMA / L1Manager / L1Mesh control.
 4. L1 read alignment was fixed at the CONV vector boundary while preserving the
    aligned-line L1Mesh bus contract used by TNPS/POOL/EWE/REQUANT.
 5. TNPS closed-loop descriptors now drive real addrgen indices (`word14/15`) and
@@ -132,51 +137,89 @@ Completed after this handoff was first written:
    - `pool.v` and `ewe.v` can switch FP16 pure arithmetic to DPI C++ at runtime.
    - Use `run_verilog.py --option dpi`.
    - The control path stays in the same modules; no `verilog_ctrl/final` split.
+8. FP CONV sample closed-loop is connected.
+   - Descriptor loads FP16 activation and weight samples from DRAM into L1.
+   - CONV reads samples from L1, computes FP sample MAC, writes L1 result.
+   - UDMA stores/reloads result through DRAM and L1CRC checks it.
+   - Optional DPI FP16 MAC exists in `rtl/verilog/mdla7_dpi_datapath.cpp`.
+9. `slice --option dpi --rerun-all` was verified after shortcut removal:
+   `pass=108 fail=0 skip=67 total=175`.
 
 Still unfinished before performance tuning:
 
-1. FP CONV / FP EWE full closed-loop traversal.
-   - FP POOL has a sample closed-loop path.
-   - FP CONV and FP EWE still SKIP with `no final command` in default
-     closed-loop runs.
+1. Current closed-loop coverage is still sample/tilelet sized.
+   - `verilog_cycles` is therefore much smaller than `synth_cycles`.
+   - Example: `deeplab_v3_plus_float_L3` reports about 405 verilog cycles vs
+     about 669.4K synth cycles because only a small closed-loop sample runs.
+   - This is not a shortcut path anymore; it is real control/data path with too
+     small a payload.
 
-2. INT16 closed-loop traversal.
-   - Multi-byte store plumbing is present, but generator coverage is not yet
-     connected for INT16 EWE/POOL/CONV patterns such as `dped_int16_L3_6`.
-
-3. Full tensor traversal.
-   - INT8 CONV/POOL/EWE/TNPS now cover more than one point when possible, but
-     large tensors still use budgeted/sample coverage.
+2. Full tile/full tensor traversal is not implemented yet.
    - Need compact hardware-side tile loops instead of Python expanding many
      sampled commands.
+   - Need enough payload per microblock for UDMA/L1/engine cycles to resemble
+     cx/silicon timing.
 
-4. Fast/cx bit-exact golden for FP output tensors.
-   - Current FP POOL closed-loop checks Verilog FP sample result bytes, not a
-     full fast/cx output tensor.
-   - Need FP16 output packing/rounding and full traversal before it can be
-     treated as final golden coverage.
+3. Fast/cx bit-exact golden for full FP output tensors is not done.
+   - Current FP closed-loop checks Verilog sample result bytes.
+   - Full FP16 output packing/rounding and traversal must be added before this
+     can be treated as full golden coverage.
 
-5. Cycle performance calibration.
-   - `run_verilog.py` reports `synth_cycles` and `verilog_cycles`.
-   - Do this only after the remaining functional coverage above is connected.
+4. Cycle performance calibration should wait until full/tiled traversal exists.
+   - `run_verilog.py` already reports `synth_cycles` and `verilog_cycles`.
+   - Do not tune ratios using the current sample-sized payloads.
 
 ## Next Step
 
-1. Connect TNPS into the same closed loop:
-   `DRAM -> UDMA load input tensor to L1 -> TNPS reads L1 -> TNPS writes L1 output -> UDMA store -> DRAM -> CRC/checker`.
+目標：讓 `verilog_cycles` 可以開始跟 `synth_cycles` 比較。現在 cycle 太少的原因是
+closed-loop payload 仍是 sample/tilelet，不是完整 layer traversal。後續 task：
 
-2. Then connect POOL / EWE into the same closed loop:
-   - UDMA loads input tensor(s) into L1.
-   - Engine reads L1, not descriptor sample bytes.
-   - Engine writes output L1.
-   - UDMA stores output back to DRAM.
+1. 定義 Verilog microblock tile 規格。
+   - 每個 engine 一個 microblock 要處理多少 bytes / elements / output pixels。
+   - CONV 要定義 output tile、KH/KW/IC traversal、partial sum accumulation、
+     final writeback。
+   - 這會決定 cycle model 的基本粒度。
 
-3. Then connect CONV into the same closed loop:
-   - Load activation / weights / bias / params.
-   - Implement tile/full traversal MAC loop.
-   - Write output to L1 and store back to DRAM.
+2. Generator 從 sample descriptor 改成 tile descriptor。
+   - 現在每層通常只挑一個 sample。
+   - 要改成對 layer 產生 compact tiled microblocks：
+     `load input/weight tile -> compute tile -> store output tile -> check tile`。
+   - 先讓 small patterns 完整覆蓋，再擴大到 medium/large。
 
-4. Replace ref-fill/probe-only coverage with real producer-output coverage.
+3. 先做 CONV tile descriptor + Verilog/DPI full tile compute。
+   - FP CONV 目前只有 sample MAC。
+   - 要做完整 `OH x OW x OC x KH x KW x IC` traversal 的 tile loop。
+   - INT8 / INT16 / FP 可以用各自 Verilog datapath 或 `--option dpi`
+     compute backend，但 Host / Command / UDMA / L1 control path 必須不變。
+
+4. 補 POOL / EWE / TNPS tile sweep。
+   - 目前這些 engine 的 closed-loop regression 收斂成 first sample。
+   - 下一步要擴成 tile sweep，至少覆蓋完整 output tensor 或 representative tiles。
+   - 每個 tile 都要走：
+     `DRAM -> UDMA -> L1 -> engine -> L1 -> UDMA -> DRAM -> check`。
+
+5. 讓 L1 / UDMA payload cycles 來自真 bytes。
+   - 現在很多 command bytes 很小，所以 cycle 很少。
+   - Full tile 後，UDMA load/store bytes、L1 route、FIFO backpressure 才會自然變大。
+
+6. Report 拆分性能統計。
+   - 建議新增/保留：
+     `load_cycles`, `compute_cycles`, `store_cycles`, `check_cycles`, `total_cycles`。
+   - `check/reload` cycles 要另外標出，避免和未來 silicon datapath 混在一起。
+
+7. Golden check 策略。
+   - 初期每 tile check CRC。
+   - 穩定後改成最後 output CRC，減少 checker overhead。
+   - 不能取消 load / compute / store 真路徑。
+
+建議實作順序：
+
+1. CONV tile descriptor + full tile compute。
+2. 跑 1~3 個 small FP/INT CONV patterns，讓 `verilog_cycles` 從幾百 cycle
+   變成跟 payload 大小相關。
+3. 補 POOL / EWE / TNPS tile sweep。
+4. 最後調 L1Mesh contention / UDMA bandwidth / placement route timing，讓 cycle
+   比例接近 cx。
 
 ## Important Files
 
