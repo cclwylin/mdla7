@@ -196,6 +196,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Convenience mode for CRC coverage; enables --emit-conv-partial-psum.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
+    ap.add_argument("--min-ref-bytes", type=int, default=0,
+                    help="Fail if total refB coverage is below this value.")
+    ap.add_argument("--min-sram-bytes", type=int, default=0,
+                    help="Fail if total sramB coverage is below this value.")
     ap.add_argument("--emit-conv-partial-psum", action="store_true",
                     help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
     ap.add_argument("--conv-sram-window-commands", type=int, default=0,
@@ -469,6 +473,18 @@ def main(argv: list[str]) -> int:
     if args.require_crc_coverage and total_refcrc == 0 and total_sramcrc == 0:
         failed += 1
         print("[run_verilog_final] coverage_fail: required CRC coverage, but no CRC descriptors ran")
+    if args.min_ref_bytes > 0 and total_refbytes < args.min_ref_bytes:
+        failed += 1
+        print(
+            f"[run_verilog_final] coverage_fail: refB={total_refbytes} "
+            f"below min_ref_bytes={args.min_ref_bytes}"
+        )
+    if args.min_sram_bytes > 0 and total_srambytes < args.min_sram_bytes:
+        failed += 1
+        print(
+            f"[run_verilog_final] coverage_fail: sramB={total_srambytes} "
+            f"below min_sram_bytes={args.min_sram_bytes}"
+        )
     if cache_hits:
         print(f"[run_verilog_final] cache_hits: {cache_hits}")
     return 0 if failed == 0 else 1
