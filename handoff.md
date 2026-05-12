@@ -127,6 +127,11 @@ Completed after this handoff was first written:
 6. POOL/EWE store paths now drive multi-byte write data/strobes for FP/INT16
    style results instead of advertising multi-byte transfers while writing only
    one byte.
+7. Optional DPI datapath helpers were added without splitting the Verilog tree.
+   - `conv.v` can switch INT8 MAC to DPI C++ at runtime.
+   - `pool.v` and `ewe.v` can switch FP16 pure arithmetic to DPI C++ at runtime.
+   - Use `run_verilog.py --option dpi` or typo-compatible `--option dpd`.
+   - The control path stays in the same modules; no `verilog_ctrl/final` split.
 
 Still unfinished before performance tuning:
 
@@ -205,6 +210,13 @@ Run regression:
 ```bash
 ./batch/run_verilog.py --filter slice
 ./batch/run_verilog.py --filter ethz
+```
+
+Run with optional DPI datapath helpers:
+
+```bash
+./batch/run_verilog.py --filter slice --option dpi
+./batch/run_verilog.py --filter slice --option dpd   # alias for dpi
 ```
 
 If Verilator output is stale:

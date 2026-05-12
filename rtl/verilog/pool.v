@@ -103,6 +103,19 @@ module vf_pool_sample_engine #(
     real fp_value;
     real fp_max_value;
     real fp_pool_value;
+`ifdef MDLA7_DPI_DATAPATH
+    import "DPI-C" function void mdla7_dpi_pool_fp16(
+        input int vec0, input int vec1, input int vec2, input int vec3,
+        input int elem_count, input int avg_mode,
+        output longint out_bits
+    );
+    reg dpi_datapath_enabled;
+    reg [63:0] dpi_fp_pool_bits;
+
+    initial begin
+        dpi_datapath_enabled = $test$plusargs("MDLA7_DATAPATH_DPI");
+    end
+`endif
     integer fetch_i;
     wire [7:0] safe_count = (elem_count == 8'd0) ? 8'd1 :
                              (elem_count > MAX_COUNT) ? MAX_COUNT :
@@ -275,6 +288,20 @@ module vf_pool_sample_engine #(
         pool_out = avg_mode ? avg_value : max_value;
         fp_pool_value = avg_mode ? (fp_sum / safe_fp_count) : fp_max_value;
         fp_pool_bits = $realtobits(fp_pool_value);
+`ifdef MDLA7_DPI_DATAPATH
+        if (dpi_datapath_enabled && fp_mode) begin
+            mdla7_dpi_pool_fp16(
+                active_sample_vec[31:0],
+                active_sample_vec[63:32],
+                active_sample_vec[95:64],
+                active_sample_vec[127:96],
+                {24'd0, safe_fp_count},
+                {31'd0, avg_mode},
+                dpi_fp_pool_bits
+            );
+            fp_pool_bits = dpi_fp_pool_bits;
+        end
+`endif
         i16_avg_value = i16_sum / signed_i16_count;
         if (int16_mode)
             pool_out = avg_mode ? i16_avg_value : i16_max_value;

@@ -28,6 +28,24 @@ module vf_conv_int8_mac #(
     reg signed [31:0] clamped_acc;
     reg signed [31:0] quantized;
     reg signed [31:0] clamped;
+`ifdef MDLA7_DPI_DATAPATH
+    import "DPI-C" function void mdla7_dpi_conv_int8_mac(
+        input int act0, input int act1, input int act2, input int act3,
+        input int wgt0, input int wgt1, input int wgt2, input int wgt3,
+        input int elem_count, input int zp_in, input int bias,
+        input int multiplier, input int shift, input int zp_out,
+        input int act_min, input int act_max,
+        output int dpi_acc_out, output int dpi_scaled_out, output int dpi_out_q
+    );
+    reg dpi_datapath_enabled;
+    reg signed [31:0] dpi_acc_out;
+    reg signed [31:0] dpi_scaled_out;
+    reg signed [31:0] dpi_out_q;
+
+    initial begin
+        dpi_datapath_enabled = $test$plusargs("MDLA7_DATAPATH_DPI");
+    end
+`endif
 
     function signed [31:0] clamp_i32;
         input signed [63:0] value;
@@ -131,6 +149,28 @@ module vf_conv_int8_mac #(
         acc_out = clamped_acc;
         scaled_out = clamped;
         out_q = clamped[7:0];
+`ifdef MDLA7_DPI_DATAPATH
+        if (dpi_datapath_enabled) begin
+            mdla7_dpi_conv_int8_mac(
+                act_vec[31:0], act_vec[63:32], act_vec[95:64], act_vec[127:96],
+                wgt_vec[31:0], wgt_vec[63:32], wgt_vec[95:64], wgt_vec[127:96],
+                {24'd0, elem_count},
+                {{16{zp_in[15]}}, zp_in},
+                bias,
+                multiplier,
+                {{24{shift[7]}}, shift},
+                zp_out,
+                act_min,
+                act_max,
+                dpi_acc_out,
+                dpi_scaled_out,
+                dpi_out_q
+            );
+            acc_out = dpi_acc_out;
+            scaled_out = dpi_scaled_out;
+            out_q = dpi_out_q[7:0];
+        end
+`endif
     end
 endmodule
 

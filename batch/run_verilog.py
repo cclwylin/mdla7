@@ -48,7 +48,7 @@ GEN_STATS_RE = re.compile(
     r"(?:\s+finalcrc=([0-9]+))?"
     r"(?:\s+finalbytes=([0-9]+))?"
 )
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 MDL7_MAGIC = 0x374C444D
@@ -425,6 +425,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Regression cache JSON. Default: rtl/obj/verilog/cache.json")
     ap.add_argument("--profile-root", type=Path, default=repo_root / "batch" / "output",
                     help="Profile directory for synth_ms. Default: batch/output")
+    ap.add_argument("--option", action="append", default=[],
+                    help="verilog option. Use dpi (or dpd alias) to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     args = ap.parse_args(argv)
     if args.crc_coverage:
@@ -442,14 +444,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def normalized_options(options: list[str]) -> set[str]:
+    out: set[str] = set()
+    for raw in options:
+        for item in raw.split(","):
+            opt = item.strip().lower()
+            if not opt:
+                continue
+            if opt == "dpd":
+                opt = "dpi"
+            out.add(opt)
+    return out
+
+
 def run_mode(args: argparse.Namespace) -> str:
+    options = normalized_options(args.option)
+    suffix = "+dpi" if "dpi" in options else ""
     if args.closed_loop_dataflow:
-        return "closed_loop_dataflow"
+        return "closed_loop_dataflow" + suffix
     if args.emit_conv_partial_psum:
-        return "crc_coverage"
+        return "crc_coverage" + suffix
     if args.sample_descriptors:
-        return "sample"
-    return "microblock_control"
+        return "sample" + suffix
+    return "microblock_control" + suffix
 
 
 def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]:
@@ -566,6 +583,9 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog] profile_root: {display(args.profile_root, repo_root)}")
     mode = run_mode(args)
     print(f"[run_verilog] mode: {mode}")
+    options = normalized_options(args.option)
+    if options:
+        print(f"[run_verilog] option: {','.join(sorted(options))}")
     if args.rerun_all:
         print("[run_verilog] cache_mode: rerun-all")
     print(
@@ -773,6 +793,8 @@ def main(argv: list[str]) -> int:
         total_finalbytes += finalcrc_bytes
 
         cmd = [str(smoke), "--test", "host", "--program", str(hex_path), "--ref-program", str(bin_path)]
+        for opt in sorted(options):
+            cmd.extend(["--option", opt])
         if build_done:
             cmd.append("--no-build")
         rc, out, wall = run(cmd, repo_root, timeout=run_timeout)

@@ -264,8 +264,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="hex descriptor stream passed to the host smoke test as +VERILOG_PROGRAM")
     ap.add_argument("--ref-program", type=Path, default=None,
                     help="original MDL7 .bin passed to the host smoke test as +VERILOG_REF_PROGRAM")
+    ap.add_argument("--option", action="append", default=[],
+                    help="verilog option. Use dpi (or dpd alias) to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     return ap.parse_args(argv)
+
+
+def normalized_options(options: list[str]) -> set[str]:
+    out: set[str] = set()
+    for raw in options:
+        for item in raw.split(","):
+            opt = item.strip().lower()
+            if not opt:
+                continue
+            if opt == "dpd":
+                opt = "dpi"
+            out.add(opt)
+    return out
 
 
 def main(argv: list[str]) -> int:
@@ -276,6 +291,8 @@ def main(argv: list[str]) -> int:
     filelist = verilog_dir / "filelist_system_tb.f"
     verilator = args.verilator.resolve() if args.verilator != Path("verilator") else args.verilator
     selected = set(args.test or [name for name, _ in TESTS])
+    options = normalized_options(args.option)
+    use_dpi = "dpi" in options
     cxx_include = args.cxx_stdlib_include or find_cxx_stdlib_include()
     obj_root = rtl_dir / "obj" / "verilog"
     obj_root.mkdir(parents=True, exist_ok=True)
@@ -297,12 +314,18 @@ def main(argv: list[str]) -> int:
                 "-Wall",
                 "-Wno-fatal",
             ]
+            if use_dpi:
+                cmd.append("+define+MDLA7_DPI_DATAPATH")
             if cxx_include is not None:
                 cmd.extend(["-CFLAGS", f"-isystem {cxx_include}"])
             cmd.extend([
                 "-Irtl/verilog",
                 "-f",
                 str(filelist),
+            ])
+            if use_dpi:
+                cmd.append(str(verilog_dir / "mdla7_dpi_datapath.cpp"))
+            cmd.extend([
                 str(verilog_dir / f"{top}.v"),
                 "--top-module",
                 top,
@@ -323,6 +346,8 @@ def main(argv: list[str]) -> int:
             sim_cmd.append(f"+VERILOG_PROGRAM={program}")
         if top == "Testbench_host_program" and ref_program is not None:
             sim_cmd.append(f"+VERILOG_REF_PROGRAM={ref_program}")
+        if use_dpi:
+            sim_cmd.append("+MDLA7_DATAPATH_DPI=1")
         rc, output = run(sim_cmd, repo_root, quiet=False)
         if rc != 0 or "PASS:" not in output or "FAIL:" in output:
             failures.append(f"{name}: simulation failed")

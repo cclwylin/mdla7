@@ -101,6 +101,20 @@ module vf_ewe_sample_engine #(
     real fp_bv;
     real fp_raw;
     real fp_sum;
+`ifdef MDLA7_DPI_DATAPATH
+    import "DPI-C" function void mdla7_dpi_ewe_fp16(
+        input int avec0, input int avec1, input int avec2, input int avec3,
+        input int bvec0, input int bvec1, input int bvec2, input int bvec3,
+        input int elem_count, input int op_mode,
+        output longint out_bits
+    );
+    reg dpi_datapath_enabled;
+    reg [63:0] dpi_fp_ewe_bits;
+
+    initial begin
+        dpi_datapath_enabled = $test$plusargs("MDLA7_DATAPATH_DPI");
+    end
+`endif
     reg signed [31:0] i16_av;
     reg signed [31:0] i16_bv;
     reg signed [31:0] i16_raw;
@@ -422,6 +436,24 @@ module vf_ewe_sample_engine #(
             end
         end
         fp_ewe_bits = $realtobits(fp_sum);
+`ifdef MDLA7_DPI_DATAPATH
+        if (dpi_datapath_enabled && fp_mode) begin
+            mdla7_dpi_ewe_fp16(
+                active_a_vec[31:0],
+                active_a_vec[63:32],
+                active_a_vec[95:64],
+                active_a_vec[127:96],
+                b_vec[31:0],
+                b_vec[63:32],
+                b_vec[95:64],
+                b_vec[127:96],
+                {24'd0, safe_fp_count},
+                {30'd0, op_mode},
+                dpi_fp_ewe_bits
+            );
+            fp_ewe_bits = dpi_fp_ewe_bits;
+        end
+`endif
         for (i16_lane = 0; i16_lane < (MAX_ELEMS/2); i16_lane = i16_lane + 1) begin
             if (i16_lane < safe_fp_count) begin
                 i16_av = {{16{active_a_vec[i16_lane*16 + 15]}}, active_a_vec[i16_lane*16 +: 16]};
