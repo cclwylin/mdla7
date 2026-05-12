@@ -66,7 +66,7 @@ UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
 
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
-WORDS_PER_COMMAND = 28
+WORDS_PER_COMMAND = 32
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 
 
@@ -120,7 +120,7 @@ def conv2d_int8_window_sample(
     layer: Layer,
     data: bytes,
     max_count: int = 16,
-) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool]:
+) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int]:
     """Return one NHWC/OHWI output-pixel sample window for INT8 CONV descriptors."""
     if (
         layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
@@ -129,8 +129,7 @@ def conv2d_int8_window_sample(
         act = data[layer.in_off:layer.in_off + min(max_count, layer.in_size)]
         wgt = data[layer.wgt_off:layer.wgt_off + min(max_count, layer.wgt_size)]
         elem_count = min(len(act), len(wgt), max_count)
-        valid = elem_count > 0
-        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, valid
+        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, False, 0, 0, 0
 
     act_values = bytearray()
     wgt_values = bytearray()
@@ -139,6 +138,8 @@ def conv2d_int8_window_sample(
     last_ic = 0
     last_input_byte = 0
     last_weight_byte = 0
+    first_input_byte = 0
+    first_weight_byte = 0
     for kh in range(layer.k_h):
         for kw in range(layer.k_w):
             for ic in range(layer.in_c):
@@ -152,6 +153,9 @@ def conv2d_int8_window_sample(
                     continue
                 act_values.append(data[layer.in_off + input_byte])
                 wgt_values.append(data[layer.wgt_off + weight_byte])
+                if len(act_values) == 1:
+                    first_input_byte = input_byte
+                    first_weight_byte = weight_byte
                 last_kh = kh
                 last_kw = kw
                 last_ic = ic
@@ -175,6 +179,9 @@ def conv2d_int8_window_sample(
         last_weight_byte,
         0,
         valid,
+        first_input_byte,
+        first_weight_byte,
+        elem_count,
     )
 
 
@@ -432,6 +439,9 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
             expected_weight_offset,
             expected_output_offset,
             expected_valid,
+            expected_first_input_offset,
+            expected_first_weight_offset,
+            expected_valid_count,
         ) = conv2d_int8_window_sample(layer, data)
         if elem_count == 0:
             return None
@@ -469,6 +479,9 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         words[25] = expected_input_offset & 0xFFFF_FFFF
         words[26] = expected_weight_offset & 0xFFFF_FFFF
         words[27] = expected_output_offset & 0xFFFF_FFFF
+        words[28] = expected_first_input_offset & 0xFFFF_FFFF
+        words[29] = expected_first_weight_offset & 0xFFFF_FFFF
+        words[30] = expected_valid_count & 0xFFFF_FFFF
         return words
 
     if layer.op_kind in OK_POOL and elem == 1 and layer.in_size > 0:

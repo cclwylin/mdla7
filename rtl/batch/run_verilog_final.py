@@ -35,7 +35,7 @@ GEN_STATS_RE = re.compile(
     r"\s+tnps=([0-9]+)\s+udma=([0-9]+)"
 )
 CACHE_VERSION = 3
-WORDS_PER_COMMAND = 28
+WORDS_PER_COMMAND = 32
 
 
 def repo_paths() -> tuple[Path, Path]:

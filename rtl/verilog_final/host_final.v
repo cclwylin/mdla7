@@ -91,6 +91,9 @@ module host_final #(
     input      [31:0]  conv_sample_weight_byte_offset,
     input      [31:0]  conv_sample_output_byte_offset,
     input              conv_sample_input_valid,
+    input      [31:0]  conv_first_input_byte_offset,
+    input      [31:0]  conv_first_weight_byte_offset,
+    input      [7:0]   conv_window_valid_count,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -121,7 +124,7 @@ module host_final #(
     localparam [2:0] ST_NEXT  = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
 
-    localparam WORDS_PER_COMMAND = 28;
+    localparam WORDS_PER_COMMAND = 32;
 
     reg [2:0] state;
     reg [31:0] command_index;
@@ -236,65 +239,68 @@ module host_final #(
         cmd_mem[25] = 32'd5;
         cmd_mem[26] = 32'd5;
         cmd_mem[27] = 32'd0;
+        cmd_mem[28] = 32'd0;
+        cmd_mem[29] = 32'd0;
+        cmd_mem[30] = 32'd6;
 
         // Command 1: REQUANT sample using the CONV raw accumulator.
-        cmd_mem[28] = {28'd0, OP_REQUANT};
-        cmd_mem[29] = 32'd1;
-        cmd_mem[30] = 32'h0000_02b0;
-        cmd_mem[32] = 32'd18;
-        cmd_mem[42] = 32'sd1073741824;
-        cmd_mem[43] = 32'd1;
-        cmd_mem[44] = -32'sd128;
-        cmd_mem[45] = 32'sd127;
-        cmd_mem[46] = 32'd18;
+        cmd_mem[32] = {28'd0, OP_REQUANT};
+        cmd_mem[33] = 32'd1;
+        cmd_mem[34] = 32'h0000_02b0;
+        cmd_mem[36] = 32'd18;
+        cmd_mem[46] = 32'sd1073741824;
+        cmd_mem[47] = 32'd1;
+        cmd_mem[48] = -32'sd128;
+        cmd_mem[49] = 32'sd127;
+        cmd_mem[50] = 32'd18;
 
         // Command 2: POOL sample max over 7 INT8 elements.
-        cmd_mem[56] = {28'd0, OP_POOL};
-        cmd_mem[57] = 32'd7;
-        cmd_mem[58] = 32'h0000_02c0;
-        cmd_mem[60] = 32'h0102_0304;
-        cmd_mem[61] = 32'hfc07_0000;
-        cmd_mem[68] = 32'd7;
-        cmd_mem[74] = 32'd7;
+        cmd_mem[64] = {28'd0, OP_POOL};
+        cmd_mem[65] = 32'd7;
+        cmd_mem[66] = 32'h0000_02c0;
+        cmd_mem[68] = 32'h0102_0304;
+        cmd_mem[69] = 32'hfc07_0000;
+        cmd_mem[76] = 32'd7;
+        cmd_mem[82] = 32'd7;
 
         // Command 3: EWE sample add over 4 INT8 elements.
-        cmd_mem[84] = {28'd0, OP_EWE};
-        cmd_mem[85] = 32'd4;
-        cmd_mem[86] = 32'h0000_02d0;
-        cmd_mem[88] = 32'h0102_0304;
-        cmd_mem[92] = 32'h0201_ff03;
-        cmd_mem[96] = 32'd4;
-        cmd_mem[102] = 32'd15;
+        cmd_mem[96] = {28'd0, OP_EWE};
+        cmd_mem[97] = 32'd4;
+        cmd_mem[98] = 32'h0000_02d0;
+        cmd_mem[100] = 32'h0102_0304;
+        cmd_mem[104] = 32'h0201_ff03;
+        cmd_mem[108] = 32'd4;
+        cmd_mem[114] = 32'd15;
 
         // Command 4: UDMA read path.
-        cmd_mem[112] = {28'd0, OP_UDMA};
-        cmd_mem[113] = 32'd256;
-        cmd_mem[114] = 32'h0000_02a0;
-        cmd_mem[115] = 32'd0;
-        cmd_mem[116] = 32'd512;
-        cmd_mem[117] = 32'd3;
+        cmd_mem[128] = {28'd0, OP_UDMA};
+        cmd_mem[129] = 32'd256;
+        cmd_mem[130] = 32'h0000_02a0;
+        cmd_mem[131] = 32'd0;
+        cmd_mem[132] = 32'd512;
+        cmd_mem[133] = 32'd3;
 
         // Command 5: TNPS space-to-depth over a 4x4x1 tensor, block=2.
-        cmd_mem[140] = {28'd0, OP_TNPS};
-        cmd_mem[141] = 32'd128;
-        cmd_mem[142] = 32'h0000_03f0;
-        cmd_mem[143] = 32'd2;
-        cmd_mem[146] = 32'd4;
-        cmd_mem[147] = 32'd4;
-        cmd_mem[148] = 32'd1;
-        cmd_mem[149] = 32'd2;
-        cmd_mem[150] = 32'd2;
-        cmd_mem[151] = 32'd4;
-        cmd_mem[152] = 32'd2;
-        cmd_mem[153] = 32'd1;
-        cmd_mem[154] = 32'd2;
-        cmd_mem[155] = 32'd0;
-        cmd_mem[156] = 32'd4;
-        cmd_mem[157] = 32'd2;
-        cmd_mem[158] = 32'd1;
+        cmd_mem[160] = {28'd0, OP_TNPS};
+        cmd_mem[161] = 32'd128;
+        cmd_mem[162] = 32'h0000_03f0;
+        cmd_mem[163] = 32'd2;
+        cmd_mem[166] = 32'd4;
+        cmd_mem[167] = 32'd4;
+        cmd_mem[168] = 32'd1;
+        cmd_mem[169] = 32'd2;
+        cmd_mem[170] = 32'd2;
+        cmd_mem[171] = 32'd4;
+        cmd_mem[172] = 32'd2;
+        cmd_mem[173] = 32'd1;
+        cmd_mem[174] = 32'd2;
+        cmd_mem[175] = 32'd0;
+        cmd_mem[176] = 32'd4;
+        cmd_mem[177] = 32'd2;
+        cmd_mem[178] = 32'd1;
 
         // Command 6: stop.
-        cmd_mem[168] = {28'd0, OP_DONE};
+        cmd_mem[192] = {28'd0, OP_DONE};
 
         program_path = "";
         if ($value$plusargs("FINAL_PROGRAM=%s", program_path))
@@ -437,13 +443,19 @@ module host_final #(
                             ((conv_sample_input_valid !== cmd_mem[base + 3][3]) ||
                              (conv_sample_input_byte_offset !== cmd_mem[base + 25]) ||
                              (conv_sample_weight_byte_offset !== cmd_mem[base + 26]) ||
-                             (conv_sample_output_byte_offset !== cmd_mem[base + 27]))) begin
-                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d",
+                             (conv_sample_output_byte_offset !== cmd_mem[base + 27]) ||
+                             (conv_first_input_byte_offset !== cmd_mem[base + 28]) ||
+                             (conv_first_weight_byte_offset !== cmd_mem[base + 29]) ||
+                             (conv_window_valid_count !== cmd_mem[base + 30][7:0]))) begin
+                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d",
                                      command_index,
                                      conv_sample_input_valid, cmd_mem[base + 3][3],
                                      conv_sample_input_byte_offset, cmd_mem[base + 25],
                                      conv_sample_weight_byte_offset, cmd_mem[base + 26],
-                                     conv_sample_output_byte_offset, cmd_mem[base + 27]);
+                                     conv_sample_output_byte_offset, cmd_mem[base + 27],
+                                     conv_first_input_byte_offset, cmd_mem[base + 28],
+                                     conv_first_weight_byte_offset, cmd_mem[base + 29],
+                                     conv_window_valid_count, cmd_mem[base + 30][7:0]);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

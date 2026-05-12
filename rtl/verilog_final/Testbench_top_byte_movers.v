@@ -91,6 +91,9 @@ module Testbench_top_byte_movers;
     wire [31:0] conv_sample_weight_byte_offset;
     wire [31:0] conv_sample_output_byte_offset;
     wire conv_sample_input_valid;
+    wire [31:0] conv_first_input_byte_offset;
+    wire [31:0] conv_first_weight_byte_offset;
+    wire [7:0] conv_window_valid_count;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -195,6 +198,9 @@ module Testbench_top_byte_movers;
         .conv_sample_weight_byte_offset(conv_sample_weight_byte_offset),
         .conv_sample_output_byte_offset(conv_sample_output_byte_offset),
         .conv_sample_input_valid(conv_sample_input_valid),
+        .conv_first_input_byte_offset(conv_first_input_byte_offset),
+        .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
+        .conv_window_valid_count(conv_window_valid_count),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -360,12 +366,18 @@ module Testbench_top_byte_movers;
         if (!conv_sample_input_valid ||
             (conv_sample_input_byte_offset != 32'd5) ||
             (conv_sample_weight_byte_offset != 32'd5) ||
-            (conv_sample_output_byte_offset != 32'd0)) begin
-            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d",
+            (conv_sample_output_byte_offset != 32'd0) ||
+            (conv_first_input_byte_offset != 32'd0) ||
+            (conv_first_weight_byte_offset != 32'd0) ||
+            (conv_window_valid_count != 8'd6)) begin
+            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d",
                      conv_sample_input_valid,
                      conv_sample_input_byte_offset,
                      conv_sample_weight_byte_offset,
-                     conv_sample_output_byte_offset);
+                     conv_sample_output_byte_offset,
+                     conv_first_input_byte_offset,
+                     conv_first_weight_byte_offset,
+                     conv_window_valid_count);
             failures = failures + 1;
         end
 

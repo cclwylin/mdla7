@@ -96,6 +96,9 @@ module mdla7_top_final #(
     output     [31:0]           conv_sample_weight_byte_offset,
     output     [31:0]           conv_sample_output_byte_offset,
     output                      conv_sample_input_valid,
+    output     [31:0]           conv_first_input_byte_offset,
+    output     [31:0]           conv_first_weight_byte_offset,
+    output     [7:0]            conv_window_valid_count,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
     output signed [31:0]        pool_out,
@@ -413,7 +416,10 @@ module mdla7_top_final #(
         .conv_sample_input_byte_offset(conv_sample_input_byte_offset),
         .conv_sample_weight_byte_offset(conv_sample_weight_byte_offset),
         .conv_sample_output_byte_offset(conv_sample_output_byte_offset),
-        .conv_sample_input_valid(conv_sample_input_valid)
+        .conv_sample_input_valid(conv_sample_input_valid),
+        .conv_first_input_byte_offset(conv_first_input_byte_offset),
+        .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
+        .conv_window_valid_count(conv_window_valid_count)
     );
 
     vf_requant_sample_engine u_requant (

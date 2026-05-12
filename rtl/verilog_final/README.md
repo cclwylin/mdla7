@@ -43,7 +43,7 @@ Current smoke coverage:
 - `host`: host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS descriptor stream into `mdla7_top_final`.
 
 `host_final.v` is the first program-driven path for `verilog_final`. It uses a
-simple 28-word descriptor format and has a built-in default
+simple 32-word descriptor format and has a built-in default
 CONV -> REQUANT -> POOL -> EWE -> UDMA -> TNPS program. It can also load a hex descriptor
 stream:
 
@@ -206,10 +206,15 @@ Descriptor word layout:
 | 25 | CONV expected sample input byte offset |
 | 26 | CONV expected sample weight byte offset |
 | 27 | CONV expected sample output byte offset |
+| 28 | CONV expected first-lane input byte offset |
+| 29 | CONV expected first-lane weight byte offset |
+| 30 | CONV expected valid lane count across the 16-lane window prefix |
+| 31 | reserved |
 
 For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9,
 `EWE`: bit 10). For INT16 descriptors, word 12 bit 11 marks INT16 mode for
 `CONV`, `POOL`, and `EWE`.
 words 16/17 hold the expected double-precision sample result bits `{high, low}`.
-INT8 CONV descriptors use words 20..27 to check one descriptor-driven 2D
-NHWC/OHWI sample address alongside the sample MAC.
+INT8 CONV descriptors use words 20..31 to let the sample engine derive the
+first lane, last lane, and valid lane count of its descriptor-driven 2D
+NHWC/OHWI window iterator and check those addresses alongside the sample MAC.

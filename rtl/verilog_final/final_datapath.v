@@ -356,7 +356,10 @@ module vf_conv_sample_engine #(
     output     [31:0]             conv_sample_input_byte_offset,
     output     [31:0]             conv_sample_weight_byte_offset,
     output     [31:0]             conv_sample_output_byte_offset,
-    output                        conv_sample_input_valid
+    output                        conv_sample_input_valid,
+    output     [31:0]             conv_first_input_byte_offset,
+    output     [31:0]             conv_first_weight_byte_offset,
+    output reg [7:0]              conv_window_valid_count
 );
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
@@ -383,6 +386,19 @@ module vf_conv_sample_engine #(
     reg signed [31:0] i16_wv;
     reg signed [63:0] i16_acc64;
     reg signed [31:0] i16_acc;
+    integer win_i;
+    reg [31:0] win_lane;
+    reg [31:0] win_col_span;
+    reg [31:0] win_kh;
+    reg [31:0] win_rem;
+    reg [31:0] win_kw;
+    reg [31:0] win_ic;
+    reg [31:0] win_out_area;
+    reg [31:0] win_oh;
+    reg [31:0] win_ow;
+    reg [31:0] win_oc;
+    reg signed [31:0] win_ih;
+    reg signed [31:0] win_iw;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -426,6 +442,22 @@ module vf_conv_sample_engine #(
     assign l1_req_bytes = sample_bytes;
     assign l1_req_payload_cycles = payload_cycles;
 
+    wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
+    wire [31:0] conv_k_w_safe = (conv_k_w == 8'd0) ? 32'd1 : {24'd0, conv_k_w};
+    wire [31:0] conv_window_lane = (safe_int_count == 8'd0) ? 32'd0 : {24'd0, safe_int_count - 8'd1};
+    wire [31:0] conv_window_col_span = conv_k_w_safe * conv_in_c_safe;
+    wire [31:0] conv_window_kh =
+        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_lane / conv_window_col_span;
+    wire [31:0] conv_window_rem =
+        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_lane % conv_window_col_span;
+    wire [31:0] conv_window_kw =
+        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_rem / conv_in_c_safe;
+    wire [31:0] conv_window_ic =
+        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_rem % conv_in_c_safe;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [47:0] explicit_sample_coord_unused = {conv_sample_kh, conv_sample_kw, conv_sample_ic};
+    /* verilator lint_on UNUSEDSIGNAL */
+
     vf_conv_int8_mac #(
         .MAX_ELEMS(MAX_ELEMS)
     ) u_mac (
@@ -461,13 +493,39 @@ module vf_conv_sample_engine #(
         .pad_left(conv_pad_left),
         .elem_bytes(conv_elem_bytes),
         .out_elem_index(conv_out_elem_index),
-        .sample_kh(conv_sample_kh),
-        .sample_kw(conv_sample_kw),
-        .sample_ic(conv_sample_ic),
+        .sample_kh(conv_window_kh[15:0]),
+        .sample_kw(conv_window_kw[15:0]),
+        .sample_ic(conv_window_ic[15:0]),
         .input_byte_offset(conv_sample_input_byte_offset),
         .weight_byte_offset(conv_sample_weight_byte_offset),
         .output_byte_offset(conv_sample_output_byte_offset),
         .input_valid(conv_sample_input_valid)
+    );
+
+    vf_conv2d_addrgen u_conv_first_addrgen (
+        .in_h(conv_in_h),
+        .in_w(conv_in_w),
+        .in_c(conv_in_c),
+        .out_h(conv_out_h),
+        .out_w(conv_out_w),
+        .out_c(conv_out_c),
+        .k_h(conv_k_h),
+        .k_w(conv_k_w),
+        .stride_h(conv_stride_h),
+        .stride_w(conv_stride_w),
+        .dilation_h(conv_dilation_h),
+        .dilation_w(conv_dilation_w),
+        .pad_top(conv_pad_top),
+        .pad_left(conv_pad_left),
+        .elem_bytes(conv_elem_bytes),
+        .out_elem_index(conv_out_elem_index),
+        .sample_kh(16'd0),
+        .sample_kw(16'd0),
+        .sample_ic(16'd0),
+        .input_byte_offset(conv_first_input_byte_offset),
+        .weight_byte_offset(conv_first_weight_byte_offset),
+        .output_byte_offset(),
+        .input_valid()
     );
 
     function real pow2_int;
@@ -514,6 +572,46 @@ module vf_conv_sample_engine #(
         i16_av = 32'sd0;
         i16_wv = 32'sd0;
         i16_acc64 = 64'sd0;
+        conv_window_valid_count = 8'd0;
+        win_col_span = conv_k_w_safe * conv_in_c_safe;
+        win_out_area = {16'd0, conv_out_w} * {16'd0, conv_out_c};
+        win_oh = (win_out_area == 32'd0) ? 32'd0 : conv_out_elem_index / win_out_area;
+        win_ow = ({16'd0, conv_out_c} == 32'd0) ? 32'd0 :
+                 ((conv_out_elem_index % win_out_area) / {16'd0, conv_out_c});
+        win_oc = ({16'd0, conv_out_c} == 32'd0) ? 32'd0 :
+                 (conv_out_elem_index % {16'd0, conv_out_c});
+        win_lane = 32'd0;
+        win_kh = 32'd0;
+        win_rem = 32'd0;
+        win_kw = 32'd0;
+        win_ic = 32'd0;
+        win_ih = 32'sd0;
+        win_iw = 32'sd0;
+        for (win_i = 0; win_i < MAX_ELEMS; win_i = win_i + 1) begin
+            if (win_i < safe_int_count) begin
+                win_lane = win_i;
+                win_kh = (win_col_span == 32'd0) ? 32'd0 : win_lane / win_col_span;
+                win_rem = (win_col_span == 32'd0) ? 32'd0 : win_lane % win_col_span;
+                win_kw = (conv_in_c_safe == 32'd0) ? 32'd0 : win_rem / conv_in_c_safe;
+                win_ic = (conv_in_c_safe == 32'd0) ? 32'd0 : win_rem % conv_in_c_safe;
+                win_ih = $signed({16'd0, win_oh[15:0]}) * $signed({24'd0, conv_stride_h}) +
+                         $signed({16'd0, win_kh[15:0]}) * $signed({24'd0, conv_dilation_h}) -
+                         $signed({{16{conv_pad_top[15]}}, conv_pad_top});
+                win_iw = $signed({16'd0, win_ow[15:0]}) * $signed({24'd0, conv_stride_w}) +
+                         $signed({16'd0, win_kw[15:0]}) * $signed({24'd0, conv_dilation_w}) -
+                         $signed({{16{conv_pad_left[15]}}, conv_pad_left});
+                if ((win_oh < {16'd0, conv_out_h}) &&
+                    (win_ow < {16'd0, conv_out_w}) &&
+                    (win_oc < {16'd0, conv_out_c}) &&
+                    (win_kh < {24'd0, conv_k_h}) &&
+                    (win_kw < {24'd0, conv_k_w}) &&
+                    (win_ic < {16'd0, conv_in_c}) &&
+                    (win_ih >= 32'sd0) && (win_iw >= 32'sd0) &&
+                    (win_ih < $signed({16'd0, conv_in_h})) &&
+                    (win_iw < $signed({16'd0, conv_in_w})))
+                    conv_window_valid_count = conv_window_valid_count + 8'd1;
+            end
+        end
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
             if (fp_i < safe_fp_count)
                 fp_sum = fp_sum +
