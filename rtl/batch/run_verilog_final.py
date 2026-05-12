@@ -187,6 +187,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--max-commands", type=int, default=64)
     ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("--emit-conv-partial-psum", action="store_true",
+                    help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
     ap.add_argument("--rerun-all", action="store_true",
                     help="Ignore cached PASS/SKIP results and rerun every matched .bin.")
     ap.add_argument("--cache-file", type=Path,
@@ -272,7 +274,7 @@ def main(argv: list[str]) -> int:
     for idx, bin_path in enumerate(bins, 1):
         rel_bin = display(bin_path, repo_root)
         cached = None
-        if not args.rerun_all:
+        if not args.rerun_all and not args.emit_conv_partial_psum:
             cached = cache_hit(
                 cache_entries.get(rel_bin),
                 bin_path,
@@ -300,12 +302,13 @@ def main(argv: list[str]) -> int:
                 print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
-        rc, gen_out, _ = run(
-            [sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
-             "--max-commands", str(args.max_commands)],
-            repo_root,
-            timeout=args.timeout,
-        )
+        gen_cmd = [
+            sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
+            "--max-commands", str(args.max_commands),
+        ]
+        if args.emit_conv_partial_psum:
+            gen_cmd.append("--emit-conv-partial-psum")
+        rc, gen_out, _ = run(gen_cmd, repo_root, timeout=args.timeout)
         if rc != 0:
             failed += 1
             print(f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL   n/a   n/a    0.00")
@@ -326,22 +329,23 @@ def main(argv: list[str]) -> int:
             skipped += 1
             print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0     0    0.00")
             print("     reason: no final command")
-            cache_entries[rel_bin] = {
-                "status": "SKIP",
-                "bin_sig": file_signature(bin_path),
-                "runner_mtime_ns": runner_mtime_ns,
-                "generator_mtime_ns": generator_mtime_ns,
-                "source_mtime_ns": source_mtime_ns,
-                "cmds": 0,
-                "conv": 0,
-                "pool": 0,
-                "requant": 0,
-                "ewe": 0,
-                "tnps": 0,
-                "udma": 0,
-                "done": 0,
-            }
-            save_cache(args.cache_file, cache)
+            if not args.emit_conv_partial_psum:
+                cache_entries[rel_bin] = {
+                    "status": "SKIP",
+                    "bin_sig": file_signature(bin_path),
+                    "runner_mtime_ns": runner_mtime_ns,
+                    "generator_mtime_ns": generator_mtime_ns,
+                    "source_mtime_ns": source_mtime_ns,
+                    "cmds": 0,
+                    "conv": 0,
+                    "pool": 0,
+                    "requant": 0,
+                    "ewe": 0,
+                    "tnps": 0,
+                    "udma": 0,
+                    "done": 0,
+                }
+                save_cache(args.cache_file, cache)
             continue
 
         cmd = [str(smoke), "--test", "host", "--program", str(hex_path)]
@@ -358,23 +362,24 @@ def main(argv: list[str]) -> int:
                 f"{idx:3d}  {bin_path.stem[:38]:38s} PASS "
                 f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {wall:7.2f}"
             )
-            cache_entries[rel_bin] = {
-                "status": "PASS",
-                "bin_sig": file_signature(bin_path),
-                "runner_mtime_ns": runner_mtime_ns,
-                "generator_mtime_ns": generator_mtime_ns,
-                "source_mtime_ns": source_mtime_ns,
-                "cmds": issued,
-                "conv": conv_count,
-                "pool": pool_count,
-                "requant": requant_count,
-                "ewe": ewe_count,
-                "tnps": tnps_count,
-                "udma": udma_count,
-                "done": done,
-                "wall_s": wall,
-            }
-            save_cache(args.cache_file, cache)
+            if not args.emit_conv_partial_psum:
+                cache_entries[rel_bin] = {
+                    "status": "PASS",
+                    "bin_sig": file_signature(bin_path),
+                    "runner_mtime_ns": runner_mtime_ns,
+                    "generator_mtime_ns": generator_mtime_ns,
+                    "source_mtime_ns": source_mtime_ns,
+                    "cmds": issued,
+                    "conv": conv_count,
+                    "pool": pool_count,
+                    "requant": requant_count,
+                    "ewe": ewe_count,
+                    "tnps": tnps_count,
+                    "udma": udma_count,
+                    "done": done,
+                    "wall_s": wall,
+                }
+                save_cache(args.cache_file, cache)
         else:
             failed += 1
             reason = "simulation failed"

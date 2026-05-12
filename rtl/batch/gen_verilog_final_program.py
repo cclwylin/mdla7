@@ -739,6 +739,14 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
     return None
 
 
+def conv_partial_psum_descriptors(desc: list[int]) -> list[list[int]]:
+    first = list(desc)
+    accum = list(desc)
+    first[3] |= 1 << 4
+    accum[3] |= 1 << 5
+    return [first, accum]
+
+
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
     elem = elem_bytes(layer.dtype)
     if layer.op_kind not in OK_CONV or elem != 1 or layer.in_size == 0 or layer.wgt_size == 0:
@@ -793,6 +801,14 @@ def parse_args() -> argparse.Namespace:
             "Use 0 to disable. Default: 1048576"
         ),
     )
+    ap.add_argument(
+        "--emit-conv-partial-psum",
+        action="store_true",
+        help=(
+            "Experimental: duplicate generated INT8 CONV sample descriptors as "
+            "psum first/accumulate pairs."
+        ),
+    )
     return ap.parse_args()
 
 
@@ -810,7 +826,15 @@ def main() -> int:
     udma_count = 0
     for layer in layers:
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
-        descs = [desc] if desc is not None else []
+        if (
+            args.emit_conv_partial_psum and
+            desc is not None and
+            (desc[0] & 0xF) == OP_CONV and
+            (desc[12] & ((1 << 8) | (1 << 11))) == 0
+        ):
+            descs = conv_partial_psum_descriptors(desc)
+        else:
+            descs = [desc] if desc is not None else []
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)

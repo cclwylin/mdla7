@@ -225,3 +225,6 @@ alongside the sample MAC. The tile prefix also emits a 4-entry result buffer:
 valid mask, output element indices, output byte offsets, pre-requant
 accumulators, sample output values, and sample-output sum. This is the
 result-stream skeleton before full psum/writeback buffering.
+`rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
+experimentally duplicate generated INT8 CONV samples as psum first/accumulate
+pairs to exercise the partial-K psum state.
