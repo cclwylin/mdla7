@@ -58,6 +58,7 @@ module Testbench_host_program;
     wire conv_partial_accumulate;
     wire conv_partial_final;
     wire conv_refcrc_mode;
+    wire conv_sramcrc_mode;
     wire [31:0] conv_refcrc_expected_crc;
     wire [31:0] conv_refcrc_expected_count;
     wire [31:0] conv_refcrc_ref_off;
@@ -198,6 +199,7 @@ module Testbench_host_program;
         .conv_partial_accumulate(conv_partial_accumulate),
         .conv_partial_final(conv_partial_final),
         .conv_refcrc_mode(conv_refcrc_mode),
+        .conv_sramcrc_mode(conv_sramcrc_mode),
         .conv_refcrc_expected_crc(conv_refcrc_expected_crc),
         .conv_refcrc_expected_count(conv_refcrc_expected_count),
         .conv_refcrc_ref_off(conv_refcrc_ref_off),
@@ -336,6 +338,7 @@ module Testbench_host_program;
         .conv_partial_accumulate(conv_partial_accumulate),
         .conv_partial_final(conv_partial_final),
         .conv_refcrc_mode(conv_refcrc_mode),
+        .conv_sramcrc_mode(conv_sramcrc_mode),
         .conv_refcrc_expected_crc(conv_refcrc_expected_crc),
         .conv_refcrc_expected_count(conv_refcrc_expected_count),
         .conv_refcrc_ref_off(conv_refcrc_ref_off),

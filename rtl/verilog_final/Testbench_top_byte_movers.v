@@ -196,6 +196,7 @@ module Testbench_top_byte_movers;
         .conv_partial_accumulate(conv_partial_accumulate),
         .conv_partial_final(conv_partial_final),
         .conv_refcrc_mode(1'b0),
+        .conv_sramcrc_mode(1'b0),
         .conv_refcrc_expected_crc(32'd0),
         .conv_refcrc_expected_count(32'd0),
         .conv_refcrc_ref_off(32'd0),

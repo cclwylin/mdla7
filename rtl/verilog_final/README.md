@@ -80,12 +80,14 @@ The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`, and
 is still growing. Layers with no final descriptor are reported as `SKIP`.
 
 `--emit-conv-partial-psum` expands INT8 CONV descriptors into partial-K output
-tiles and checks the rolling shadow-SRAM output CRC/count. The host program now
+tiles and checks the output SRAM image CRC/count. The host program now
 defaults to 4096 commands. If a quantized layer's full output tensor fits in
 that budget, the generator emits every output element, uses the `.bin` CONV
 weight payload, per-channel multiplier/shift, bias_eff, optional correction map,
-and output activation clamp, then checks the final shadow CRC against the golden
-tensor at `ref_off/ref_size`. Layers that would exceed the command budget emit a
+and output activation clamp, writes final q bytes into the datapath output SRAM
+image, then runs a Verilog SRAM walker and checks its CRC against the golden
+tensor at `ref_off/ref_size`. These rows are reported in the batch table as
+`sramcrc`. Layers that would exceed the command budget emit a
 compact full-ref CRC descriptor instead: word 25 carries `ref_off`, words 28/29
 carry the expected CRC/count, and the final datapath opens the original `.bin`
 through `+FINAL_REF_PROGRAM`, seeks to `ref_off`, walks the tensor bytes in
@@ -100,9 +102,9 @@ Current converter behavior:
   takes up to 16 activation bytes and 16 weight bytes from the `.bin`, computes
   the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
   MAC result. With `--emit-conv-partial-psum`, layers that fit the command budget
-    emit all output elements and check the full golden ref tensor shadow CRC.
-    Larger layers emit a compact `refcrc` descriptor that drives the in-Verilog
-    ref tensor walker.
+  emit all output elements, write the output SRAM image, and check an SRAM-walker
+  CRC against the full golden ref tensor. Larger layers emit a compact `refcrc`
+  descriptor that drives the in-Verilog ref tensor walker.
 - FP16/float CONV op kinds `0/1/6`: emitted as CONV FP sample descriptors. The
   generator takes up to 8 activation half-floats and 8 weight half-floats,
   computes the expected double-precision sample MAC, and `host_final.v` checks
@@ -223,11 +225,11 @@ Descriptor word layout:
 | 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
 | 23 | CONV 2D sample dilation/sample-k `{sample_kw, sample_kh, dilation_w, dilation_h}` |
 | 24 | CONV 2D sample `{out_w, sample_ic}` |
-| 25 | CONV expected sample input byte offset |
+| 25 | CONV expected sample input byte offset, or `ref_off` when word 3 bit9 is set |
 | 26 | CONV expected sample weight byte offset |
-| 27 | CONV expected sample output byte offset |
-| 28 | CONV expected first-lane input byte offset, or expected shadow CRC when word 3 bit8 is set |
-| 29 | CONV expected first-lane weight byte offset, or expected shadow byte count when word 3 bit8 is set |
+| 27 | CONV expected sample output byte offset, or output SRAM CRC start offset when word 3 bit10 is set |
+| 28 | CONV expected first-lane input byte offset, expected shadow/SRAM CRC when word 3 bit8/bit10 is set, or expected ref CRC when word 3 bit9 is set |
+| 29 | CONV expected first-lane weight byte offset, expected shadow/SRAM byte count when word 3 bit8/bit10 is set, or ref byte count when word 3 bit9 is set |
 | 30 | CONV expected valid lane count across the 16-lane window prefix |
 | 31 | CONV tile prefix check `{last_first_valid, last_valid_count, tile_output_count}` in bits 16, 15:8, 7:0 |
 
@@ -252,17 +254,19 @@ writeback bytes also update a rolling FNV CRC and byte count; word 3 bit 8 asks
 the host to check those against words 28/29. Word 3 bit 9 selects the compact
 full-ref walker: word 25 gives `ref_off`, word 29 gives the byte count, and the
 datapath reads the original `.bin` via `+FINAL_REF_PROGRAM` to produce the CRC
-that the host compares with word 28.
+that the host compares with word 28. Word 3 bit 10 selects the output SRAM image
+walker: final writeback bytes are stored by output byte offset, word 27 gives
+the SRAM start offset, and the datapath scans word 29 bytes from that image to
+produce the CRC compared with word 28.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton
 and the writeback/shadow tuple plus shadow memory offsets/q values. The
 generator emits multiple output-tile groups for small INT8 CONV layers, so
-layers with up to 16 emitted output bytes now exercise a layer-level shadow
-SRAM stream rather than a single output pixel. It also emits a follow-up CONV
-probe descriptor that reads back the last tile output slot from the shadow SRAM
-and checks the stored q answer through word 3 bit 7 / word 19, plus the rolling
-shadow CRC/count through word 3 bit 8 and words 28/29. Larger INT8 CONV layers
-that cannot fit all output-element descriptors now use word 3 bit 9 and the
-Verilog ref tensor walker instead of truncating to an output prefix.
+layers that fit the host command budget exercise a layer-level output SRAM image
+rather than a single output pixel. It also emits a follow-up CONV probe
+descriptor that scans the output SRAM image through word 3 bit 10 and checks the
+CRC/count through words 28/29. Larger INT8 CONV layers that cannot fit all
+output-element descriptors use word 3 bit 9 and the Verilog ref tensor walker
+instead of truncating to an output prefix.

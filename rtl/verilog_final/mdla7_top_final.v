@@ -64,6 +64,7 @@ module mdla7_top_final #(
     input                       conv_partial_accumulate,
     input                       conv_partial_final,
     input                       conv_refcrc_mode,
+    input                       conv_sramcrc_mode,
     input      [31:0]           conv_refcrc_expected_crc,
     input      [31:0]           conv_refcrc_expected_count,
     input      [31:0]           conv_refcrc_ref_off,
@@ -209,6 +210,7 @@ module mdla7_top_final #(
     reg conv_partial_accumulate_q;
     reg conv_partial_final_q;
     reg conv_refcrc_mode_q;
+    reg conv_sramcrc_mode_q;
     reg [31:0] conv_refcrc_expected_crc_q;
     reg [31:0] conv_refcrc_expected_count_q;
     reg [31:0] conv_refcrc_ref_off_q;
@@ -441,6 +443,7 @@ module mdla7_top_final #(
         .conv_partial_accumulate(conv_partial_accumulate_q),
         .conv_partial_final(conv_partial_final_q),
         .conv_refcrc_mode(conv_refcrc_mode_q),
+        .conv_sramcrc_mode(conv_sramcrc_mode_q),
         .conv_refcrc_expected_crc(conv_refcrc_expected_crc_q),
         .conv_refcrc_expected_count(conv_refcrc_expected_count_q),
         .conv_refcrc_ref_off(conv_refcrc_ref_off_q),
@@ -775,6 +778,7 @@ module mdla7_top_final #(
             conv_partial_accumulate_q <= 1'b0;
             conv_partial_final_q <= 1'b0;
             conv_refcrc_mode_q <= 1'b0;
+            conv_sramcrc_mode_q <= 1'b0;
             conv_refcrc_expected_crc_q <= 32'd0;
             conv_refcrc_expected_count_q <= 32'd0;
             conv_refcrc_ref_off_q <= 32'd0;
@@ -850,6 +854,7 @@ module mdla7_top_final #(
                         conv_partial_accumulate_q <= conv_partial_accumulate;
                         conv_partial_final_q <= conv_partial_final;
                         conv_refcrc_mode_q <= conv_refcrc_mode;
+                        conv_sramcrc_mode_q <= conv_sramcrc_mode;
                         conv_refcrc_expected_crc_q <= conv_refcrc_expected_crc;
                         conv_refcrc_expected_count_q <= conv_refcrc_expected_count;
                         conv_refcrc_ref_off_q <= conv_refcrc_ref_off;

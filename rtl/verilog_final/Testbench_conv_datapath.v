@@ -156,6 +156,7 @@ module Testbench_conv_datapath;
         .conv_partial_accumulate(1'b0),
         .conv_partial_final(1'b0),
         .conv_refcrc_mode(1'b0),
+        .conv_sramcrc_mode(1'b0),
         .conv_refcrc_expected_crc(32'd0),
         .conv_refcrc_expected_count(32'd0),
         .conv_refcrc_ref_off(32'd0),

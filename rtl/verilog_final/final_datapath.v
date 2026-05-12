@@ -301,7 +301,8 @@ endmodule
 
 module vf_conv_sample_engine #(
     parameter MAX_ELEMS = 16,
-    parameter L1_BYTES_PER_CYCLE = 256
+    parameter L1_BYTES_PER_CYCLE = 256,
+    parameter MAX_CONV_OUTPUT_SRAM_BYTES = 16777216
 ) (
     input                         clk,
     input                         rst_n,
@@ -340,6 +341,7 @@ module vf_conv_sample_engine #(
     input                         conv_partial_accumulate,
     input                         conv_partial_final,
     input                         conv_refcrc_mode,
+    input                         conv_sramcrc_mode,
     input      [31:0]             conv_refcrc_expected_crc,
     input      [31:0]             conv_refcrc_expected_count,
     input      [31:0]             conv_refcrc_ref_off,
@@ -408,6 +410,7 @@ module vf_conv_sample_engine #(
     localparam [2:0] ST_STORE   = 3'd4;
     localparam [2:0] ST_DONE    = 3'd5;
     localparam [2:0] ST_REFCRC  = 3'd6;
+    localparam [2:0] ST_SRAMCRC = 3'd7;
     localparam [7:0] MAX_INT_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
@@ -433,6 +436,11 @@ module vf_conv_sample_engine #(
     reg [3:0] writeback_slot;
     reg [31:0] writeback_crc_value;
     reg [31:0] writeback_byte_count_value;
+    reg [31:0] sramcrc_remaining;
+    reg [31:0] sramcrc_index;
+    reg [31:0] sramcrc_crc_value;
+    reg [31:0] sramcrc_count_value;
+    integer sramcrc_i;
     reg [31:0] refcrc_remaining;
     reg [31:0] refcrc_crc_value;
     reg [31:0] refcrc_count_value;
@@ -441,6 +449,7 @@ module vf_conv_sample_engine #(
     integer refcrc_i;
     integer refcrc_seek_rc;
     reg [1023:0] refcrc_program_path;
+    reg [7:0] conv_output_sram [0:MAX_CONV_OUTPUT_SRAM_BYTES-1];
     wire [31:0] conv_read_output_byte_offset;
     wire [3:0] conv_shadow_read_slot;
 
@@ -872,6 +881,10 @@ module vf_conv_sample_engine #(
                 phase_id = PH_OUT_WRITE;
                 remaining_cycles = refcrc_remaining;
             end
+            ST_SRAMCRC: begin
+                phase_id = PH_OUT_WRITE;
+                remaining_cycles = sramcrc_remaining;
+            end
             ST_DONE: begin
                 phase_id = PH_RETIRE;
                 remaining_cycles = 32'd1;
@@ -907,6 +920,10 @@ module vf_conv_sample_engine #(
             conv_shadow_mem_q_values <= 512'd0;
             conv_shadow_crc <= FNV_OFFSET;
             conv_shadow_byte_count <= 32'd0;
+            sramcrc_remaining <= 32'd0;
+            sramcrc_index <= 32'd0;
+            sramcrc_crc_value <= FNV_OFFSET;
+            sramcrc_count_value <= 32'd0;
             refcrc_remaining <= 32'd0;
             refcrc_crc_value <= FNV_OFFSET;
             refcrc_count_value <= 32'd0;
@@ -932,6 +949,17 @@ module vf_conv_sample_engine #(
                             if (refcrc_fd != 0)
                                 refcrc_seek_rc = $fseek(refcrc_fd, conv_refcrc_ref_off, 0);
                             state <= (conv_refcrc_expected_count == 32'd0) ? ST_DONE : ST_REFCRC;
+                        end else if (conv_sramcrc_mode) begin
+                            conv_shadow_valid_mask <= 4'd0;
+                            conv_shadow_output_byte_offsets <= 128'd0;
+                            conv_shadow_q_values <= 128'd0;
+                            conv_shadow_crc <= FNV_OFFSET;
+                            conv_shadow_byte_count <= 32'd0;
+                            sramcrc_crc_value = FNV_OFFSET;
+                            sramcrc_count_value = 32'd0;
+                            sramcrc_index <= conv_out_elem_index;
+                            sramcrc_remaining <= conv_refcrc_expected_count;
+                            state <= (conv_refcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
                             state <= ST_ACT;
                         end
@@ -999,6 +1027,9 @@ module vf_conv_sample_engine #(
                                         conv_writeback_output_byte_offsets[wb_i*32 +: 32];
                                     conv_shadow_mem_q_values[writeback_slot*32 +: 32] <=
                                         conv_writeback_q_values[wb_i*32 +: 32];
+                                    if (writeback_offset_value < MAX_CONV_OUTPUT_SRAM_BYTES)
+                                        conv_output_sram[writeback_offset_value] <=
+                                            conv_writeback_q_values[wb_i*32 +: 8];
                                     writeback_crc_value =
                                         fnv_byte(writeback_crc_value,
                                                  conv_writeback_q_values[wb_i*32 +: 8]);
@@ -1009,6 +1040,32 @@ module vf_conv_sample_engine #(
                             conv_shadow_crc <= writeback_crc_value;
                             conv_shadow_byte_count <= writeback_byte_count_value;
                         end
+                        state <= ST_DONE;
+                    end
+                end
+                ST_SRAMCRC: begin
+                    if (sramcrc_remaining != 32'd0) begin
+                        sramcrc_crc_value = conv_shadow_crc;
+                        sramcrc_count_value = conv_shadow_byte_count;
+                        for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                            if ((sramcrc_i < sramcrc_remaining) &&
+                                ((sramcrc_index + sramcrc_i[31:0]) < MAX_CONV_OUTPUT_SRAM_BYTES)) begin
+                                sramcrc_crc_value =
+                                    fnv_byte(sramcrc_crc_value,
+                                             conv_output_sram[sramcrc_index + sramcrc_i[31:0]]);
+                                sramcrc_count_value = sramcrc_count_value + 32'd1;
+                            end
+                        end
+                        conv_shadow_crc <= sramcrc_crc_value;
+                        conv_shadow_byte_count <= sramcrc_count_value;
+                        if (sramcrc_remaining <= 32'd16) begin
+                            sramcrc_remaining <= 32'd0;
+                            state <= ST_DONE;
+                        end else begin
+                            sramcrc_remaining <= sramcrc_remaining - 32'd16;
+                            sramcrc_index <= sramcrc_index + 32'd16;
+                        end
+                    end else begin
                         state <= ST_DONE;
                     end
                 end

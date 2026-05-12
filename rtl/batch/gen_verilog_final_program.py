@@ -1284,7 +1284,11 @@ def conv_shadow_readback_descriptor(
     if sample is None:
         return None
     desc, _ = sample
-    desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
+    if ref_bytes is not None:
+        desc[3] = (desc[3] & ~(1 << 2)) | (1 << 6) | (1 << 10)
+        desc[27] = 0
+    else:
+        desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
     expected_last = (ref_bytes[-1] if ref_bytes else final_desc[18]) & 0xFF
     desc[19] = (expected_last if expected_last < 0x80 else expected_last - 0x100) & 0xFFFF_FFFF
     crc = FNV_OFFSET
@@ -1400,6 +1404,7 @@ def main() -> int:
     tnps_count = 0
     udma_count = 0
     refcrc_count = 0
+    sramcrc_count = 0
     command_limit = max(args.max_commands - 1, 0)
     for layer in layers:
         if len(commands) >= command_limit:
@@ -1466,6 +1471,8 @@ def main() -> int:
                 udma_count += 1
             if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 9)):
                 refcrc_count += 1
+            if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 10)):
+                sramcrc_count += 1
         if len(commands) >= command_limit:
             break
     commands.append([0] * WORDS_PER_COMMAND)
@@ -1483,7 +1490,7 @@ def main() -> int:
         f"[gen_verilog_final_program] wrote {out} "
         f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
         f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count} "
-        f"refcrc={refcrc_count}"
+        f"refcrc={refcrc_count} sramcrc={sramcrc_count}"
     )
     return 0
 
