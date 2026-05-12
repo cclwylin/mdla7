@@ -2686,7 +2686,7 @@ def _write_rtl_compare_index(title: str, html_out: str,
             f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('mdla6_cx_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('fast_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('rtl_ms', '')))}</td>"
-            f"<td style='text-align:right'>{html.escape(row.get('fast_over_mdla6_cx', ''))}</td>"
+            f"<td style='text-align:right'>{html.escape(row.get('f_over_cx', row.get('fast_over_mdla6_cx', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(row.get('rtl_over_fast', ''))}</td>"
             f"<td style='text-align:right'>{html.escape(row.get('rtl_over_mdla6_cx', ''))}</td>"
             f"<td>{html.escape(status)}</td>"
@@ -2710,7 +2710,7 @@ a:hover {{ text-decoration:underline; }}
 <h1>{html.escape(title)}</h1>
 <div class="meta">csv: {html.escape(str(csv_path))}</div>
 <table>
-  <thead><tr><th>pattern</th><th>mdla6_cx ms</th><th>fast ms</th><th>rtl ms</th><th>fast/mdla6_cx</th><th>rtl/fast</th><th>rtl/mdla6_cx</th><th>status</th></tr></thead>
+  <thead><tr><th>pattern</th><th>mdla6_cx ms</th><th>fast ms</th><th>rtl ms</th><th>f/cx</th><th>rtl/fast</th><th>rtl/mdla6_cx</th><th>status</th></tr></thead>
   <tbody>{''.join(body)}</tbody>
 </table>
 </body></html>
@@ -2926,8 +2926,8 @@ def run_corpus(*,
             if not out.get("rtl_over_fast"):
                 out["rtl_over_fast"] = _ratio_from_ms(
                     out.get("rtl_ms", ""), out.get("fast_ms", ""))
-            if not out.get("fast_over_mdla6_cx"):
-                out["fast_over_mdla6_cx"] = _ratio_from_ms(
+            if not out.get("f_over_cx"):
+                out["f_over_cx"] = out.get("fast_over_mdla6_cx", "") or _ratio_from_ms(
                     out.get("fast_ms", ""), out.get("mdla6_cx_ms", ""))
             if not out.get("rtl_over_mdla6_cx"):
                 out["rtl_over_mdla6_cx"] = _ratio_from_ms(
@@ -2942,7 +2942,7 @@ def run_corpus(*,
                     merged.append(_fill_compare_ms(prow))
             fields = [
                 "pattern", "mdla6_cx_ms", "fast_ms", "rtl_ms",
-                "fast_over_mdla6_cx", "rtl_over_fast", "rtl_over_mdla6_cx",
+                "f_over_cx", "rtl_over_fast", "rtl_over_mdla6_cx",
                 "status", "fast_status", "rtl_status",
             ]
             with csv_path.open("w", newline="") as f:
@@ -2970,7 +2970,7 @@ def run_corpus(*,
                            f"mdla6_cx={_ms_cell(cached_filled.get('mdla6_cx_ms', ''))} "
                            f"fast={_ms_cell(cached.get('fast_ms', ''))} "
                            f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
-                           f"fast/mdla6_cx={_ratio_cell(cached_filled.get('fast_over_mdla6_cx', ''))} "
+                           f"f/cx={_ratio_cell(cached_filled.get('f_over_cx', cached_filled.get('fast_over_mdla6_cx', '')))} "
                            f"rtl/fast={_ratio_cell(cached_filled.get('rtl_over_fast', ''))} "
                            f"rtl/mdla6_cx={_ratio_cell(cached_filled.get('rtl_over_mdla6_cx', ''))} cached  "
                            f"{cached.get('status', 'ok')}")
@@ -3016,7 +3016,7 @@ def run_corpus(*,
                        f"mdla6_cx={f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    '} "
                        f"fast={f'{fast_ms:>8.2f} ms' if fast_ms is not None else f'{chr(8212):>8s}    '} "
                        f"rtl={f'{rtl_ms:>8.2f} ms' if rtl_ms is not None else f'{chr(8212):>8s}    '} "
-                       f"fast/mdla6_cx={_ratio_cell(fast_mdla6_cx)} "
+                       f"f/cx={_ratio_cell(fast_mdla6_cx)} "
                        f"rtl/fast={_ratio_cell(rtl_fast)} rtl/mdla6_cx={_ratio_cell(rtl_mdla6_cx)}  "
                        f"({elapsed:5.1f}s)  {status}")
             row = {
@@ -3024,7 +3024,7 @@ def run_corpus(*,
                 "mdla6_cx_ms": f"{mdla6_cx_ms:.3f}" if mdla6_cx_ms is not None else "",
                 "fast_ms": f"{fast_ms:.3f}" if fast_ms is not None else "",
                 "rtl_ms": f"{rtl_ms:.3f}" if rtl_ms is not None else "",
-                "fast_over_mdla6_cx": fast_mdla6_cx,
+                "f_over_cx": fast_mdla6_cx,
                 "rtl_over_fast": rtl_fast,
                 "rtl_over_mdla6_cx": rtl_mdla6_cx,
                 "status": status,
@@ -3238,8 +3238,8 @@ def run_corpus(*,
         if not mdla6_cx_ms:
             value = _mdla6_cx_ms_for(out.get("pattern", ""))
             out["mdla6_cx"] = _format_ms(value)
-        if not out.get("fast_over_mdla6_cx"):
-            out["fast_over_mdla6_cx"] = _ratio_from_ms(
+        if not out.get("f_over_cx"):
+            out["f_over_cx"] = out.get("fast_over_mdla6_cx", "") or _ratio_from_ms(
                 out.get("mdla7_ms", ""), out.get("mdla6_cx", ""))
         return out
 
@@ -3251,7 +3251,7 @@ def run_corpus(*,
                 merged.append(_attach_mdla6_cx(prow))
         fields = [
             "pattern",
-            *(["mdla6_cx", "fast_over_mdla6_cx"] if has_mdla6_cx else []),
+            *(["mdla6_cx", "f_over_cx"] if has_mdla6_cx else []),
             "mdla7_ms",
             "status",
         ]
@@ -3296,13 +3296,13 @@ def run_corpus(*,
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                        f"{'mdla6_cx=' + _ms_cell(cached.get('mdla6_cx', '')) + ' ' if has_mdla6_cx else ''}"
                        f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
-                       f"{'fast/mdla6_cx=' + _ratio_cell(cached.get('fast_over_mdla6_cx', '')) + ' ' if has_mdla6_cx else ''}"
+                       f"{'f/cx=' + _ratio_cell(cached.get('f_over_cx', cached.get('fast_over_mdla6_cx', ''))) + ' ' if has_mdla6_cx else ''}"
                        f"cached  "
                        f"{suffix}{mb_suffix}")
             row = {
                 "pattern": pat,
                 "mdla6_cx": cached.get("mdla6_cx", ""),
-                "fast_over_mdla6_cx": cached.get("fast_over_mdla6_cx", ""),
+                "f_over_cx": cached.get("f_over_cx", cached.get("fast_over_mdla6_cx", "")),
                 "mdla7_ms": cached.get("mdla7_ms", ""),
                 "status": cached.get("status", "ok"),
             }
@@ -3341,13 +3341,13 @@ def run_corpus(*,
         _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                    f"{'mdla6_cx=' + (f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    ') + ' ' if has_mdla6_cx else ''}"
                    f"fast={ms_str} "
-                   f"{'fast/mdla6_cx=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
+                   f"{'f/cx=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
                    f"({elapsed:5.1f}s)  "
                    f"{suffix}{mb_suffix}")
         row = {
             "pattern": pat,
             "mdla6_cx": _format_ms(mdla6_cx_ms),
-            "fast_over_mdla6_cx": fast_mdla6_cx,
+            "f_over_cx": fast_mdla6_cx,
             "mdla7_ms": f"{ms:.3f}" if ms is not None else "",
             "status": status,
         }
