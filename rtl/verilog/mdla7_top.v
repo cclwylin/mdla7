@@ -616,7 +616,7 @@ module mdla7_top #(
                                      l1mgr_busy ? l1mgr_remaining_cycles :
                                      l1mesh_busy ? l1mesh_remaining_cycles : 32'd0;
     assign l1mgr_resp_ready = l1mesh_req_ready;
-    assign conv_l1_req_ready = run_conv && l1mesh_req_ready;
+    assign conv_l1_req_ready = legacy_req_ready;
     assign block_busy = {l1mesh_busy, l1mgr_busy, udma_busy, tnps_busy, pool_busy, ewe_busy, requant_busy, conv_busy, 1'b0};
     assign block_done_valid = {l1_resp_valid_q, l1mgr_resp_valid, udma_done_valid, tnps_done_valid, pool_done_valid, ewe_done_valid, requant_done_valid, conv_done_valid, 1'b0};
 
@@ -985,17 +985,17 @@ module mdla7_top #(
     l1manager u_l1manager (
         .clk(clk),
         .rst_n(rst_n),
-        .req_valid(1'b0),
+        .req_valid(conv_l1_req_valid),
         .req_ready(legacy_req_ready),
-        .req_write(1'b0),
+        .req_write(conv_l1_req_write),
         .req_l1(1'b1),
-        .req_source(4'd0),
-        .req_tid(8'd0),
-        .req_bytes(32'd0),
-        .req_payload_cycles(32'd0),
-        .req_addr({ADDR_WIDTH{1'b0}}),
-        .req_wdata({DATA_WIDTH{1'b0}}),
-        .req_wstrb({DATA_WIDTH/8{1'b0}}),
+        .req_source(4'd1),
+        .req_tid(stream_slot_q),
+        .req_bytes(conv_l1_req_bytes),
+        .req_payload_cycles(conv_l1_req_payload_cycles),
+        .req_addr(conv_l1_req_addr),
+        .req_wdata(conv_l1_req_wdata),
+        .req_wstrb(conv_l1_req_wstrb),
         .udma_req_valid(udma_l1_req_valid),
         .udma_req_ready(udma_l1_req_ready),
         .udma_req_write(udma_l1_req_write),
@@ -1060,16 +1060,16 @@ module mdla7_top #(
     l1mesh u_l1mesh (
         .clk(clk),
         .rst_n(rst_n),
-        .req_valid(run_conv ? conv_l1_req_valid : l1mgr_resp_valid),
+        .req_valid(l1mgr_resp_valid),
         .req_ready(l1mesh_req_ready),
-        .req_write(run_conv ? conv_l1_req_write : l1mgr_mesh_req_write),
-        .req_addr(run_conv ? conv_l1_req_addr : l1mgr_mesh_req_addr),
-        .req_bytes(run_conv ? conv_l1_req_bytes : l1mgr_mesh_req_bytes),
+        .req_write(l1mgr_mesh_req_write),
+        .req_addr(l1mgr_mesh_req_addr),
+        .req_bytes(l1mgr_mesh_req_bytes),
         .route_cycles(placement_route_cycles),
-        .req_wdata(run_conv ? conv_l1_req_wdata : l1mgr_mesh_req_wdata),
-        .req_wstrb(run_conv ? conv_l1_req_wstrb : l1mgr_mesh_req_wstrb),
-        .req_source(run_conv ? 4'd1 : l1mgr_mesh_req_source),
-        .req_tid(run_conv ? 8'd0 : l1mgr_mesh_req_tid),
+        .req_wdata(l1mgr_mesh_req_wdata),
+        .req_wstrb(l1mgr_mesh_req_wstrb),
+        .req_source(l1mgr_mesh_req_source),
+        .req_tid(l1mgr_mesh_req_tid),
         .debug_crc_start(l1mesh_crc_start),
         .debug_crc_addr(l1mesh_addr_q),
         .debug_crc_count(bytes_q),

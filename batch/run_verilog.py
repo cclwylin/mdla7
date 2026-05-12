@@ -392,10 +392,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Convenience mode for CRC coverage; enables --emit-conv-partial-psum.")
     ap.add_argument("--closed-loop-dataflow", action="store_true",
                     help="Generate real .bin probes for DRAM->UDMA->L1->engine->L1->UDMA->DRAM->L1CRC.")
+    ap.add_argument("--microblock-control", action="store_true",
+                    help="Legacy debug mode: emit compact microblock control descriptors without closed-loop datapath coverage.")
     ap.add_argument("--closed-loop-perf-target", action="store_true",
                     help="Pad closed-loop verilog cycles toward synth profile total_cycles for calibration/debug only.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
+    ap.add_argument("--allow-zero-crc-coverage", action="store_true",
+                    help="Debug escape hatch: allow a run to pass without refcrc/sramcrc coverage.")
     ap.add_argument("--min-ref-bytes", type=int, default=0,
                     help="Fail if total refB coverage is below this value.")
     ap.add_argument("--min-sram-bytes", type=int, default=0,
@@ -429,6 +433,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.full_tensor:
         args.emit_conv_partial_psum = True
         args.sample_descriptors = True
+    if (not args.microblock_control and not args.crc_coverage and
+            not args.emit_conv_partial_psum and not args.full_tensor and
+            not args.sample_descriptors):
+        args.closed_loop_dataflow = True
+    if not args.allow_zero_crc_coverage:
+        args.require_crc_coverage = True
     return args
 
 
