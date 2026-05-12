@@ -84,6 +84,7 @@ DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
 DEFAULT_CONV_SRAM_WINDOW_COUNT = 3
 CONV_TILE_MAX_ELEMS = 255
 CONV_TILE_MAX_OUTPUTS = 32768
+POOL_TILE_MAX_BYTES = 8192
 BYTE_TILE_SWEEP_PROBES = 4
 MICRO_TILE_BYTES = 1 << 20
 FNV_OFFSET = 0x811C9DC5
@@ -1903,7 +1904,11 @@ def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int
     l1_base = 0x50000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
     l1_result = l1_base if op == OP_CONV else l1_base + 0x80
     load_byte_count = sample_byte_count
-    if op == OP_CONV:
+    if op == OP_POOL:
+        load_byte_count = max(sample_byte_count, min(layer.in_size, POOL_TILE_MAX_BYTES))
+        desc[1] = load_byte_count
+        l1_result = l1_base + load_byte_count + 0x80
+    elif op == OP_CONV:
         tile_elem_count = min(
             layer.in_size // 2,
             layer.wgt_size // 2,

@@ -6,6 +6,7 @@
 /* verilator lint_off DECLFILENAME */
 module vf_pool_sample_engine #(
     parameter MAX_ELEMS = 16,
+    parameter L1_BYTES_PER_CYCLE = 256,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (
@@ -25,6 +26,7 @@ module vf_pool_sample_engine #(
     input      [ADDR_WIDTH-1:0]   l1_req_base_addr,
     input      [MAX_ELEMS*8-1:0]  sample_vec,
     input      [7:0]              elem_count,
+    input      [31:0]             workload_bytes,
     input                         l1_resp_valid,
     input      [127:0]            l1_resp_rdata,
     output                        l1_req_valid,
@@ -123,6 +125,17 @@ module vf_pool_sample_engine #(
     wire [7:0] safe_fp_count = (elem_count == 8'd0) ? 8'd1 :
                                (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
                                elem_count;
+    wire [31:0] sample_byte_count = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
+                                                               {24'd0, safe_count};
+    wire [31:0] workload_sample_bytes = (workload_bytes > sample_byte_count) ? workload_bytes :
+                                                                               sample_byte_count;
+    wire [31:0] workload_elem_count = (fp_mode || int16_mode) ? (workload_sample_bytes >> 1) :
+                                                                workload_sample_bytes;
+    wire [31:0] fetch_payload_cycles =
+        (state == ST_FETCH) ? ((workload_sample_bytes + L1_BYTES_PER_CYCLE - 32'd1) /
+                               L1_BYTES_PER_CYCLE + 32'd1) : 32'd2;
+    wire [31:0] store_payload_cycles = 32'd2;
+    wire [31:0] reduce_pipe_cycles = ((workload_elem_count + 32'd15) / 32'd16) + 32'd1;
 
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
@@ -131,10 +144,11 @@ module vf_pool_sample_engine #(
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
-    assign l1_req_bytes = (state == ST_FETCH) ? ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
-                                                                          {24'd0, safe_count}) :
+    assign l1_req_bytes = (state == ST_FETCH) ? workload_sample_bytes :
                           store_byte_count_value;
-    assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_payload_cycles = (state == ST_FETCH) ? fetch_payload_cycles :
+                                  (state == ST_STORE) ? store_payload_cycles :
+                                  32'd2;
     assign l1_req_wdata = l1_req_write ? store_wdata_value : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write ? store_wstrb_value : {DATA_WIDTH/8{1'b0}};
     assign out_q = pool_out[7:0];
@@ -383,11 +397,11 @@ module vf_pool_sample_engine #(
                             active_sample_vec <= {MAX_ELEMS*8{1'b0}};
                             for (fetch_i = 0; fetch_i < MAX_ELEMS; fetch_i = fetch_i + 1)
                                 active_sample_vec[fetch_i*8 +: 8] <= l1_resp_lane(fetch_i);
-                            pipe_remaining <= {24'd0, (fp_mode || int16_mode) ? safe_fp_count : safe_count} + 32'd1;
+                            pipe_remaining <= reduce_pipe_cycles;
                             state <= ST_PIPE;
                         end
                     end else if (l1_req_ready) begin
-                        pipe_remaining <= {24'd0, (fp_mode || int16_mode) ? safe_fp_count : safe_count} + 32'd1;
+                        pipe_remaining <= reduce_pipe_cycles;
                         state <= ST_PIPE;
                     end
                 end

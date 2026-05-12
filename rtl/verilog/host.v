@@ -108,6 +108,7 @@ module host #(
     output reg [31:0]  pool_out_byte_offset,
     output reg [127:0] pool_sample_vec,
     output reg [7:0]   pool_elem_count,
+    output reg [31:0]  pool_workload_bytes,
     output reg [1:0]   ewe_op_mode,
     output reg         ewe_fp_mode,
     output reg         ewe_int16_mode,
@@ -397,6 +398,7 @@ module host #(
             pool_sample_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                                 cmd_mem[base + 5], cmd_mem[base + 4]};
             pool_elem_count <= cmd_mem[base + 12][7:0];
+            pool_workload_bytes <= cmd_mem[base + 1];
             pool_avg_mode <= cmd_mem[base + 12][8];
             pool_fp_mode <= cmd_mem[base + 12][9];
             pool_int16_mode <= cmd_mem[base + 12][11];
@@ -712,6 +714,7 @@ module host #(
             pool_out_byte_offset <= 32'd0;
             pool_sample_vec <= 128'd0;
             pool_elem_count <= 8'd0;
+            pool_workload_bytes <= 32'd0;
             ewe_op_mode <= 2'd0;
             ewe_fp_mode <= 1'b0;
             ewe_int16_mode <= 1'b0;

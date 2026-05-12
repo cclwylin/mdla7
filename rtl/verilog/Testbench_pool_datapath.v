@@ -45,6 +45,7 @@ module Testbench_pool_datapath;
         .l1_req_base_addr(22'd0),
         .sample_vec(sample_vec),
         .elem_count(elem_count),
+        .workload_bytes(32'd0),
         .l1_resp_valid(1'b0),
         .l1_resp_rdata(128'd0),
         .l1_req_valid(l1_req_valid),

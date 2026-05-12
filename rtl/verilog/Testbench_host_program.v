@@ -189,6 +189,7 @@ module Testbench_host_program;
     wire [31:0] pool_out_byte_offset;
     wire [127:0] pool_sample_vec;
     wire [7:0] pool_elem_count;
+    wire [31:0] pool_workload_bytes;
     wire [1:0] ewe_op_mode;
     wire ewe_fp_mode;
     wire ewe_int16_mode;
@@ -422,6 +423,7 @@ module Testbench_host_program;
         .pool_out_byte_offset(pool_out_byte_offset),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
+        .pool_workload_bytes(pool_workload_bytes),
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
@@ -637,6 +639,7 @@ module Testbench_host_program;
         .pool_out_byte_offset(pool_out_byte_offset),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
+        .pool_workload_bytes(pool_workload_bytes),
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),

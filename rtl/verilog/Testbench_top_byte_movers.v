@@ -87,6 +87,7 @@ module Testbench_top_byte_movers;
     reg pool_read_sample_from_l1;
     reg [127:0] pool_sample_vec;
     reg [7:0] pool_elem_count;
+    reg [31:0] pool_workload_bytes;
     reg [1:0] ewe_op_mode;
     reg ewe_fp_mode;
     reg ewe_int16_mode;
@@ -271,6 +272,7 @@ module Testbench_top_byte_movers;
         .pool_out_byte_offset(32'd0),
         .pool_sample_vec(pool_sample_vec),
         .pool_elem_count(pool_elem_count),
+        .pool_workload_bytes(pool_workload_bytes),
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
@@ -477,6 +479,7 @@ module Testbench_top_byte_movers;
         pool_read_sample_from_l1 = 1'b0;
         pool_sample_vec = 128'd0;
         pool_elem_count = 8'd0;
+        pool_workload_bytes = 32'd0;
         ewe_op_mode = 2'd0;
         ewe_fp_mode = 1'b0;
         ewe_int16_mode = 1'b0;

@@ -174,6 +174,7 @@ module mdla7_top #(
     input      [31:0]           pool_out_byte_offset,
     input      [127:0]          pool_sample_vec,
     input      [7:0]            pool_elem_count,
+    input      [31:0]           pool_workload_bytes,
     input      [1:0]            ewe_op_mode,
     input                       ewe_fp_mode,
     input                       ewe_int16_mode,
@@ -388,6 +389,7 @@ module mdla7_top #(
     reg [31:0] pool_out_byte_offset_q;
     reg [127:0] pool_sample_vec_q;
     reg [7:0] pool_elem_count_q;
+    reg [31:0] pool_workload_bytes_q;
     reg [1:0] ewe_op_mode_q;
     reg ewe_fp_mode_q;
     reg ewe_int16_mode_q;
@@ -818,6 +820,7 @@ module mdla7_top #(
         .l1_req_base_addr(l1mesh_addr_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
+        .workload_bytes(pool_workload_bytes_q),
         .l1_resp_valid(run_pool && l1_resp_valid_q && l1_resp_read_q &&
                        (l1_resp_source_q == 4'd4) &&
                        (l1_resp_tid_q == stream_slot_q)),
@@ -1200,6 +1203,7 @@ module mdla7_top #(
             pool_out_byte_offset_q <= 32'd0;
             pool_sample_vec_q <= 128'd0;
             pool_elem_count_q <= 8'd0;
+            pool_workload_bytes_q <= 32'd0;
             ewe_op_mode_q <= 2'd0;
             ewe_fp_mode_q <= 1'b0;
             ewe_int16_mode_q <= 1'b0;
@@ -1328,6 +1332,7 @@ module mdla7_top #(
                         pool_out_byte_offset_q <= pool_out_byte_offset;
                         pool_sample_vec_q <= pool_sample_vec;
                         pool_elem_count_q <= pool_elem_count;
+                        pool_workload_bytes_q <= pool_workload_bytes;
                         ewe_op_mode_q <= ewe_op_mode;
                         ewe_fp_mode_q <= ewe_fp_mode;
                         ewe_int16_mode_q <= ewe_int16_mode;
