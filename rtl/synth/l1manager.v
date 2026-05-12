@@ -82,6 +82,8 @@ module l1manager #(
     output reg [31:0]           mesh_req_bytes,
     output reg [DATA_WIDTH-1:0] mesh_req_wdata,
     output reg [DATA_WIDTH/8-1:0] mesh_req_wstrb,
+    output reg [3:0]            mesh_req_source,
+    output reg [7:0]            mesh_req_tid,
 
     output            resp_valid,
     input             resp_ready,
@@ -322,6 +324,8 @@ module l1manager #(
             mesh_req_bytes <= 32'd0;
             mesh_req_wdata <= {DATA_WIDTH{1'b0}};
             mesh_req_wstrb <= {DATA_WIDTH/8{1'b0}};
+            mesh_req_source <= 4'd0;
+            mesh_req_tid <= 8'd0;
             for (i = 0; i < 6; i = i + 1) begin
                 q0_write[i] <= 1'b0;
                 q1_write[i] <= 1'b0;
@@ -349,6 +353,8 @@ module l1manager #(
                 mesh_req_bytes <= arb_bytes;
                 mesh_req_wdata <= arb_wdata;
                 mesh_req_wstrb <= arb_wstrb;
+                mesh_req_source <= arb_source;
+                mesh_req_tid <= arb_tid;
                 if (valid1[arb_src]) begin
                     valid1[arb_src] <= 1'b0;
                     q0_write[arb_src] <= q1_write[arb_src];

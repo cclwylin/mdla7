@@ -430,11 +430,15 @@ module mdla7_top_final #(
     wire [31:0] l1mgr_mesh_req_bytes;
     wire [DATA_WIDTH-1:0] l1mgr_mesh_req_wdata;
     wire [DATA_WIDTH/8-1:0] l1mgr_mesh_req_wstrb;
+    wire [3:0] l1mgr_mesh_req_source;
+    wire [7:0] l1mgr_mesh_req_tid;
 
     wire l1mesh_req_ready;
     wire l1mesh_busy;
     wire l1mesh_resp_valid;
     wire l1mesh_resp_read;
+    wire [3:0] l1mesh_resp_source;
+    wire [7:0] l1mesh_resp_tid;
     wire [3:0] l1mesh_phase_id;
     wire [31:0] l1mesh_remaining_cycles;
     wire [DATA_WIDTH-1:0] l1mesh_rdata;
@@ -658,7 +662,9 @@ module mdla7_top_final #(
         .sramcrc_expected_count(requant_sramcrc_expected_count_q),
         .out_byte_offset(requant_out_byte_offset_q),
         .l1_req_base_addr(l1mesh_addr_q),
-        .l1_resp_valid(run_requant && l1mesh_resp_valid && l1mesh_resp_read),
+        .l1_resp_valid(run_requant && l1mesh_resp_valid && l1mesh_resp_read &&
+                       (l1mesh_resp_source == 4'd2) &&
+                       (l1mesh_resp_tid == stream_slot_q)),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(requant_l1_req_valid),
         .l1_req_ready(requant_l1_req_ready),
@@ -696,7 +702,9 @@ module mdla7_top_final #(
         .l1_req_base_addr(l1mesh_addr_q),
         .sample_vec(pool_sample_vec_q),
         .elem_count(pool_elem_count_q),
-        .l1_resp_valid(run_pool && l1mesh_resp_valid && l1mesh_resp_read),
+        .l1_resp_valid(run_pool && l1mesh_resp_valid && l1mesh_resp_read &&
+                       (l1mesh_resp_source == 4'd4) &&
+                       (l1mesh_resp_tid == stream_slot_q)),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(pool_l1_req_valid),
         .l1_req_ready(pool_l1_req_ready),
@@ -747,7 +755,9 @@ module mdla7_top_final #(
         .a_vec(ewe_a_vec_q),
         .b_vec(ewe_b_vec_q),
         .elem_count(ewe_elem_count_q),
-        .l1_resp_valid(run_ewe && l1mesh_resp_valid && l1mesh_resp_read),
+        .l1_resp_valid(run_ewe && l1mesh_resp_valid && l1mesh_resp_read &&
+                       (l1mesh_resp_source == 4'd3) &&
+                       (l1mesh_resp_tid == stream_slot_q)),
         .l1_resp_rdata(l1mesh_rdata),
         .l1_req_valid(ewe_l1_req_valid),
         .l1_req_ready(ewe_l1_req_ready),
@@ -794,7 +804,9 @@ module mdla7_top_final #(
         .l1_req_payload_cycles(udma_l1_req_payload_cycles),
         .l1_req_wdata(udma_l1_req_wdata),
         .l1_req_wstrb(udma_l1_req_wstrb),
-        .l1_resp_valid(run_udma && l1mesh_resp_valid && l1mesh_resp_read),
+        .l1_resp_valid(run_udma && l1mesh_resp_valid && l1mesh_resp_read &&
+                       (l1mesh_resp_source == 4'd6) &&
+                       (l1mesh_resp_tid == stream_slot_q)),
         .l1_resp_rdata(l1mesh_rdata),
         .dram_req_valid(udma_dram_req_valid),
         .dram_req_write(udma_dram_req_write),
@@ -871,7 +883,7 @@ module mdla7_top_final #(
         .udma_req_valid(udma_l1_req_valid),
         .udma_req_ready(udma_l1_req_ready),
         .udma_req_write(udma_l1_req_write),
-        .udma_req_tid(8'd1),
+        .udma_req_tid(stream_slot_q),
         .udma_req_bytes(udma_l1_req_bytes),
         .udma_req_payload_cycles(udma_l1_req_payload_cycles),
         .udma_req_addr(udma_l1_req_addr),
@@ -880,7 +892,7 @@ module mdla7_top_final #(
         .requant_req_valid(requant_l1_req_valid),
         .requant_req_ready(requant_l1_req_ready),
         .requant_req_write(requant_l1_req_write),
-        .requant_req_tid(8'd0),
+        .requant_req_tid(stream_slot_q),
         .requant_req_bytes(requant_l1_req_bytes),
         .requant_req_payload_cycles(requant_l1_req_payload_cycles),
         .requant_req_addr(requant_l1_req_addr),
@@ -889,7 +901,7 @@ module mdla7_top_final #(
         .ewe_req_valid(ewe_l1_req_valid),
         .ewe_req_ready(ewe_l1_req_ready),
         .ewe_req_write(ewe_l1_req_write),
-        .ewe_req_tid(8'd0),
+        .ewe_req_tid(stream_slot_q),
         .ewe_req_bytes(ewe_l1_req_bytes),
         .ewe_req_payload_cycles(ewe_l1_req_payload_cycles),
         .ewe_req_addr(ewe_l1_req_addr),
@@ -898,7 +910,7 @@ module mdla7_top_final #(
         .pool_req_valid(pool_l1_req_valid),
         .pool_req_ready(pool_l1_req_ready),
         .pool_req_write(pool_l1_req_write),
-        .pool_req_tid(8'd0),
+        .pool_req_tid(stream_slot_q),
         .pool_req_bytes(pool_l1_req_bytes),
         .pool_req_payload_cycles(pool_l1_req_payload_cycles),
         .pool_req_addr(pool_l1_req_addr),
@@ -907,7 +919,7 @@ module mdla7_top_final #(
         .tnps_req_valid(tnps_l1_req_valid),
         .tnps_req_ready(tnps_l1_req_ready),
         .tnps_req_write(tnps_l1_req_write),
-        .tnps_req_tid(8'd2),
+        .tnps_req_tid(stream_slot_q),
         .tnps_req_bytes(tnps_l1_req_bytes),
         .tnps_req_payload_cycles(tnps_l1_req_payload_cycles),
         .tnps_req_addr(tnps_l1_req_addr),
@@ -918,6 +930,8 @@ module mdla7_top_final #(
         .mesh_req_bytes(l1mgr_mesh_req_bytes),
         .mesh_req_wdata(l1mgr_mesh_req_wdata),
         .mesh_req_wstrb(l1mgr_mesh_req_wstrb),
+        .mesh_req_source(l1mgr_mesh_req_source),
+        .mesh_req_tid(l1mgr_mesh_req_tid),
         .resp_valid(l1mgr_resp_valid),
         .resp_ready(l1mgr_resp_ready),
         .busy(l1mgr_busy),
@@ -938,6 +952,8 @@ module mdla7_top_final #(
         .route_cycles(placement_route_cycles),
         .req_wdata(run_conv ? conv_l1_req_wdata : l1mgr_mesh_req_wdata),
         .req_wstrb(run_conv ? conv_l1_req_wstrb : l1mgr_mesh_req_wstrb),
+        .req_source(run_conv ? 4'd1 : l1mgr_mesh_req_source),
+        .req_tid(run_conv ? 8'd0 : l1mgr_mesh_req_tid),
         .debug_crc_start(l1mesh_crc_start),
         .debug_crc_addr(l1mesh_addr_q),
         .debug_crc_count(bytes_q),
@@ -947,6 +963,8 @@ module mdla7_top_final #(
         .debug_crc_byte_count(l1mesh_crc_count),
         .resp_valid(l1mesh_resp_valid),
         .resp_read(l1mesh_resp_read),
+        .resp_source(l1mesh_resp_source),
+        .resp_tid(l1mesh_resp_tid),
         .resp_ready(1'b1),
         .resp_rdata(l1mesh_rdata),
         .busy(l1mesh_busy),
@@ -1227,4 +1245,5 @@ module mdla7_top_final #(
             endcase
         end
     end
+
 endmodule

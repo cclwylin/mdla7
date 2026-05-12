@@ -62,6 +62,8 @@ module l1mesh #(
     input      [31:0]             route_cycles,
     input      [DATA_WIDTH-1:0]   req_wdata,
     input      [DATA_WIDTH/8-1:0] req_wstrb,
+    input      [3:0]              req_source,
+    input      [7:0]              req_tid,
 
     input                         debug_crc_start,
     input      [ADDR_WIDTH-1:0]   debug_crc_addr,
@@ -73,6 +75,8 @@ module l1mesh #(
 
     output                        resp_valid,
     output                        resp_read,
+    output reg [3:0]              resp_source,
+    output reg [7:0]              resp_tid,
     input                         resp_ready,
     output reg [DATA_WIDTH-1:0]   resp_rdata,
     output                        busy,
@@ -226,6 +230,8 @@ module l1mesh #(
         if (!rst_n) begin
             resp_rdata <= {DATA_WIDTH{1'b0}};
             resp_read_q <= 1'b0;
+            resp_source <= 4'd0;
+            resp_tid <= 8'd0;
             debug_crc_busy <= 1'b0;
             debug_crc_done <= 1'b0;
             debug_crc <= FNV_OFFSET;
@@ -234,11 +240,16 @@ module l1mesh #(
             debug_crc_remaining <= 32'd0;
         end else if (start_fire) begin
             resp_read_q <= !req_write;
+            resp_source <= req_source;
+            resp_tid <= req_tid;
             if (!req_write)
                 resp_rdata <= debug_read_word(req_addr);
         end else begin
-            if (resp_valid && resp_ready)
+            if (resp_valid && resp_ready) begin
                 resp_read_q <= 1'b0;
+                resp_source <= 4'd0;
+                resp_tid <= 8'd0;
+            end
             debug_crc_done <= 1'b0;
             if (debug_crc_start && !debug_crc_busy) begin
                 debug_crc_busy <= (debug_crc_count != 32'd0);
@@ -342,7 +353,7 @@ module l1mesh #(
         end
     endfunction
 
-    assign resp_valid = phase_done;
+    assign resp_valid = phase_done && !start_fire;
     assign resp_read = resp_read_q;
 
     mdla7_synth_phase_engine #(
