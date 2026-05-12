@@ -220,6 +220,10 @@ def parse_verilog_ms(output: str) -> float | None:
     return float(value_s) * scale
 
 
+def has_tensor_crc(refcrc: int, sramcrc: int, finalcrc: int) -> bool:
+    return (refcrc + sramcrc + finalcrc) > 0
+
+
 def profile_dir_for(program: Path) -> Path:
     return program.parent / "profile"
 
@@ -487,6 +491,7 @@ def main(argv: list[str]) -> int:
     passed = 0
     failed = 0
     skipped = 0
+    sample_only = 0
     cache_hits = 0
     total_refcrc = 0
     total_sramcrc = 0
@@ -561,12 +566,18 @@ def main(argv: list[str]) -> int:
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
+                cached_sample_only = not has_tensor_crc(refcrc_count, sramcrc_count, finalcrc_count)
+                if cached_sample_only:
+                    sample_only += 1
+                ans = "SAMPLE" if cached_sample_only else "CACHED"
                 print(
                     f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
-                    f"{fmt_timeout(run_timeout):>6} {'CACHED':<6} "
+                    f"{fmt_timeout(run_timeout):>6} {ans:<6} "
                     f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
                     f"{fmt_ratio(verilog_ms, synth_ms):>9} {0.0:>8.2f}"
                 )
+                if cached_sample_only:
+                    print("     reason: sample-only cached result; no tensor CRC coverage")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
         gen_cmd = [
@@ -662,15 +673,21 @@ def main(argv: list[str]) -> int:
             issued = int(match.group(1))
             done = int(match.group(2))
             passed += 1
+            current_sample_only = not has_tensor_crc(refcrc_count, sramcrc_count, finalcrc_count)
+            if current_sample_only:
+                sample_only += 1
+            ans = "SAMPLE" if current_sample_only else "PASS"
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
-                f"{fmt_timeout(run_timeout):>6} {'PASS':<6} "
+                f"{fmt_timeout(run_timeout):>6} {ans:<6} "
                 f"{fmt_ms(synth_ms):>10} {fmt_ms(verilog_ms):>16} "
                 f"{fmt_ratio(verilog_ms, synth_ms):>9} {wall:>8.2f}"
             )
+            if current_sample_only:
+                print("     reason: sample-only; no tensor CRC coverage")
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
-                    "status": "PASS",
+                    "status": "SAMPLE" if current_sample_only else "PASS",
                     "bin_sig": file_signature(bin_path),
                     "runner_mtime_ns": runner_mtime_ns,
                     "generator_mtime_ns": generator_mtime_ns,
@@ -713,7 +730,10 @@ def main(argv: list[str]) -> int:
             failed += 1
             print("     reason: no final-layer SRAM/L1 CRC coverage")
 
-    print(f"[run_verilog_final] summary: pass={passed} fail={failed} skip={skipped} total={len(bins)}")
+    print(
+        f"[run_verilog_final] summary: pass={passed} fail={failed} "
+        f"skip={skipped} sample_only={sample_only} total={len(bins)}"
+    )
     print(
         f"[run_verilog_final] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
         f"finalcrc={total_finalcrc} refB={total_refbytes} sramB={total_srambytes} "
