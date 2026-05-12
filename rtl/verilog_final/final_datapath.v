@@ -376,6 +376,9 @@ module vf_conv_sample_engine #(
     output reg [3:0]              conv_writeback_valid_mask,
     output reg [127:0]            conv_writeback_output_byte_offsets,
     output reg [127:0]            conv_writeback_q_values,
+    output reg [3:0]              conv_shadow_valid_mask,
+    output reg [127:0]            conv_shadow_output_byte_offsets,
+    output reg [127:0]            conv_shadow_q_values,
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
@@ -749,8 +752,12 @@ module vf_conv_sample_engine #(
             tile_result_q_value = 32'sd0;
             if (tile_i < scoreboard_tile_output_count) begin
                 if (conv_partial_final)
-                    tile_result_acc_value = conv_psum_valid_mask[tile_i] ?
-                        $signed(conv_psum_acc_values[tile_i*32 +: 32]) : acc_out;
+                    tile_result_acc_value = conv_partial_first ? acc_out :
+                        (((state == ST_STORE) && conv_partial_accumulate &&
+                          conv_psum_valid_mask[tile_i]) ?
+                         ($signed(conv_psum_acc_values[tile_i*32 +: 32]) + acc_out) :
+                         (conv_psum_valid_mask[tile_i] ?
+                          $signed(conv_psum_acc_values[tile_i*32 +: 32]) : acc_out));
                 else
                     tile_result_acc_value = acc_out;
                 if (conv_partial_final) begin
@@ -835,6 +842,9 @@ module vf_conv_sample_engine #(
             compute_remaining <= 32'd0;
             conv_psum_valid_mask <= 4'd0;
             conv_psum_acc_values <= 128'd0;
+            conv_shadow_valid_mask <= 4'd0;
+            conv_shadow_output_byte_offsets <= 128'd0;
+            conv_shadow_q_values <= 128'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -879,6 +889,11 @@ module vf_conv_sample_engine #(
                                         acc_out;
                                 end
                             end
+                        end
+                        if (conv_writeback_valid_mask != 4'd0) begin
+                            conv_shadow_valid_mask <= conv_writeback_valid_mask;
+                            conv_shadow_output_byte_offsets <= conv_writeback_output_byte_offsets;
+                            conv_shadow_q_values <= conv_writeback_q_values;
                         end
                         state <= ST_DONE;
                     end

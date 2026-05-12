@@ -115,6 +115,9 @@ module mdla7_top_final #(
     output     [3:0]            conv_writeback_valid_mask,
     output     [127:0]          conv_writeback_output_byte_offsets,
     output     [127:0]          conv_writeback_q_values,
+    output     [3:0]            conv_shadow_valid_mask,
+    output     [127:0]          conv_shadow_output_byte_offsets,
+    output     [127:0]          conv_shadow_q_values,
     output     [3:0]            conv_psum_valid_mask,
     output     [127:0]          conv_psum_acc_values,
     output signed [31:0]        requant_scaled_out,
@@ -458,6 +461,9 @@ module mdla7_top_final #(
         .conv_writeback_valid_mask(conv_writeback_valid_mask),
         .conv_writeback_output_byte_offsets(conv_writeback_output_byte_offsets),
         .conv_writeback_q_values(conv_writeback_q_values),
+        .conv_shadow_valid_mask(conv_shadow_valid_mask),
+        .conv_shadow_output_byte_offsets(conv_shadow_output_byte_offsets),
+        .conv_shadow_q_values(conv_shadow_q_values),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values)
     );

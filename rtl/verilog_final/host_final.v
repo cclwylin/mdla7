@@ -110,6 +110,9 @@ module host_final #(
     input      [3:0]   conv_writeback_valid_mask,
     input      [127:0] conv_writeback_output_byte_offsets,
     input      [127:0] conv_writeback_q_values,
+    input      [3:0]   conv_shadow_valid_mask,
+    input      [127:0] conv_shadow_output_byte_offsets,
+    input      [127:0] conv_shadow_q_values,
     input      [3:0]   conv_psum_valid_mask,
     input      [127:0] conv_psum_acc_values,
     input signed [31:0] requant_scaled_out,
@@ -602,8 +605,15 @@ module host_final #(
                               expected_conv_tile_last_byte_offset) ||
                              (conv_writeback_q_values[31:0] !== expected_conv_tile_q_value) ||
                              (conv_writeback_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_q_value) ||
+                             (conv_shadow_valid_mask !== expected_conv_tile_valid_mask) ||
+                             (conv_shadow_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_shadow_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_last_byte_offset) ||
+                             (conv_shadow_q_values[31:0] !== expected_conv_tile_q_value) ||
+                             (conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_tile_q_value))) begin
-                            $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d",
+                            $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d",
                                      command_index,
                                      conv_writeback_valid_mask,
                                      expected_conv_tile_valid_mask,
@@ -612,7 +622,10 @@ module host_final #(
                                      expected_conv_tile_last_byte_offset,
                                      $signed(conv_writeback_q_values[31:0]),
                                      $signed(conv_writeback_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]),
-                                     $signed(expected_conv_tile_q_value));
+                                     $signed(expected_conv_tile_q_value),
+                                     conv_shadow_valid_mask,
+                                     conv_shadow_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32],
+                                     $signed(conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]));
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

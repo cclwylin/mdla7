@@ -226,10 +226,10 @@ alongside the sample MAC. The tile prefix also emits a 4-entry result buffer:
 valid mask, output element indices, output byte offsets, pre-requant
 accumulators, sample output values, and sample-output sum. When CONV word 3 bit
 6 marks the final partial, the engine also requantizes the cumulative psum
-accumulators and exposes a 4-entry writeback skeleton: valid mask, output byte
-offsets, and final output q values.
+accumulators, exposes a 4-entry writeback skeleton, and latches the same
+mask/offset/q tuple into a shadow output buffer on the store handshake.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
 the host checks the cumulative accumulator through the result-buffer skeleton
-and the writeback skeleton offsets/q values.
+and the writeback/shadow skeleton offsets/q values.

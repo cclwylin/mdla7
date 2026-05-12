@@ -192,6 +192,9 @@ module Testbench_conv_datapath;
         .conv_writeback_valid_mask(),
         .conv_writeback_output_byte_offsets(),
         .conv_writeback_q_values(),
+        .conv_shadow_valid_mask(),
+        .conv_shadow_output_byte_offsets(),
+        .conv_shadow_q_values(),
         .conv_psum_valid_mask(),
         .conv_psum_acc_values()
     );
