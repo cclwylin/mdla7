@@ -2309,11 +2309,7 @@ def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
 def _load_prior_results(csv_path: Path, fast_only: bool = False) -> dict[str, dict]:
     rows = {p: r for p, r in _load_prior_csv(csv_path).items()
             if r.get("status") == "ok" and r.get("mdla7_ms")}
-    if fast_only:
-        return rows
-    return {p: r for p, r in rows.items()
-            if r.get("conflict_status", "ok") == "ok" and r.get("mdla7_conflict_ms") and
-            r.get("mesh_status", "ok") == "ok" and r.get("mdla7_mesh_ms")}
+    return rows
 
 
 def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False) -> list[str]:
@@ -2812,7 +2808,7 @@ def run_corpus(*,
                     choices=("fast", "rtl", "cx", "synth"), default="rtl",
                     help="L1Mesh timing mode for the primary run")
     ap.add_argument("--l1-timing", dest="l1_timing",
-                    choices=("fast", "rtl", "cx", "cx", "conflict", "mesh", "mesh-opt"),
+                    choices=("fast", "rtl", "cx", "synth"),
                     help=argparse.SUPPRESS)
     ap.add_argument("--engine", dest="engine_model",
                     choices=("fast", "rtl", "cx", "synth"), default="rtl",
@@ -3257,11 +3253,7 @@ def run_corpus(*,
             "pattern",
             *(["mdla6_cx", "fast_over_mdla6_cx"] if has_mdla6_cx else []),
             "mdla7_ms",
-            "mdla7_conflict_ms",
-            "mdla7_mesh_ms",
             "status",
-            "conflict_status",
-            "mesh_status",
         ]
         if microblock_metrics:
             fields.extend([
@@ -3290,15 +3282,10 @@ def run_corpus(*,
                 pat, model_dir, engine_model=args.engine_model,
                 l1_timing=args.l1_timing)):
             cached = prior_ok[pat]
-            cached_conflict_ms = "" if args.fast_only else cached.get("mdla7_conflict_ms", "")
-            cached_mesh_ms = "" if args.fast_only else cached.get("mdla7_mesh_ms", "")
-            cached_conflict_status = "" if args.fast_only else cached.get("conflict_status", "ok")
-            cached_mesh_status = "" if args.fast_only else cached.get("mesh_status", "ok")
             cached = _attach_mdla6_cx(cached)
             mode_suffix = _mode_suffix(args.l1_timing, args.engine_model)
             model_suffix = "" if not mode_suffix else f"/{mode_suffix}"
-            suffix = ((cached.get("status", "ok") + model_suffix) if args.fast_only
-                      else f"{cached.get('status', 'ok')}/{cached_conflict_status}/{cached_mesh_status}{model_suffix}")
+            suffix = cached.get("status", "ok") + model_suffix
             model_path = model_dir / f"{pat}.tflite"
             mb = (_microblock_metrics_for(model_path, args.l1_timing, args.engine_model)
                   if microblock_metrics else {})
@@ -3310,19 +3297,14 @@ def run_corpus(*,
                        f"{'mdla6_cx=' + _ms_cell(cached.get('mdla6_cx', '')) + ' ' if has_mdla6_cx else ''}"
                        f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
                        f"{'fast/mdla6_cx=' + _ratio_cell(cached.get('fast_over_mdla6_cx', '')) + ' ' if has_mdla6_cx else ''}"
-                       f"conflict={_ms_cell(cached_conflict_ms)} "
-                       f"mesh={_ms_cell(cached_mesh_ms)} cached  "
+                       f"cached  "
                        f"{suffix}{mb_suffix}")
             row = {
                 "pattern": pat,
                 "mdla6_cx": cached.get("mdla6_cx", ""),
                 "fast_over_mdla6_cx": cached.get("fast_over_mdla6_cx", ""),
                 "mdla7_ms": cached.get("mdla7_ms", ""),
-                "mdla7_conflict_ms": cached_conflict_ms,
-                "mdla7_mesh_ms": cached_mesh_ms,
                 "status": cached.get("status", "ok"),
-                "conflict_status": cached_conflict_status,
-                "mesh_status": cached_mesh_status,
             }
             row.update(mb)
             rows_out.append(row)
@@ -3344,14 +3326,9 @@ def run_corpus(*,
             l1_timing=args.l1_timing)
         elapsed = time.time() - t0
         ms_str = f"{ms:>8.2f} ms" if ms is not None else f"{'—':>8s}    "
-        conflict_str = (f"{conflict_ms:>8.2f} ms" if conflict_ms is not None
-                        else f"{'—':>8s}    ")
-        mesh_str = (f"{mesh_ms:>8.2f} ms" if mesh_ms is not None
-                    else f"{'—':>8s}    ")
         mode_suffix = _mode_suffix(args.l1_timing, args.engine_model)
         model_suffix = "" if not mode_suffix else f"/{mode_suffix}"
-        suffix = ((status + model_suffix) if args.fast_only
-                  else f"{status}/{conflict_status}/{mesh_status}{model_suffix}")
+        suffix = status + model_suffix
         model_path = model_dir / f"{pat}.tflite"
         mb = (_microblock_metrics_for(model_path, args.l1_timing, args.engine_model)
               if microblock_metrics else {})
@@ -3363,7 +3340,7 @@ def run_corpus(*,
         fast_mdla6_cx = _ratio_from_ms(ms, mdla6_cx_ms)
         _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                    f"{'mdla6_cx=' + (f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    ') + ' ' if has_mdla6_cx else ''}"
-                   f"fast={ms_str} conflict={conflict_str} mesh={mesh_str}  "
+                   f"fast={ms_str} "
                    f"{'fast/mdla6_cx=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
                    f"({elapsed:5.1f}s)  "
                    f"{suffix}{mb_suffix}")
@@ -3372,11 +3349,7 @@ def run_corpus(*,
             "mdla6_cx": _format_ms(mdla6_cx_ms),
             "fast_over_mdla6_cx": fast_mdla6_cx,
             "mdla7_ms": f"{ms:.3f}" if ms is not None else "",
-            "mdla7_conflict_ms": f"{conflict_ms:.3f}" if conflict_ms is not None else "",
-            "mdla7_mesh_ms": f"{mesh_ms:.3f}" if mesh_ms is not None else "",
             "status": status,
-            "conflict_status": conflict_status,
-            "mesh_status": mesh_status,
         }
         row.update(mb)
         rows_out.append(row)
@@ -3404,21 +3377,12 @@ def run_corpus(*,
                     pass
 
     n_fast = sum(1 for r in rows_out if r.get("mdla7_ms"))
-    n_conflict = sum(1 for r in rows_out if r.get("mdla7_conflict_ms"))
-    n_mesh = sum(1 for r in rows_out if r.get("mdla7_mesh_ms"))
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
     total_s = time.time() - t_total
-    if args.fast_only:
-        primary_label = _mode_suffix(args.l1_timing, args.engine_model) or "fast"
-        print(f"\n==== summary: {primary_label} {n_fast}/{len(rows_out)} ran, "
-              f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
-              flush=True)
-    else:
-        print(f"\n==== summary: fast {n_fast}/{len(rows_out)} ran, "
-              f"conflict {n_conflict}/{len(rows_out)} ran, "
-              f"mesh {n_mesh}/{len(rows_out)} ran, "
-              f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
-              flush=True)
+    primary_label = _mode_suffix(args.l1_timing, args.engine_model) or "fast"
+    print(f"\n==== summary: {primary_label} {n_fast}/{len(rows_out)} ran, "
+          f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
+          flush=True)
     print(f"csv: {csv_path}", flush=True)
     if not args.no_html:
         _refresh_profile_index(profile_title, profile_html, csv_path)
