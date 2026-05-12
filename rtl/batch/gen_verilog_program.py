@@ -2514,7 +2514,7 @@ def udma_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[int]]
         words[0] = OP_UDMA
         words[1] = 1
         words[2] = (l1_base + lane) & 0x003F_FFFF
-        words[3] = 1 << 13
+        words[3] = (1 << 6) | (1 << 13)
         words[4] = 1
         words[5] = 1
         words[6] = byte_value
@@ -2585,7 +2585,7 @@ def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[in
         words[0] = OP_UDMA
         words[1] = 1
         words[2] = (l1_base + lane) & 0x003F_FFFF
-        words[3] = 1 << 13
+        words[3] = (1 << 6) | (1 << 13)
         words[4] = 1
         words[5] = 1
         words[6] = 0

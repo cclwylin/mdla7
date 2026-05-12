@@ -118,17 +118,18 @@ module vf_udma_engine #(
     reg [DATA_WIDTH-1:0] store_dram_wdata;
     reg [DATA_WIDTH/8-1:0] store_dram_wstrb;
     reg final_l1_write_done;
-    reg final_l1_resp_armed;
-    reg [3:0] final_l1_resp_guard;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire start_fire = start_valid && start_ready;
     wire final_l1_write_pending = final_write_mode && !ref_fill_mode && direction_write;
-    wire dram_to_l1_load_mode = !direction_write && !sramcrc_mode && !ref_fill_mode;
+    wire literal_l1_write_mode = final_write_mode && !direction_write &&
+        !sramcrc_mode && !ref_fill_mode;
+    wire dram_to_l1_load_mode = !direction_write && !sramcrc_mode &&
+        !ref_fill_mode && !literal_l1_write_mode;
     wire [31:0] load_l1_beat_bytes =
         (load_l1_remaining > 32'd16) ? 32'd16 : load_l1_remaining;
     wire final_l1_write_fire =
         final_l1_write_pending && payload_token_sent &&
-        final_l1_resp_armed && l1_resp_valid && !final_l1_write_done;
+        l1_resp_valid && !final_l1_write_done;
     wire phase_stall =
         (payload_phase_active && dram_to_l1_load_mode && (load_l1_remaining != 32'd0) && !l1_req_ready) ||
         (payload_phase_active && !dram_to_l1_load_mode && !payload_token_sent && !l1_req_ready) ||
@@ -236,8 +237,6 @@ module vf_udma_engine #(
             store_dram_wdata <= {DATA_WIDTH{1'b0}};
             store_dram_wstrb <= {DATA_WIDTH/8{1'b0}};
             final_l1_write_done <= 1'b0;
-            final_l1_resp_armed <= 1'b0;
-            final_l1_resp_guard <= 4'd0;
             sramcrc_crc <= FNV_OFFSET;
             sramcrc_count <= 32'd0;
             sramcrc_remaining <= 32'd0;
@@ -255,8 +254,6 @@ module vf_udma_engine #(
             store_dram_wdata <= {DATA_WIDTH{1'b0}};
             store_dram_wstrb <= {DATA_WIDTH/8{1'b0}};
             final_l1_write_done <= 1'b0;
-            final_l1_resp_armed <= 1'b0;
-            final_l1_resp_guard <= 4'd0;
             if (sramcrc_mode) begin
                 sramcrc_crc <= FNV_OFFSET;
                 sramcrc_count <= 32'd0;
@@ -295,21 +292,11 @@ module vf_udma_engine #(
                     load_l1_remaining <= 32'd0;
                 end
             end
-            if (final_l1_write_pending)
-                final_l1_resp_guard <= 4'd4;
             if (final_write_mode && !ref_fill_mode && !direction_write &&
                 (out_byte_offset < MAX_UDMA_OUTPUT_SRAM_BYTES))
                 output_sram[out_byte_offset] <= input_byte;
-        end else if (final_l1_write_pending && payload_token_sent &&
-                     !final_l1_write_done && (final_l1_resp_guard != 4'd0)) begin
-            final_l1_resp_guard <= final_l1_resp_guard - 4'd1;
-        end else if (final_l1_write_pending && payload_token_sent &&
-                     !final_l1_write_done && (final_l1_resp_guard == 4'd0) && !l1_resp_valid) begin
-            final_l1_resp_armed <= 1'b1;
         end else if (final_l1_write_fire) begin
             final_l1_write_done <= 1'b1;
-            final_l1_resp_armed <= 1'b0;
-            final_l1_resp_guard <= 4'd0;
             store_dram_wdata <= l1_resp_rdata;
             store_dram_wstrb <= beat_wstrb(bytes, 4'd0);
             for (final_write_i = 0; final_write_i < 16; final_write_i = final_write_i + 1) begin
@@ -342,8 +329,6 @@ module vf_udma_engine #(
         end else if (!payload_phase_active) begin
             payload_token_sent <= 1'b0;
             final_l1_write_done <= 1'b0;
-            final_l1_resp_armed <= 1'b0;
-            final_l1_resp_guard <= 4'd0;
         end
     end
 
