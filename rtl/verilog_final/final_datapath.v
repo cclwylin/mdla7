@@ -382,6 +382,9 @@ module vf_conv_sample_engine #(
     output reg [15:0]             conv_shadow_mem_valid_mask,
     output reg [511:0]            conv_shadow_mem_output_byte_offsets,
     output reg [511:0]            conv_shadow_mem_q_values,
+    output                        conv_shadow_read_valid,
+    output     [31:0]             conv_shadow_read_output_byte_offset,
+    output     [31:0]             conv_shadow_read_q_value,
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
@@ -419,6 +422,8 @@ module vf_conv_sample_engine #(
     reg signed [31:0] tile_result_q_value;
     reg [31:0] writeback_offset_value;
     reg [3:0] writeback_slot;
+    wire [31:0] conv_read_output_byte_offset;
+    wire [3:0] conv_shadow_read_slot;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -841,6 +846,14 @@ module vf_conv_sample_engine #(
     end
 
     assign int16_acc_out = i16_acc;
+    assign conv_read_output_byte_offset =
+        conv_out_elem_index * {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
+    assign conv_shadow_read_slot = conv_read_output_byte_offset[3:0];
+    assign conv_shadow_read_valid = conv_shadow_mem_valid_mask[conv_shadow_read_slot];
+    assign conv_shadow_read_output_byte_offset =
+        conv_shadow_mem_output_byte_offsets[conv_shadow_read_slot*32 +: 32];
+    assign conv_shadow_read_q_value =
+        conv_shadow_mem_q_values[conv_shadow_read_slot*32 +: 32];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

@@ -198,6 +198,9 @@ module Testbench_conv_datapath;
         .conv_shadow_mem_valid_mask(),
         .conv_shadow_mem_output_byte_offsets(),
         .conv_shadow_mem_q_values(),
+        .conv_shadow_read_valid(),
+        .conv_shadow_read_output_byte_offset(),
+        .conv_shadow_read_q_value(),
         .conv_psum_valid_mask(),
         .conv_psum_acc_values()
     );

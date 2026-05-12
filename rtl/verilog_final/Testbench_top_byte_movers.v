@@ -116,6 +116,9 @@ module Testbench_top_byte_movers;
     wire [15:0] conv_shadow_mem_valid_mask;
     wire [511:0] conv_shadow_mem_output_byte_offsets;
     wire [511:0] conv_shadow_mem_q_values;
+    wire conv_shadow_read_valid;
+    wire [31:0] conv_shadow_read_output_byte_offset;
+    wire [31:0] conv_shadow_read_q_value;
     wire [3:0] conv_psum_valid_mask;
     wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
@@ -247,6 +250,9 @@ module Testbench_top_byte_movers;
         .conv_shadow_mem_valid_mask(conv_shadow_mem_valid_mask),
         .conv_shadow_mem_output_byte_offsets(conv_shadow_mem_output_byte_offsets),
         .conv_shadow_mem_q_values(conv_shadow_mem_q_values),
+        .conv_shadow_read_valid(conv_shadow_read_valid),
+        .conv_shadow_read_output_byte_offset(conv_shadow_read_output_byte_offset),
+        .conv_shadow_read_q_value(conv_shadow_read_q_value),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
@@ -510,6 +516,19 @@ module Testbench_top_byte_movers;
         end
         conv_partial_accumulate = 1'b0;
         conv_partial_final = 1'b0;
+        conv_out_elem_index = 32'd2;
+        issue_desc(OP_CONV);
+        wait_done("conv_shadow_readback");
+        if (!conv_shadow_read_valid ||
+            (conv_shadow_read_output_byte_offset != 32'd2) ||
+            ($signed(conv_shadow_read_q_value) != 32'sd80)) begin
+            $display("FAIL: CONV shadow readback valid=%0d off=%0d q=%0d",
+                     conv_shadow_read_valid,
+                     conv_shadow_read_output_byte_offset,
+                     $signed(conv_shadow_read_q_value));
+            failures = failures + 1;
+        end
+        conv_out_elem_index = 32'd0;
 
         bytes = 32'd4;
         l1mesh_addr = 22'h0002a8;

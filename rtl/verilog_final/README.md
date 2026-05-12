@@ -228,7 +228,9 @@ accumulators, sample output values, and sample-output sum. When CONV word 3 bit
 6 marks the final partial, the engine also requantizes the cumulative psum
 accumulators, exposes a 4-entry writeback skeleton, latches the same
 mask/offset/q tuple, and updates a 16-slot shadow output memory indexed by
-output byte offset low bits on the store handshake.
+output byte offset low bits on the store handshake. A later CONV command can
+probe the same shadow memory with its descriptor-driven output byte offset and
+observe the stored offset/q tuple before full output SRAM/DRAM writeback exists.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
