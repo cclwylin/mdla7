@@ -131,6 +131,10 @@ module host_final #(
     output             top_done_ready,
     input              top_busy,
     input      [3:0]   active_op_class,
+    input      [15:0]  active_layer_id,
+    input      [15:0]  active_microblock_id,
+    input      [7:0]   active_stream_slot,
+    input      [7:0]   active_stream_meta_flags,
     input      [3:0]   active_phase_id,
     input      [31:0]  active_remaining_cycles,
     input      [31:0]  placement_route_cycles,
@@ -254,6 +258,7 @@ module host_final #(
         cmd_mem[base + 3][6] ? cmd_mem[base + 19] : conv_acc_out;
     wire [31:0] expected_conv_psum_acc_value =
         (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) ? cmd_mem[base + 19] : conv_acc_out;
+    wire microblock_descriptor_mode = cmd_mem[base + 3][13];
 
     assign top_done_ready = 1'b1;
 
@@ -734,6 +739,18 @@ module host_final #(
                                      command_index, desc_op_class);
                             test_fail <= 1'b1;
                         end
+                        if ((active_layer_id !== desc_layer_id) ||
+                            (active_microblock_id !== desc_microblock_id) ||
+                            (active_stream_slot !== desc_stream_slot) ||
+                            (active_stream_meta_flags !== desc_stream_meta_flags)) begin
+                            $display("HOST_FINAL_FAIL: metadata mismatch cmd=%0d layer=%0d/%0d mb=%0d/%0d slot=%0d/%0d flags=%02x/%02x",
+                                     command_index,
+                                     active_layer_id, desc_layer_id,
+                                     active_microblock_id, desc_microblock_id,
+                                     active_stream_slot, desc_stream_slot,
+                                     active_stream_meta_flags, desc_stream_meta_flags);
+                            test_fail <= 1'b1;
+                        end
                         if ((desc_op_class == OP_L1CRC) &&
                             ((l1mesh_crc !== cmd_mem[base + 28]) ||
                              (l1mesh_crc_count !== cmd_mem[base + 29]))) begin
@@ -745,21 +762,21 @@ module host_final #(
                                      cmd_mem[base + 2]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && conv_fp_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_fp_mode &&
                             (conv_fp_sum_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_FINAL_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
                                      command_index, conv_fp_sum_bits,
                                      {cmd_mem[base + 17], cmd_mem[base + 16]});
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_int16_mode &&
                             (conv_int16_acc_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: CONV INT16 sample cmd=%0d acc=%0d expected=%0d",
                                      command_index, conv_int16_acc_out,
                                      $signed(cmd_mem[base + 18]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             !cmd_mem[base + 3][6] &&
@@ -769,7 +786,7 @@ module host_final #(
                                      conv_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][2] &&
@@ -827,7 +844,7 @@ module host_final #(
                                      expected_conv_tile_count);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][2] &&
@@ -847,7 +864,7 @@ module host_final #(
                                      cmd_mem[base + 3][5]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][7] &&
@@ -863,7 +880,7 @@ module host_final #(
                                      $signed(cmd_mem[base + 19]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][8] &&
@@ -877,7 +894,7 @@ module host_final #(
                                      cmd_mem[base + 29]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             cmd_mem[base + 3][9] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
@@ -892,7 +909,7 @@ module host_final #(
                                      cmd_mem[base + 1]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             cmd_mem[base + 3][10] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
@@ -906,7 +923,7 @@ module host_final #(
                                      cmd_mem[base + 27]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][2] && cmd_mem[base + 3][6] &&
@@ -973,7 +990,7 @@ module host_final #(
                                      udma_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
                             (requant_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, requant_scaled_out,
@@ -990,7 +1007,7 @@ module host_final #(
                                      pool_sramcrc_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
                             (pool_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_FINAL_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
                                      command_index, pool_fp_bits,
@@ -998,7 +1015,7 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
                             (pool_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -1006,7 +1023,7 @@ module host_final #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -1024,7 +1041,7 @@ module host_final #(
                                      ewe_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
                             (ewe_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_FINAL_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
                                      command_index, ewe_fp_bits,
@@ -1032,7 +1049,7 @@ module host_final #(
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
                             (ewe_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_FINAL_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
                                      command_index, ewe_out, ewe_out_q,
@@ -1050,7 +1067,7 @@ module host_final #(
                                      tnps_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_TNPS) && !tnps_sramcrc_mode && !tnps_final_write_mode &&
+                        if (!microblock_descriptor_mode && (desc_op_class == OP_TNPS) && !tnps_sramcrc_mode && !tnps_final_write_mode &&
                             ((tnps_sample_valid != (cmd_mem[base + 18] != 32'd0)) ||
                              ((cmd_mem[base + 18] != 32'd0) &&
                               ((tnps_sample_src_byte_offset != cmd_mem[base + 16]) ||

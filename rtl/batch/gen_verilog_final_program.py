@@ -78,6 +78,7 @@ DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
 DEFAULT_CONV_SRAM_WINDOW_COUNT = 3
+MICRO_TILE_BYTES = 1 << 20
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 16777619
 
@@ -439,6 +440,74 @@ def sim_bytes(value: int) -> int:
     if cap <= 0:
         return max(value, 1)
     return max(1, min(value, cap))
+
+
+def bounded_micro_bytes(value: int) -> int:
+    if value <= 0:
+        return 64
+    return min(value, 4096)
+
+
+def micro_slice_bytes(total: int, offset: int) -> int:
+    if total <= offset:
+        return 0
+    return min(MICRO_TILE_BYTES, total - offset)
+
+
+def ceil_div(value: int, denom: int) -> int:
+    if value <= 0 or denom <= 0:
+        return 1
+    return (value + denom - 1) // denom
+
+
+def op_kind_to_class(op_kind: int) -> int:
+    if op_kind in OK_CONV:
+        return OP_CONV
+    if op_kind in OK_POOL:
+        return OP_POOL
+    if op_kind in OK_FP_EWE or op_kind in OK_EWE:
+        return OP_EWE
+    if op_kind in TNPS_OPS:
+        return OP_TNPS
+    if op_kind in UDMA_OPS:
+        return OP_UDMA
+    return OP_DONE
+
+
+def micro_steps_for_class(op_class: int) -> int:
+    if op_class == OP_CONV:
+        return 5
+    if op_class == OP_EWE:
+        return 4
+    if op_class in (OP_POOL, OP_TNPS):
+        return 3
+    return 1
+
+
+def micro_step_op(op_class: int, step: int) -> int:
+    if op_class == OP_CONV:
+        return OP_CONV if step == 2 else OP_REQUANT if step == 3 else OP_UDMA
+    if op_class == OP_EWE:
+        return OP_EWE if step == 2 else OP_UDMA
+    if op_class == OP_POOL:
+        return OP_POOL if step == 1 else OP_UDMA
+    if op_class == OP_TNPS:
+        return OP_TNPS if step == 1 else OP_UDMA
+    if op_class == OP_UDMA:
+        return OP_UDMA
+    return OP_DONE
+
+
+def synth_micro_step_flags(op_class: int, step: int) -> int:
+    if op_class == OP_CONV:
+        return (SMF_LOAD_B, SMF_LOAD_A, SMF_COMPUTE, SMF_COMPUTE, SMF_STORE)[min(step, 4)]
+    if op_class == OP_EWE:
+        return (SMF_LOAD_A, SMF_LOAD_B, SMF_COMPUTE, SMF_STORE)[min(step, 3)]
+    if op_class in (OP_POOL, OP_TNPS):
+        return (SMF_LOAD_A, SMF_COMPUTE, SMF_STORE)[min(step, 2)]
+    if op_class == OP_UDMA:
+        return SMF_STORE
+    return 0
 
 
 def clamp_i32(value: int) -> int:
@@ -809,6 +878,98 @@ def stamp_microblock_metadata(desc: list[int], layer_index: int, microblock_id: 
         ((stream_slot & 0xFF) << 16) |
         ((microblock_meta_flags(desc) & 0xFF) << 24)
     )
+
+
+def stamp_synth_microblock_metadata(
+    desc: list[int],
+    layer_index: int,
+    microblock_id: int,
+    stream_slot: int,
+    stream_flags: int,
+) -> None:
+    op = desc[0] & 0xF
+    desc[0] = (
+        op |
+        ((layer_index & 0xFFFF) << 4) |
+        ((microblock_id & 0x0FFF) << 20)
+    )
+    desc[3] = (
+        (desc[3] & 0x0000_FFFF) |
+        ((stream_slot & 0xFF) << 16) |
+        ((stream_flags & 0xFF) << 24)
+    )
+
+
+def synth_microblock_descriptors(layer: Layer, ordinal: int) -> list[list[int]]:
+    op_class = op_kind_to_class(layer.op_kind)
+    if op_class == OP_DONE:
+        return []
+
+    payload_max = max(layer.in_size, layer.wgt_size, layer.ref_size)
+    micro_total = ceil_div(payload_max, MICRO_TILE_BYTES)
+    micro_steps = micro_steps_for_class(op_class)
+    descs: list[list[int]] = []
+    elem = elem_bytes(layer.dtype)
+    elems_in = max(1, (layer.in_h or 1) * (layer.in_w or 1) * (layer.in_c or 1))
+    elems_out = max(1, (layer.out_h or 1) * (layer.out_w or 1) * (layer.out_c or 1))
+    window = max(1, (layer.k_h or 1) * (layer.k_w or 1))
+
+    for mb in range(micro_total):
+        payload_off = mb * MICRO_TILE_BYTES
+        payload_in = bounded_micro_bytes(micro_slice_bytes(layer.in_size, payload_off))
+        payload_wgt = bounded_micro_bytes(micro_slice_bytes(layer.wgt_size, payload_off))
+        payload_out = bounded_micro_bytes(micro_slice_bytes(layer.ref_size, payload_off))
+        payload_any = bounded_micro_bytes(micro_slice_bytes(payload_max, payload_off))
+        for step in range(micro_steps):
+            op = micro_step_op(op_class, step)
+            stream_flags = synth_micro_step_flags(op_class, step)
+            final_micro = (mb + 1 >= micro_total) and (step + 1 >= micro_steps)
+            if final_micro:
+                stream_flags |= SMF_FINAL_TILE
+
+            addr = ((layer.index & 0x3FF) << 12) | ((mb & 0xFF) << 4) | (step & 0xF)
+            words = [0] * WORDS_PER_COMMAND
+            words[0] = op
+            words[1] = payload_any
+            words[2] = addr & 0x003F_FFFF
+            words[3] = (1 << 13) | (1 if ((op == OP_UDMA) and (stream_flags & SMF_STORE)) else 0)
+            words[4] = payload_wgt if (stream_flags & SMF_LOAD_B) else payload_in
+            words[5] = 1 + (payload_any // 4096)
+            words[12] = min(elems_in if op != OP_CONV else window, 16) & 0xFF
+            words[13] = elem
+            words[18] = 0
+            words[19] = layer.index
+            words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+            words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+            words[22] = ((layer.k_h & 0xFF) |
+                         ((layer.k_w & 0xFF) << 8) |
+                         ((layer.s_h & 0xFF) << 16) |
+                         ((layer.s_w & 0xFF) << 24))
+            words[24] = (elems_in & 0xFFFF) | ((layer.out_w & 0xFFFF) << 16)
+            words[25] = layer.ref_off & 0xFFFF_FFFF
+            words[26] = layer.ref_size & 0xFFFF_FFFF
+            words[27] = payload_off & 0xFFFF_FFFF
+            words[29] = payload_out if final_micro else 0
+            words[30] = (layer.out_c & 0xFFFF) | ((layer.out_h & 0xFFFF) << 16)
+            words[31] = layer.out_w & 0xFFFF
+
+            if op == OP_REQUANT:
+                words[14] = 1073741824
+                words[15] = 1
+                words[16] = (-128) & 0xFFFF_FFFF
+                words[17] = 127
+            if op == OP_POOL:
+                words[12] = min(elems_in, 16) | ((1 if layer.op_kind == 2 else 0) << 8)
+            if op == OP_EWE:
+                words[12] = min(elems_out, 16)
+            if op == OP_TNPS:
+                words[12] = layer.k_h or layer.k_w or 1
+                words[13] = elem
+
+            stamp_synth_microblock_metadata(words, layer.index, mb, mb, stream_flags)
+            descs.append(words)
+            ordinal += 1
+    return descs
 
 
 def l1_preload_byte_descriptor(ordinal: int, byte_addr: int, byte_value: int, source_layer: int = 0) -> list[int]:
@@ -2083,6 +2244,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     ap.add_argument(
+        "--microblock-descriptors",
+        action="store_true",
+        help="Emit the synth-style microblock op/step descriptor stream.",
+    )
+    ap.add_argument(
         "--conv-sram-window-commands",
         type=int,
         default=DEFAULT_CONV_SRAM_WINDOW_COMMANDS,
@@ -2124,7 +2290,9 @@ def main() -> int:
         if len(commands) >= command_limit:
             break
         desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
-        if (
+        if args.microblock_descriptors:
+            descs = synth_microblock_descriptors(layer, len(commands))
+        elif (
             args.emit_conv_partial_psum and
             desc is not None and
             (desc[0] & 0xF) == OP_CONV and
