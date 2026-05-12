@@ -52,7 +52,8 @@ def load_metrics(paths: list[Path]) -> dict[str, dict[str, str]]:
             rd = csv.DictReader(f)
             for row in rd:
                 pat = (row.get("pattern") or row.get("Pattern") or "").strip()
-                cx = (row.get("mdla6_cx") or row.get("CX") or "").strip()
+                mdla6_cx = (row.get("mdla6_cx") or row.get("CX") or
+                             row.get("cx") or "").strip()
                 ms = (row.get("mdla7_ms") or "").strip()
                 conflict_ms = (row.get("mdla7_conflict_ms") or
                                row.get("conflict_ms") or "").strip()
@@ -62,7 +63,7 @@ def load_metrics(paths: list[Path]) -> dict[str, dict[str, str]]:
                     continue
                 out[normalise_pattern(pat)] = {
                     "pattern": pat,
-                    "cx": cx,
+                    "mdla6_cx": mdla6_cx,
                     "ms": ms,
                     "conflict_ms": conflict_ms,
                     "mesh_ms": mesh_ms,
@@ -141,7 +142,7 @@ def _link_label(stem: str) -> str:
 def _row_from_metric(stem: str,
                      metric: dict[str, str]) -> dict[str, object] | None:
     pat = metric.get("pattern", stem)
-    cx = metric.get("cx", "")
+    mdla6_cx = metric.get("mdla6_cx", "")
     csv_ms = metric.get("ms", "")
     csv_conflict_ms = metric.get("conflict_ms", "")
     csv_mesh_ms = metric.get("mesh_ms", "")
@@ -166,9 +167,9 @@ def _row_from_metric(stem: str,
     mesh_ratio = None
     mesh_conflict_ratio = None
     try:
-        cx_f = float(cx)
-        if cx_f > 0 and our_ms is not None:
-            ratio = our_ms / cx_f
+        mdla6_cx_f = float(mdla6_cx)
+        if mdla6_cx_f > 0 and our_ms is not None:
+            ratio = our_ms / mdla6_cx_f
     except ValueError:
         pass
     if our_ms and our_ms > 0 and conflict_ms is not None:
@@ -184,7 +185,7 @@ def _row_from_metric(stem: str,
         "type": "MB Path" if "/" in stem else ("Hotspot" if "_L" in stem else (
             "Transformer" if stem in TRANSFORMER_PATTERNS else "")),
         "link": _link_for_output(html, stem),
-        "cx": cx,
+        "mdla6_cx": mdla6_cx,
         "our_ms": our_ms,
         "conflict_ms": conflict_ms,
         "mesh_ms": mesh_ms,
@@ -225,12 +226,12 @@ def collect_rows(metrics_csvs: list[Path],
         if allowed is not None and stem not in allowed:
             continue
         metric = metrics.get(stem, {
-            "pattern": stem, "cx": "", "ms": "", "conflict_ms": "", "mesh_ms": "",
+            "pattern": stem, "mdla6_cx": "", "ms": "", "conflict_ms": "", "mesh_ms": "",
             "fuse_hit": "", "fuse_flows": "", "streamed_layers": "",
             "mb_hit": "", "mb_count": "", "mb_layers": "", "mb_stages": "",
         })
         pat = metric.get("pattern", stem)
-        cx = metric.get("cx", "")
+        mdla6_cx = metric.get("mdla6_cx", "")
         csv_ms = metric.get("ms", "")
         csv_conflict_ms = metric.get("conflict_ms", "")
         csv_mesh_ms = metric.get("mesh_ms", "")
@@ -252,9 +253,9 @@ def collect_rows(metrics_csvs: list[Path],
         mesh_ratio = None
         mesh_conflict_ratio = None
         try:
-            cx_f = float(cx)
-            if cx_f > 0 and our_ms is not None:
-                ratio = our_ms / cx_f
+            mdla6_cx_f = float(mdla6_cx)
+            if mdla6_cx_f > 0 and our_ms is not None:
+                ratio = our_ms / mdla6_cx_f
         except ValueError:
             pass
         if our_ms and our_ms > 0 and conflict_ms is not None:
@@ -270,7 +271,7 @@ def collect_rows(metrics_csvs: list[Path],
             "type": "Hotspot" if "_L" in stem else (
                 "Transformer" if stem in TRANSFORMER_PATTERNS else ""),
             "link": f"output/{html.name}",
-            "cx": cx,
+            "mdla6_cx": mdla6_cx,
             "our_ms": our_ms,
             "conflict_ms": conflict_ms,
             "mesh_ms": mesh_ms,
@@ -303,8 +304,9 @@ def main() -> None:
                     help="CSV with pattern/mdla7_ms columns; can be repeated")
     ap.add_argument("--only-metrics-rows", action="store_true",
                     help="only include output HTML whose stem appears in metrics CSV")
-    ap.add_argument("--hide-cx", action="store_true",
-                    help="hide MDLA6 cx and myms/cx comparison columns")
+    ap.add_argument("--hide-mdla6-cx", "--hide-cx", dest="hide_mdla6_cx",
+                    action="store_true",
+                    help="hide mdla6_cx and myms/mdla6_cx comparison columns")
     args = ap.parse_args()
 
     metrics_csvs = [Path(p) for p in args.metrics_csv]
@@ -318,17 +320,17 @@ def main() -> None:
     rows = collect_rows(metrics_csvs, args.only_metrics_rows)
     rows_json = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     title = args.title
-    show_cx = not args.hide_cx
-    show_cx_json = "true" if show_cx else "false"
+    show_mdla6_cx = not args.hide_mdla6_cx
+    show_mdla6_cx_json = "true" if show_mdla6_cx else "false"
     show_mb = any(r.get("fuse_hit") or r.get("mb_hit") or r.get("mb_count") or r.get("mb_stages")
                   for r in rows)
     show_mb_json = "true" if show_mb else "false"
-    default_sort_key = "ratio" if show_cx else "mesh_ratio"
+    default_sort_key = "ratio" if show_mdla6_cx else "mesh_ratio"
     default_sort_key_json = json.dumps(default_sort_key)
-    cx_headers = """
-      <th class="num"><button class="sort-btn" data-sort-key="cx">cx <span class="sort-mark"></span></button></th>""" if show_cx else ""
+    mdla6_cx_headers = """
+      <th class="num"><button class="sort-btn" data-sort-key="mdla6_cx">mdla6_cx <span class="sort-mark"></span></button></th>""" if show_mdla6_cx else ""
     ratio_headers = """
-      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/cx <span class="sort-mark"></span></button></th>""" if show_cx else ""
+      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/mdla6_cx <span class="sort-mark"></span></button></th>""" if show_mdla6_cx else ""
     mb_headers = """
       <th><button class="sort-btn" data-sort-key="fuse_hit">fuse <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mb_count">mb <span class="sort-mark"></span></button></th>
@@ -393,7 +395,7 @@ tr:hover td {{ background:#f4f7fb; }}
     <tr>
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
-{cx_headers}
+{mdla6_cx_headers}
       <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
@@ -411,7 +413,7 @@ tr:hover td {{ background:#f4f7fb; }}
 const EMBEDDED_ROWS = {rows_json};
 const LIVE_CSV = {live_csv_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
-const SHOW_CX = {show_cx_json};
+const SHOW_MDLA6_CX = {show_mdla6_cx_json};
 const SHOW_MB = {show_mb_json};
 const DEFAULT_SORT_KEY = {default_sort_key_json};
 let rows = EMBEDDED_ROWS.slice();
@@ -427,8 +429,8 @@ function ratioOf(r) {{
     const n = Number(r.ratio);
     if (Number.isFinite(n)) return n;
   }}
-  const ms = Number(r.our_ms), cx = Number(r.cx);
-  return Number.isFinite(ms) && Number.isFinite(cx) && cx > 0 ? ms / cx : null;
+  const ms = Number(r.our_ms), mdla6_cx = Number(r.mdla6_cx);
+  return Number.isFinite(ms) && Number.isFinite(mdla6_cx) && mdla6_cx > 0 ? ms / mdla6_cx : null;
 }}
 function fmtRatio(r) {{
   const n = ratioOf(r);
@@ -477,7 +479,7 @@ function sortRows(xs) {{
     xs.sort((a,b) => {{
       const av = sortValue(a, key), bv = sortValue(b, key);
       let cmp = 0;
-      if (key === "cx" || key === "our_ms" || key === "conflict_ms" ||
+      if (key === "mdla6_cx" || key === "our_ms" || key === "conflict_ms" ||
           key === "mesh_ms" || key === "ratio" || key === "conflict_ratio" ||
           key === "mesh_ratio" || key === "mesh_conflict_ratio" ||
           key === "mb_count") {{
@@ -516,7 +518,7 @@ function sortValue(r, key) {{
   if (key === "fuse_hit") return r.fuse_hit || "";
   if (key === "mb_count") return r.mb_count;
   if (key === "mb_stages") return r.mb_stages || "";
-  if (key === "cx") return r.cx;
+  if (key === "mdla6_cx") return r.mdla6_cx;
   if (key === "stem") return r.stem || r.pattern;
   return r.pattern;
 }}
@@ -547,17 +549,17 @@ function render() {{
                    r.fuse_hit || "", r.fuse_flows || "", r.streamed_layers || "",
                    r.mb_count || "", r.mb_stages || "",
                    fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
-    if (SHOW_CX) parts.push(r.cx || "", fmtRatio(r));
+    if (SHOW_MDLA6_CX) parts.push(r.mdla6_cx || "", fmtRatio(r));
     const allText = parts.join(" ").toLowerCase();
     if (q && !allText.includes(q)) continue;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${{esc(r.pattern)}}</td>` +
       `<td><a href="${{escAttr(r.link)}}">${{esc(r.label || r.stem || r.pattern)}}</a></td>` +
-      (SHOW_CX ? `<td class="num">${{esc(r.cx || "")}}</td>` : "") +
+      (SHOW_MDLA6_CX ? `<td class="num">${{esc(r.mdla6_cx || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
       `<td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` +
-      (SHOW_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
+      (SHOW_MDLA6_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
       (SHOW_MB ? `<td>${{esc(r.fuse_hit || "")}}</td><td class="num">${{esc(r.mb_count || "")}}</td><td>${{esc(r.mb_stages || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtConflictRatio(r))}}</td>` +
       `<td class="num">${{esc(fmtMeshRatio(r))}}</td>` +
@@ -584,7 +586,7 @@ function csvParse(text) {{
     const stem = pat.endsWith(".cut") ? pat.slice(0, -4) : pat.replaceAll("__", "_");
     if (stem) out[stem] = {{
       pattern: pat,
-      cx: row.mdla6_cx || row.CX || "",
+      mdla6_cx: row.mdla6_cx || row.CX || row.cx || "",
       ms: row.mdla7_ms || "",
       conflict_ms: row.mdla7_conflict_ms || row.conflict_ms || "",
       mesh_ms: row.mdla7_mesh_ms || row.mesh_ms || "",
@@ -607,7 +609,7 @@ async function refreshFromOutput() {{
       fetch("output/").then(r => r.text()),
       fetch(LIVE_CSV).then(r => r.ok ? r.text() : "").catch(() => "")
     ]);
-    const cx = csvParse(csvText);
+    const mdla6Cx = csvParse(csvText);
     const doc = new DOMParser().parseFromString(dirText, "text/html");
     const names = [...doc.querySelectorAll("a")]
       .map(a => a.getAttribute("href") || "")
@@ -619,10 +621,10 @@ async function refreshFromOutput() {{
     const next = [];
     for (const name of names) {{
       const stem = name.replace(/\\.html$/, "");
-      if (ONLY_METRIC_ROWS && !cx[stem]) continue;
-      let ms = cx[stem] && cx[stem].ms ? Number(cx[stem].ms) : null;
-      const conflictMs = cx[stem] && cx[stem].conflict_ms ? Number(cx[stem].conflict_ms) : null;
-      const meshMs = cx[stem] && cx[stem].mesh_ms ? Number(cx[stem].mesh_ms) : null;
+      if (ONLY_METRIC_ROWS && !mdla6Cx[stem]) continue;
+      let ms = mdla6Cx[stem] && mdla6Cx[stem].ms ? Number(mdla6Cx[stem].ms) : null;
+      const conflictMs = mdla6Cx[stem] && mdla6Cx[stem].conflict_ms ? Number(mdla6Cx[stem].conflict_ms) : null;
+      const meshMs = mdla6Cx[stem] && mdla6Cx[stem].mesh_ms ? Number(mdla6Cx[stem].mesh_ms) : null;
       try {{
         const p = await fetch(`output/${{stem}}.profile.json`);
         if (p.ok) {{
@@ -632,10 +634,10 @@ async function refreshFromOutput() {{
         }}
       }} catch (_) {{}}
       next.push({{
-        pattern: (cx[stem] && cx[stem].pattern) || stem,
+        pattern: (mdla6Cx[stem] && mdla6Cx[stem].pattern) || stem,
         stem, label: shortLinkLabel(stem), link: `output/${{name}}`,
         type: transformerType(stem),
-        cx: (cx[stem] && cx[stem].cx) || "",
+        mdla6_cx: (mdla6Cx[stem] && mdla6Cx[stem].mdla6_cx) || "",
         our_ms: ms,
         conflict_ms: conflictMs,
         mesh_ms: meshMs,
@@ -643,13 +645,13 @@ async function refreshFromOutput() {{
         conflict_ratio: null,
         mesh_ratio: null,
         mesh_conflict_ratio: null,
-        fuse_hit: (cx[stem] && cx[stem].fuse_hit) || "",
-        fuse_flows: (cx[stem] && cx[stem].fuse_flows) || "",
-        streamed_layers: (cx[stem] && cx[stem].streamed_layers) || "",
-        mb_hit: (cx[stem] && cx[stem].mb_hit) || "",
-        mb_count: (cx[stem] && cx[stem].mb_count) || "",
-        mb_layers: (cx[stem] && cx[stem].mb_layers) || "",
-        mb_stages: (cx[stem] && cx[stem].mb_stages) || ""
+        fuse_hit: (mdla6Cx[stem] && mdla6Cx[stem].fuse_hit) || "",
+        fuse_flows: (mdla6Cx[stem] && mdla6Cx[stem].fuse_flows) || "",
+        streamed_layers: (mdla6Cx[stem] && mdla6Cx[stem].streamed_layers) || "",
+        mb_hit: (mdla6Cx[stem] && mdla6Cx[stem].mb_hit) || "",
+        mb_count: (mdla6Cx[stem] && mdla6Cx[stem].mb_count) || "",
+        mb_layers: (mdla6Cx[stem] && mdla6Cx[stem].mb_layers) || "",
+        mb_stages: (mdla6Cx[stem] && mdla6Cx[stem].mb_stages) || ""
       }});
     }}
     if (next.length) rows = next;

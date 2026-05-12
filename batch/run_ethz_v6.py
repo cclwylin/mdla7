@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression sweep over model/ETHZ_v6/*.tflite.
 
-Models run in the same small-CX-first order as run_mdla6_pattern.py's
+Models run in the same small-mdla6_cx-first order as run_mdla6_pattern.py's
 mdla6_ethz_v6_sorted.csv by default.
 
 Usage:

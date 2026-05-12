@@ -1,4 +1,4 @@
-Pattern,CX
+Pattern,mdla6_cx
 resnet_quant,0.02
 resnet_float,0.02
 mobilenet_v3_quant,0.25

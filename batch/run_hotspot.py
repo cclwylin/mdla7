@@ -74,7 +74,7 @@ def _refresh_hotspot_profile_index(csv_path: Path) -> None:
              "--title", "MDLA7 Hotspot Profiles",
              "--metrics-csv", str(csv_path),
              "--only-metrics-rows",
-             "--hide-cx"],
+             "--hide-mdla6-cx"],
             cwd=str(HERE), capture_output=True, text=True,
         )
     except Exception:

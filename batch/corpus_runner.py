@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared Hotspot-style sweep runner for model corpora without CX baselines."""
+"""Shared Hotspot-style sweep runner for model corpora without mdla6_cx baselines."""
 
 from __future__ import annotations
 
@@ -35,6 +35,12 @@ def _load_prior_csv(csv_path: Path) -> dict[str, dict]:
         with csv_path.open(newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("pattern"):
+                    if "cx_ms" in row and "mdla6_cx_ms" not in row:
+                        row["mdla6_cx_ms"] = row.get("cx_ms", "")
+                    if "rtl_over_cx" in row and "rtl_over_mdla6_cx" not in row:
+                        row["rtl_over_mdla6_cx"] = row.get("rtl_over_cx", "")
+                    if "synth_over_cx" in row and "synth_over_mdla6_cx" not in row:
+                        row["synth_over_mdla6_cx"] = row.get("synth_over_cx", "")
                     out[row["pattern"]] = row
     except Exception:
         return {}
@@ -78,10 +84,11 @@ def _load_pattern_order(csv_path: Path) -> dict[str, tuple[float, int]]:
             if not pattern or pattern in out:
                 continue
             try:
-                cx = float(row.get("CX") or row.get("cx") or "inf")
+                mdla6_cx = float(row.get("mdla6_cx") or row.get("CX") or
+                                  row.get("cx") or "inf")
             except ValueError:
-                cx = float("inf")
-            out[pattern] = (cx, idx)
+                mdla6_cx = float("inf")
+            out[pattern] = (mdla6_cx, idx)
     return out
 
 
@@ -94,8 +101,8 @@ def _apply_pattern_order(patterns: list[str], order_csv: Path | None) -> list[st
         original_idx, pattern = item
         mdla6_order = order.get(_normalise_pattern(pattern))
         if mdla6_order:
-            cx, csv_idx = mdla6_order
-            return (0, cx, csv_idx, pattern)
+            mdla6_cx, csv_idx = mdla6_order
+            return (0, mdla6_cx, csv_idx, pattern)
         return (1, float("inf"), original_idx, pattern)
 
     return [pattern for _, pattern in sorted(enumerate(patterns), key=key)]
@@ -109,7 +116,7 @@ def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
              "--title", title,
              "--metrics-csv", str(csv_path),
              "--only-metrics-rows",
-             "--hide-cx"],
+             "--hide-mdla6-cx"],
             cwd=str(HERE), capture_output=True, text=True,
         )
     except Exception:
@@ -141,7 +148,7 @@ def _ratio_from_ms(num: float | str | None, den: float | str | None) -> str:
     return f"{float(num) / den_f:.3f}"
 
 
-def _load_cx_ms(csv_path: Path | None) -> dict[str, float]:
+def _load_mdla6_cx_ms(csv_path: Path | None) -> dict[str, float]:
     if not csv_path or not csv_path.exists():
         return {}
     out: dict[str, float] = {}
@@ -151,7 +158,7 @@ def _load_cx_ms(csv_path: Path | None) -> dict[str, float]:
             pattern = _normalise_pattern(pattern.strip())
             if not pattern:
                 continue
-            value = row.get("CX") or row.get("cx") or ""
+            value = row.get("mdla6_cx") or row.get("CX") or row.get("cx") or ""
             try:
                 out[pattern] = float(value)
             except ValueError:
@@ -262,14 +269,14 @@ def _compare_report_exists_for(pattern: str, model_dir: Path) -> bool:
 def _write_rtl_compare_html(model_path: Path,
                             fast_html: Path,
                             rtl_html: Path,
-                            cx_ms: float | None,
+                            mdla6_cx_ms: float | None,
                             fast_ms: float | None,
                             rtl_ms: float | None,
                             fast_status: str,
                             rtl_status: str) -> Path:
     out = _compare_paths(model_path)["html"]
     rtl_fast = _ratio_from_ms(rtl_ms, fast_ms)
-    rtl_cx = _ratio_from_ms(rtl_ms, cx_ms)
+    rtl_mdla6_cx = _ratio_from_ms(rtl_ms, mdla6_cx_ms)
     fast_doc = fast_html.read_text(errors="ignore") if fast_html.exists() else ""
     rtl_doc = rtl_html.read_text(errors="ignore") if rtl_html.exists() else ""
 
@@ -299,11 +306,11 @@ iframe {{ width:100%; height:calc(100vh - 120px); border:0; background:#fff; dis
 <header>
   <h1>{html.escape(model_path.name)} — fast/rtl profile</h1>
   <div class="summary">
-    <span><b>cx:</b> {html.escape(ms(cx_ms))}</span>
+    <span><b>mdla6_cx:</b> {html.escape(ms(mdla6_cx_ms))}</span>
     <span><b>fast:</b> {html.escape(ms(fast_ms))} {html.escape(fast_status)}</span>
     <span><b>rtl:</b> {html.escape(ms(rtl_ms))} {html.escape(rtl_status)}</span>
     <span><b>rtl/fast:</b> {html.escape(rtl_fast + 'x' if rtl_fast else '')}</span>
-    <span><b>rtl/cx:</b> {html.escape(rtl_cx + 'x' if rtl_cx else '')}</span>
+    <span><b>rtl/mdla6_cx:</b> {html.escape(rtl_mdla6_cx + 'x' if rtl_mdla6_cx else '')}</span>
   </div>
   <div class="tabs">
     <button class="tab active" data-target="fast">fast</button>
@@ -338,11 +345,11 @@ def _write_rtl_compare_index(title: str, html_out: str,
         body.append(
             "<tr>"
             f"<td><a href=\"{link}\">{html.escape(pat)}</a></td>"
-            f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('cx_ms', '')))}</td>"
+            f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('mdla6_cx_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('fast_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(_ms_value_cell(row.get('rtl_ms', '')))}</td>"
             f"<td style='text-align:right'>{html.escape(row.get('rtl_over_fast', ''))}</td>"
-            f"<td style='text-align:right'>{html.escape(row.get('rtl_over_cx', ''))}</td>"
+            f"<td style='text-align:right'>{html.escape(row.get('rtl_over_mdla6_cx', ''))}</td>"
             f"<td>{html.escape(status)}</td>"
             "</tr>"
         )
@@ -364,7 +371,7 @@ a:hover {{ text-decoration:underline; }}
 <h1>{html.escape(title)}</h1>
 <div class="meta">csv: {html.escape(str(csv_path))}</div>
 <table>
-  <thead><tr><th>pattern</th><th>cx ms</th><th>fast ms</th><th>rtl ms</th><th>rtl/fast</th><th>rtl/cx</th><th>status</th></tr></thead>
+  <thead><tr><th>pattern</th><th>mdla6_cx ms</th><th>fast ms</th><th>rtl ms</th><th>rtl/fast</th><th>rtl/mdla6_cx</th><th>status</th></tr></thead>
   <tbody>{''.join(body)}</tbody>
 </table>
 </body></html>
@@ -400,7 +407,7 @@ def run_corpus(*,
     ap.add_argument("--filter", default="",
                     help="substring filter on model name")
     ap.add_argument("--pattern-order-csv", default=str(pattern_order_csv or ""),
-                    help="optional CSV with Pattern,CX columns used to order selected models")
+                    help="optional CSV with Pattern,mdla6_cx columns used to order selected models")
     ap.add_argument("--limit", type=int, default=0,
                     help="only run the first N selected models (0 = no limit)")
     ap.add_argument("--offset", type=int, default=0,
@@ -473,23 +480,23 @@ def run_corpus(*,
         }
         profile_path = Path(profile_html)
         compare_html = f"{profile_path.stem}.rtl_compare{profile_path.suffix}"
-        cx_ms_by_pattern = _load_cx_ms(order_csv)
+        mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_csv)
 
-        def _cx_ms_for(pattern: str) -> float | None:
-            return cx_ms_by_pattern.get(_normalise_pattern(pattern))
+        def _mdla6_cx_ms_for(pattern: str) -> float | None:
+            return mdla6_cx_ms_by_pattern.get(_normalise_pattern(pattern))
 
         def _fill_compare_ms(row: dict) -> dict:
             out = dict(row)
-            cx_ms = out.get("cx_ms")
-            if not cx_ms:
-                value = _cx_ms_for(out.get("pattern", ""))
-                out["cx_ms"] = f"{value:.3f}" if value is not None else ""
+            mdla6_cx_ms = out.get("mdla6_cx_ms")
+            if not mdla6_cx_ms:
+                value = _mdla6_cx_ms_for(out.get("pattern", ""))
+                out["mdla6_cx_ms"] = f"{value:.3f}" if value is not None else ""
             if not out.get("rtl_over_fast"):
                 out["rtl_over_fast"] = _ratio_from_ms(
                     out.get("rtl_ms", ""), out.get("fast_ms", ""))
-            if not out.get("rtl_over_cx"):
-                out["rtl_over_cx"] = _ratio_from_ms(
-                    out.get("rtl_ms", ""), out.get("cx_ms", ""))
+            if not out.get("rtl_over_mdla6_cx"):
+                out["rtl_over_mdla6_cx"] = _ratio_from_ms(
+                    out.get("rtl_ms", ""), out.get("mdla6_cx_ms", ""))
             return out
 
         def _checkpoint_compare(rows: list[dict]) -> None:
@@ -499,8 +506,8 @@ def run_corpus(*,
                 if pat not in seen:
                     merged.append(_fill_compare_ms(prow))
             fields = [
-                "pattern", "cx_ms", "fast_ms", "rtl_ms",
-                "rtl_over_fast", "rtl_over_cx",
+                "pattern", "mdla6_cx_ms", "fast_ms", "rtl_ms",
+                "rtl_over_fast", "rtl_over_mdla6_cx",
                 "status", "fast_status", "rtl_status",
             ]
             with csv_path.open("w", newline="") as f:
@@ -525,11 +532,11 @@ def run_corpus(*,
                 cached_filled = _fill_compare_ms(cached)
                 display_pat = _fit_cell(pat)
                 _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
-                           f"cx={_ms_cell(cached_filled.get('cx_ms', ''))} "
+                           f"mdla6_cx={_ms_cell(cached_filled.get('mdla6_cx_ms', ''))} "
                            f"fast={_ms_cell(cached.get('fast_ms', ''))} "
                            f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
                            f"rtl/fast={_ratio_cell(cached_filled.get('rtl_over_fast', ''))} "
-                           f"rtl/cx={_ratio_cell(cached_filled.get('rtl_over_cx', ''))} cached  "
+                           f"rtl/mdla6_cx={_ratio_cell(cached_filled.get('rtl_over_mdla6_cx', ''))} cached  "
                            f"{cached.get('status', 'ok')}")
                 rows_out.append(cached_filled)
                 _checkpoint_compare(rows_out)
@@ -550,9 +557,9 @@ def run_corpus(*,
             _, rtl_ms, _, _, rtl_status, _, _ = run_one(
                 pat, model_dir, progress=lambda s: _progress(f"rtl {s}"),
                 fast_only=True, skip_html=args.no_html, engine_model="rtl")
-            cx_ms = _cx_ms_for(pat)
+            mdla6_cx_ms = _mdla6_cx_ms_for(pat)
             rtl_fast = _ratio_from_ms(rtl_ms, fast_ms)
-            rtl_cx = _ratio_from_ms(rtl_ms, cx_ms)
+            rtl_mdla6_cx = _ratio_from_ms(rtl_ms, mdla6_cx_ms)
             status = "ok" if fast_status == "ok" and rtl_status == "ok" else f"{fast_status}/{rtl_status}"
             model_path = model_dir / f"{_normalise_pattern(pat)}.tflite"
             if not args.no_html and fast_ms is not None and rtl_ms is not None:
@@ -561,24 +568,24 @@ def run_corpus(*,
                         model_path,
                         OUT_DIR / f"{model_path.stem}.fast.html",
                         _mode_paths(model_path, "rtl")["html"],
-                        cx_ms, fast_ms, rtl_ms, fast_status, rtl_status)
+                        mdla6_cx_ms, fast_ms, rtl_ms, fast_status, rtl_status)
                 except Exception as e:
                     status = f"{status}; html-fail: {str(e)[:80]}"
             elapsed = time.time() - t0
             display_pat = _fit_cell(pat)
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
-                       f"cx={f'{cx_ms:>8.2f} ms' if cx_ms is not None else f'{chr(8212):>8s}    '} "
+                       f"mdla6_cx={f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    '} "
                        f"fast={f'{fast_ms:>8.2f} ms' if fast_ms is not None else f'{chr(8212):>8s}    '} "
                        f"rtl={f'{rtl_ms:>8.2f} ms' if rtl_ms is not None else f'{chr(8212):>8s}    '} "
-                       f"rtl/fast={_ratio_cell(rtl_fast)} rtl/cx={_ratio_cell(rtl_cx)}  "
+                       f"rtl/fast={_ratio_cell(rtl_fast)} rtl/mdla6_cx={_ratio_cell(rtl_mdla6_cx)}  "
                        f"({elapsed:5.1f}s)  {status}")
             row = {
                 "pattern": pat,
-                "cx_ms": f"{cx_ms:.3f}" if cx_ms is not None else "",
+                "mdla6_cx_ms": f"{mdla6_cx_ms:.3f}" if mdla6_cx_ms is not None else "",
                 "fast_ms": f"{fast_ms:.3f}" if fast_ms is not None else "",
                 "rtl_ms": f"{rtl_ms:.3f}" if rtl_ms is not None else "",
                 "rtl_over_fast": rtl_fast,
-                "rtl_over_cx": rtl_cx,
+                "rtl_over_mdla6_cx": rtl_mdla6_cx,
                 "status": status,
                 "fast_status": fast_status,
                 "rtl_status": rtl_status,

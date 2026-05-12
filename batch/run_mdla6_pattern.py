@@ -465,22 +465,22 @@ def main():
                  f"  run `make -C ../systemc -s` from {HERE}\n"
                  f"  or `make -C systemc -s` from {REPO_ROOT}")
 
-    # Read MDLA6 patterns + their CX baselines.
+    # Read MDLA6 patterns + their mdla6_cx baselines.
     rows_in: list[tuple[str, str]] = []
     with csv_in.open(newline="") as f:
         reader = csv.reader(f)
-        header = next(reader, None)              # skip "Pattern,CX"
+        header = next(reader, None)              # skip "Pattern,mdla6_cx" / "Pattern,CX"
         for row in reader:
             if not row or not row[0].strip():
                 continue
             pat = row[0].strip()
-            cx  = row[1].strip() if len(row) > 1 else ""
+            mdla6_cx = row[1].strip() if len(row) > 1 else ""
             if args.filter and args.filter not in pat:
                 continue
             if (not args.include_excluded and
                     _normalise_pattern(pat) in EXCLUDED_PATTERNS):
                 continue
-            rows_in.append((pat, cx))
+            rows_in.append((pat, mdla6_cx))
     if args.offset:
         rows_in = rows_in[args.offset:]
     if args.limit:
@@ -545,7 +545,7 @@ def main():
           f"(from {csv_in.name}) ====", flush=True)
     rows_out = []
     t_total = time.time()
-    for i, (pat, cx) in enumerate(rows_in, 1):
+    for i, (pat, mdla6_cx) in enumerate(rows_in, 1):
         # Reuse prior ok result if available and its per-model HTML already
         # exists. Older cache rows predate the report, so they re-run once.
         if pat in prior_ok and _report_exists_for(pat, Path(args.model_dir)):
@@ -561,12 +561,12 @@ def main():
             mesh_str = f"{float(cached_mesh_ms):>10.3f} ms" if cached_mesh_ms else f"{'—':>10s}    "
             suffix = (f"{cached_status}" if args.fast_only
                       else f"{cached_status}/{cached_conflict_status}/{cached_mesh_status}")
-            _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
+            _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} mdla6_cx={mdla6_cx:<6s} "
                        f"fast={ms_str} conflict={cms_str} mesh={mesh_str} cached  "
                        f"{suffix}")
             rows_out.append({
                 "pattern":           pat,
-                "mdla6_cx":          cx,
+                "mdla6_cx":          mdla6_cx,
                 "mdla7_ms":          cached_ms,
                 "mdla7_conflict_ms": cached_conflict_ms,
                 "mdla7_mesh_ms":     cached_mesh_ms,
@@ -579,7 +579,7 @@ def main():
         t0 = time.time()
         def _progress(stage: str):
             elapsed = time.time() - t0
-            _row_update(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
+            _row_update(f"[{i:>2}/{len(rows_in)}] {pat:<28s} mdla6_cx={mdla6_cx:<6s} "
                         f"{'—':>10s}      ({elapsed:5.1f}s)  running {stage}...")
 
         pattern, ms, conflict_ms, mesh_ms, status, conflict_status, mesh_status = run_one(
@@ -591,12 +591,12 @@ def main():
         mesh_str = (f"{mesh_ms:>10.3f} ms" if mesh_ms is not None
                     else f"{'—':>10s}    ")
         suffix = status if args.fast_only else f"{status}/{conflict_status}/{mesh_status}"
-        _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} cx={cx:<6s} "
+        _row_print(f"[{i:>2}/{len(rows_in)}] {pat:<28s} mdla6_cx={mdla6_cx:<6s} "
                    f"fast={ms_str} conflict={cms_str} mesh={mesh_str}  ({elapsed:5.1f}s)  "
                    f"{suffix}")
         rows_out.append({
             "pattern":           pat,
-            "mdla6_cx":          cx,
+            "mdla6_cx":          mdla6_cx,
             "mdla7_ms":          f"{ms:.3f}" if ms is not None else "",
             "mdla7_conflict_ms": f"{conflict_ms:.3f}" if conflict_ms is not None else "",
             "mdla7_mesh_ms":     f"{mesh_ms:.3f}" if mesh_ms is not None else "",

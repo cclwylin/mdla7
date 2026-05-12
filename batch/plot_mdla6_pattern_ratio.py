@@ -45,15 +45,15 @@ def main() -> int:
     with args.csv.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             pattern = row.get("pattern", "")
-            cx = parse_float(row.get("mdla6_cx", ""))
+            mdla6_cx = parse_float(row.get("mdla6_cx", ""))
             ms = parse_float(row.get("mdla7_ms", ""))
-            if not pattern or cx is None or ms is None or cx <= 0:
+            if not pattern or mdla6_cx is None or ms is None or mdla6_cx <= 0:
                 continue
             rows.append({
                 "pattern": pattern,
-                "cx": cx,
+                "mdla6_cx": mdla6_cx,
                 "ms": ms,
-                "ratio": ms / cx,
+                "ratio": ms / mdla6_cx,
                 "status": row.get("status", ""),
             })
 
@@ -92,7 +92,7 @@ def main() -> int:
         "</style>",
         '<rect width="100%" height="100%" fill="#ffffff"/>',
         svg_text(left, 30, "MDLA7 / MDLA6 Pattern Ratio", class_="title"),
-        svg_text(left, 52, "X = Pattern sorted by MDLA7 / MDLA6 CX; Y = MDLA7 / MDLA6 CX （Cycle Ratio）; dashed line marks Y = 2", class_="small"),
+        svg_text(left, 52, "X = Pattern sorted by MDLA7 / mdla6_cx; Y = MDLA7 / mdla6_cx (Cycle Ratio); dashed line marks Y = 2", class_="small"),
     ]
 
     ticks = [0, 0.5, 1, 1.5, 2, 2.5, 3]
@@ -121,7 +121,6 @@ def main() -> int:
         x = x_of(idx)
         ratio = float(row["ratio"])
         ms = float(row["ms"])
-        cx = float(row["cx"])
         y = y_of(ratio)
         dot_class = "dot-risk" if ratio >= args.threshold else "dot"
         label_y = axis_y + 20
@@ -146,7 +145,7 @@ def main() -> int:
         svg_text(
             18,
             top + plot_h / 2,
-            "MDLA7 / MDLA6 CX （Cycle Ratio）",
+            "MDLA7 / mdla6_cx (Cycle Ratio)",
             class_="small",
             text_anchor="middle",
             transform=f"rotate(-90 18 {top + plot_h / 2:.1f})",
