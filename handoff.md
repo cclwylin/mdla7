@@ -112,36 +112,48 @@ Target verilog dataflow:
 DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
 ```
 
-## Verilog Unfinished Items
+## Verilog Status
 
-1. CONV still bypasses L1Manager arbitration.
-   - `mdla7_top.v` currently selects `run_conv ? conv_l1_req_* : l1mgr_*`.
-   - Next step is to route CONV L1 traffic through L1Manager like UDMA,
-     REQUANT, POOL, EWE, and TNPS.
+Completed after this handoff was first written:
 
-2. Several datapaths are still sample / bounded traversal paths.
-   - POOL / EWE / TNPS / CONV have real Verilog primitives, but not every
-     layer runs full tensor traversal.
-   - Large tensors may still use windowed, sample, or bounded descriptors.
+1. CONV L1 traffic now goes through `L1Manager` arbitration.
+2. The unused DPI-C CRC/datapath helper was removed from active `rtl/verilog`.
+3. Default `run_verilog.py` mode is now closed-loop dataflow with strict CRC
+   coverage unless `--allow-zero-crc-coverage` is explicitly used.
+4. L1 read alignment was fixed at the CONV vector boundary while preserving the
+   aligned-line L1Mesh bus contract used by TNPS/POOL/EWE/REQUANT.
+5. TNPS closed-loop descriptors now drive real addrgen indices (`word14/15`) and
+   use tile-local scratch mapping so large tensor offsets do not exceed L1.
+6. POOL/EWE store paths now drive multi-byte write data/strobes for FP/INT16
+   style results instead of advertising multi-byte transfers while writing only
+   one byte.
 
-3. FP datapath is not yet full silicon-like traversal.
-   - FP CONV / POOL / EWE samples exist.
-   - Full FP tensor datapath still needs to be expanded.
+Still unfinished before performance tuning:
 
-4. `common.v` still contains the DPI CRC helper.
-   - `mdla7_true_datapath` uses Verilator DPI-C under non-synthesis builds.
-   - This should be isolated or removed from the final pure synthable Verilog
-     path so it cannot be mistaken for hardware datapath.
+1. FP CONV / FP EWE full closed-loop traversal.
+   - FP POOL has a sample closed-loop path.
+   - FP CONV and FP EWE still SKIP with `no final command` in default
+     closed-loop runs.
 
-5. Cycle performance is not yet naturally aligned with `cx`.
+2. INT16 closed-loop traversal.
+   - Multi-byte store plumbing is present, but generator coverage is not yet
+     connected for INT16 EWE/POOL/CONV patterns such as `dped_int16_L3_6`.
+
+3. Full tensor traversal.
+   - INT8 CONV/POOL/EWE/TNPS now cover more than one point when possible, but
+     large tensors still use budgeted/sample coverage.
+   - Need compact hardware-side tile loops instead of Python expanding many
+     sampled commands.
+
+4. Fast/cx bit-exact golden for FP output tensors.
+   - Current FP POOL closed-loop checks Verilog FP sample result bytes, not a
+     full fast/cx output tensor.
+   - Need FP16 output packing/rounding and full traversal before it can be
+     treated as final golden coverage.
+
+5. Cycle performance calibration.
    - `run_verilog.py` reports `synth_cycles` and `verilog_cycles`.
-   - Closed-loop load / compute / store / reload / check timing still needs
-     calibration against the `cx` model without relying on debug padding.
-
-6. CRC coverage gates are not default strict enough.
-   - Default `verilog` regression can still pass with zero `refB/sramB`.
-   - Use `--crc-coverage --require-crc-coverage` when a regression must prove
-     datapath bytes were actually checked.
+   - Do this only after the remaining functional coverage above is connected.
 
 ## Next Step
 
