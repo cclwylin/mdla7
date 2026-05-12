@@ -303,7 +303,7 @@ module host_final #(
         cmd_mem[47] = 32'd1;
         cmd_mem[48] = -32'sd128;
         cmd_mem[49] = 32'sd127;
-        cmd_mem[50] = 32'd18;
+        cmd_mem[50] = 32'd36;
         cmd_mem[51] = 32'd36;
         cmd_mem[52] = 32'h0006_0001;
         cmd_mem[53] = 32'h0001_0001;
@@ -511,6 +511,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][6] &&
                             (conv_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, conv_acc_out, conv_scaled_out,

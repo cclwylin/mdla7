@@ -407,6 +407,9 @@ module vf_conv_sample_engine #(
     integer tile_i;
     integer psum_i;
     reg signed [31:0] tile_result_acc_value;
+    reg signed [31:0] tile_result_quantized;
+    reg signed [31:0] tile_result_clamped;
+    reg signed [31:0] tile_result_q_value;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -425,6 +428,65 @@ module vf_conv_sample_engine #(
                 clamp_i32 = 32'sd2147483647;
             else
                 clamp_i32 = value[31:0];
+        end
+    endfunction
+
+    function signed [31:0] saturating_doubling_high_mul;
+        input signed [31:0] a;
+        input signed [31:0] b;
+        reg signed [63:0] p;
+        reg signed [63:0] nudge;
+        reg signed [63:0] r;
+        begin
+            if ((a == -32'sd2147483648) && (b == -32'sd2147483648)) begin
+                saturating_doubling_high_mul = 32'sd2147483647;
+            end else begin
+                p = $signed(a) * $signed(b);
+                nudge = (p >= 0) ? 64'sd1073741824 : -64'sd1073741823;
+                r = (p + nudge) >>> 31;
+                saturating_doubling_high_mul = clamp_i32(r);
+            end
+        end
+    endfunction
+
+    function signed [31:0] rounding_divide_by_pot;
+        input signed [31:0] x;
+        input integer exponent;
+        reg signed [63:0] x64;
+        reg signed [63:0] mask;
+        reg signed [63:0] remainder;
+        reg signed [63:0] threshold;
+        reg signed [63:0] shifted;
+        begin
+            if (exponent <= 0) begin
+                rounding_divide_by_pot = x;
+            end else begin
+                x64 = {{32{x[31]}}, x};
+                mask = (64'sd1 <<< exponent) - 64'sd1;
+                remainder = x64 & mask;
+                threshold = (mask >>> 1) + ((x < 0) ? 64'sd1 : 64'sd0);
+                shifted = x64 >>> exponent;
+                rounding_divide_by_pot = (remainder > threshold)
+                    ? clamp_i32(shifted + 64'sd1)
+                    : clamp_i32(shifted);
+            end
+        end
+    endfunction
+
+    function signed [31:0] mbqm;
+        input signed [31:0] x;
+        input signed [31:0] mult;
+        input signed [7:0] sh;
+        integer left_shift;
+        integer right_shift;
+        reg signed [31:0] shifted;
+        reg signed [31:0] high;
+        begin
+            left_shift = (sh > 0) ? {{24{sh[7]}}, sh} : 0;
+            right_shift = (sh > 0) ? 0 : -{{24{sh[7]}}, sh};
+            shifted = (left_shift > 0) ? (x <<< left_shift) : x;
+            high = saturating_doubling_high_mul(shifted, mult);
+            mbqm = rounding_divide_by_pot(high, right_shift);
         end
     endfunction
 
@@ -665,6 +727,9 @@ module vf_conv_sample_engine #(
         i16_av = 32'sd0;
         i16_wv = 32'sd0;
         i16_acc64 = 64'sd0;
+        tile_result_quantized = 32'sd0;
+        tile_result_clamped = 32'sd0;
+        tile_result_q_value = 32'sd0;
         conv_window_valid_count = conv_window_valid_count_at(conv_out_elem_index, conv_window_start_lane);
         conv_tile_last_window_valid_count =
             conv_window_valid_count_at(conv_tile_last_out_elem_index, conv_window_start_lane);
@@ -679,22 +744,36 @@ module vf_conv_sample_engine #(
         conv_writeback_q_values = 128'd0;
         for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
             tile_result_acc_value = 32'sd0;
+            tile_result_quantized = 32'sd0;
+            tile_result_clamped = 32'sd0;
+            tile_result_q_value = 32'sd0;
             if (tile_i < scoreboard_tile_output_count) begin
                 if (conv_partial_final)
                     tile_result_acc_value = conv_psum_valid_mask[tile_i] ?
                         $signed(conv_psum_acc_values[tile_i*32 +: 32]) : acc_out;
                 else
                     tile_result_acc_value = acc_out;
+                if (conv_partial_final) begin
+                    tile_result_quantized = mbqm(tile_result_acc_value, multiplier, shift) + zp_out;
+                    if (tile_result_quantized < act_min)
+                        tile_result_clamped = act_min;
+                    else if (tile_result_quantized > act_max)
+                        tile_result_clamped = act_max;
+                    else
+                        tile_result_clamped = tile_result_quantized;
+                    tile_result_q_value = {{24{tile_result_clamped[7]}}, tile_result_clamped[7:0]};
+                end else begin
+                    tile_result_q_value = {{24{out_q[7]}}, out_q};
+                end
                 conv_tile_scoreboard_valid_mask[tile_i] = 1'b1;
-                conv_tile_scoreboard_q_sum = conv_tile_scoreboard_q_sum + $signed(out_q);
+                conv_tile_scoreboard_q_sum = conv_tile_scoreboard_q_sum + $signed(tile_result_q_value);
                 conv_tile_result_out_elem_indices[tile_i*32 +: 32] =
                     conv_out_elem_index + tile_i[31:0];
                 conv_tile_result_output_byte_offsets[tile_i*32 +: 32] =
                     (conv_out_elem_index + tile_i[31:0]) *
                     {30'd0, ((fp_mode || int16_mode) ? 2'd2 : 2'd1)};
                 conv_tile_result_acc_values[tile_i*32 +: 32] = tile_result_acc_value;
-                conv_tile_result_q_values[tile_i*32 +: 32] =
-                    {{24{out_q[7]}}, out_q};
+                conv_tile_result_q_values[tile_i*32 +: 32] = tile_result_q_value;
                 if (conv_partial_final) begin
                     conv_writeback_valid_mask[tile_i] = 1'b1;
                     conv_writeback_output_byte_offsets[tile_i*32 +: 32] =

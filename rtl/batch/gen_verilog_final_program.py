@@ -851,6 +851,8 @@ def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]
         start_lane += elem_count
     if descs:
         descs[-1][3] |= 1 << 6
+        final_q = clamp_i8(mbqm(clamp_i32(cumulative_acc), 1073741824, 1))
+        descs[-1][18] = final_q & 0xFF
     return descs
 
 

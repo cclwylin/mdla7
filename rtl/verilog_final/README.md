@@ -225,8 +225,9 @@ of its descriptor-driven 2D NHWC/OHWI iterator and check those addresses
 alongside the sample MAC. The tile prefix also emits a 4-entry result buffer:
 valid mask, output element indices, output byte offsets, pre-requant
 accumulators, sample output values, and sample-output sum. When CONV word 3 bit
-6 marks the final partial, the engine also exposes a 4-entry writeback skeleton:
-valid mask, output byte offsets, and output q values.
+6 marks the final partial, the engine also requantizes the cumulative psum
+accumulators and exposes a 4-entry writeback skeleton: valid mask, output byte
+offsets, and final output q values.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
