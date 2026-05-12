@@ -1,109 +1,176 @@
 # MDLA7 Handoff
 
-日期時間：2026-05-12 CST
-Repo：`/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
-Branch：`main`
+Date: 2026-05-12 CST  
+Repo: `/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`  
+Branch: `main`
 
-## 目前狀態
+## Current Direction
 
-- 最新 handoff commit：`ab51879 Update handoff for verilog final streaming`。
-- 最新 verilog_final RTL commit：`e7e9c1e Tag L1 responses with source and stream tid`。
-- 此 repo 工作樹仍有其他既有未提交變更；本 handoff 只描述目前
-  verilog_final streaming / L1 response bring-up 狀態。
-- `rtl/bin`、`rtl/obj*`、`rtl/verilator` 仍視為本機產物，不應混入 commit。
-
-## Verilog Final Streaming / L1 Response
-
-最新相關 commits：
+`verilog_final` 正在往真正 dataflow 走：
 
 ```text
+Testbench loads .bin into DRAM
+  -> Host / descriptors
+  -> Command Engine
+  -> UDMA load DRAM to L1/SRAM
+  -> CONV / TNPS / POOL / EWE work from L1/SRAM
+  -> CONV / TNPS / POOL / EWE write L1/SRAM
+  -> UDMA store L1/SRAM to DRAM
+  -> checker / CRC
+```
+
+重要原則：
+
+- `.bin` 由 Testbench DRAM model 透過 `+FINAL_REF_PROGRAM` 讀入。
+- Engine 不應該偷開檔，也不應該靠 Python 展開成大量 per-byte / per-output descriptor 來假裝 full tensor。
+- `--full-tensor` 目前只能當 legacy/debug coverage path；後續 full datapath 要用 compact descriptor + DRAM/L1/engine traversal。
+
+## This Round
+
+完成 first true byte-moving dataflow slice：
+
+- `rtl/verilog_final/Testbench_host_program.v`
+  - 新增 writable `vf_dram_model`。
+  - DRAM model 從 `+FINAL_REF_PROGRAM` 讀 `.bin`。
+  - Reads 先查 writable override memory，沒有 override 才 fallback 到 `.bin` file bytes。
+  - Writes 用 `req_wdata` / `req_wstrb` 寫入 DRAM model backing store。
+  - 接上 top UDMA DRAM request/response wires。
+
+- `rtl/verilog_final/mdla7_top_final.v`
+  - 新增 `udma_dram_resp_rdata` input。
+  - 接到 `vf_udma_engine`。
+
+- `rtl/verilog_final/final_datapath.v`
+  - `vf_udma_engine` 新增 `dram_resp_rdata` input。
+  - UDMA load 現在會把 DRAM response 的 16B beat 寫進 L1Mesh。
+  - UDMA store 現在會 capture L1 response，再寫回 DRAM model。
+
+- `rtl/verilog_final/Testbench_top_byte_movers.v`
+  - 補齊 new top DRAM response/request ports 的 dummy connection。
+
+Also present from previous steps:
+
+- `verilog_final` top has microblock control path.
+- L1 response has skid/tag path: source, tid, rdata, read valid.
+- Host final reports `vf_cycles`.
+- `run_verilog_final.py` report columns include coverage, synth cycles, verilog final cycles, ratio, wall time.
+
+## Verified
+
+Compile / static checks:
+
+```bash
+python3 -m py_compile rtl/batch/gen_verilog_final_program.py rtl/batch/run_verilog_final.py
+git diff --check -- rtl/verilog_final/Testbench_host_program.v rtl/verilog_final/final_datapath.v rtl/verilog_final/mdla7_top_final.v rtl/verilog_final/Testbench_top_byte_movers.v rtl/batch/run_verilog_final.py rtl/batch/gen_verilog_final_program.py
+```
+
+Both passed.
+
+UDMA DRAM-to-L1 smoke:
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py --test host \
+  --program rtl/obj/verilog_final/programs/udma_dram_to_l1_smoke.final.hex \
+  --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin --no-build
+```
+
+Passed:
+
+```text
+PASS: verilog_final host-driven ... issued=2 done=2 vf_cycles=87
+```
+
+UDMA DRAM -> L1 -> DRAM -> L1 roundtrip smoke:
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py --test host \
+  --program rtl/obj/verilog_final/programs/udma_dram_l1_store_roundtrip.final.hex \
+  --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
+```
+
+Passed:
+
+```text
+PASS: verilog_final host-driven ... issued=4 done=4 vf_cycles=260
+```
+
+This proves the current UDMA/L1/DRAM byte-moving path:
+
+```text
+DRAM(.bin) -> UDMA -> L1 -> UDMA -> DRAM -> UDMA -> L1
+```
+
+Target final dataflow:
+
+```text
+DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
+```
+
+## Next Step
+
+1. Connect TNPS into the same closed loop:
+   `DRAM -> UDMA load input tensor to L1 -> TNPS reads L1 -> TNPS writes L1 output -> UDMA store -> DRAM -> CRC/checker`.
+
+2. Then connect POOL / EWE into the same closed loop:
+   - UDMA loads input tensor(s) into L1.
+   - Engine reads L1, not descriptor sample bytes.
+   - Engine writes output L1.
+   - UDMA stores output back to DRAM.
+
+3. Then connect CONV into the same closed loop:
+   - Load activation / weights / bias / params.
+   - Implement tile/full traversal MAC loop.
+   - Write output to L1 and store back to DRAM.
+
+4. Replace ref-fill/probe-only coverage with real producer-output coverage.
+
+## Important Files
+
+- `rtl/verilog_final/Testbench_host_program.v`
+- `rtl/verilog_final/mdla7_top_final.v`
+- `rtl/verilog_final/final_datapath.v`
+- `rtl/verilog_final/host_final.v`
+- `rtl/verilog_final/Testbench_top_byte_movers.v`
+- `rtl/batch/gen_verilog_final_program.py`
+- `rtl/batch/run_verilog_final.py`
+- `rtl/batch/run_verilog_final_smoke.py`
+
+## Commands
+
+Run final smoke:
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py --test host \
+  --program rtl/obj/verilog_final/programs/udma_dram_l1_store_roundtrip.final.hex \
+  --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
+```
+
+Run regression:
+
+```bash
+./rtl/batch/run_verilog_final.py --filter slice
+./rtl/batch/run_verilog_final.py --filter ethz
+```
+
+If Verilator output is stale:
+
+```bash
+rm -rf rtl/obj/verilog_final/host
+```
+
+## Warnings
+
+- Workspace is dirty; several unrelated files were already modified before this handoff. Do not revert user changes.
+- Smoke `.final.hex` files under `rtl/obj/verilog_final/programs/` are generated local artifacts.
+- `--full-tensor` exists, but should not become the final architecture. Use compact descriptors plus Verilog-side traversal.
+- `run_verilog_ctrl.py` and `run_verilog_final.py` are separate flows. `verilog_ctrl` is control/timing compare; `verilog_final` is the path for true datapath.
+
+## Recent Commits
+
+```text
+9f50a5a Trim handoff to current verilog final state
+ab51879 Update handoff for verilog final streaming
 e7e9c1e Tag L1 responses with source and stream tid
 3305dde Probe requant L1 producer path
 1f7aa93 Feed UDMA store CRC from L1 response
-a26c5ad Check microblock output SRAM CRC
-d544211 Add microblock final tensor CRC probes
-1627ffd Drive verilog final with microblock descriptors
-```
-
-### 現有能力
-
-- `run_verilog_final.py` default 已走 microblock descriptors；
-  `--sample-descriptors` 才回到舊 sample descriptor path。
-- generator 會在 microblock sequence 後加 tensor coverage probes：
-  - UDMA seed L1 bytes -> UDMA STORE from L1 response -> output SRAM CRC。
-  - REQUANT producer 寫 L1 -> L1CRC 驗 `[requant_out] + zeros`。
-  - UDMA ref-fill output SRAM image -> full output SRAM CRC / final CRC。
-- UDMA STORE path 已可從 L1Mesh read response 寫入 UDMA output SRAM。
-  `vf_udma_engine` 會在 `final_write_mode && direction_write` 等 L1 read
-  response，並把 16B line 寫到 `output_sram[out_byte_offset + lane]`。
-- UDMA SRAMCRC descriptor 不再打一筆 L1 request；它只掃 UDMA output SRAM。
-- L1Manager/L1Mesh response metadata 已打通：
-  - L1Manager 將 arbitration 選到的 `source/tid` 帶到 mesh request。
-  - L1Mesh response 回傳 `resp_read/resp_source/resp_tid`。
-  - `mdla7_top_final` 只把符合當前 engine source 且 `tid == stream_slot_q`
-    的 read response 餵給 REQUANT/POOL/EWE/UDMA。
-
-### 已知風險
-
-- L1Mesh response/data 在 back-to-back request 時仍可能出現 stale beat 或
-  metadata-data 同拍風險。
-- `resp_source/resp_tid` 是必要地基，但 REQUANT -> UDMA consumer probe
-  還需要 per-command response queue / skid register，讓
-  `resp_valid/read/source/tid/rdata` 同拍鎖住後再接回。
-- 改 `rtl/synth/*.v` 後，Verilator include dependency 可能不會自動重建；
-  建議先清掉 host obj：
-
-```bash
-rm -rf rtl/obj/verilog_final/host
-```
-
-## 最近驗證
-
-已驗證 PASS：
-
-```bash
-rm -rf rtl/obj/verilog_final/host
-./rtl/batch/run_verilog_final.py --filter slice --limit 1 \
-  --rerun-all --require-crc-coverage --require-final-output-crc
-
-./rtl/batch/run_verilog_final.py --filter slice --limit 3 \
-  --rerun-all --no-build --require-crc-coverage --require-final-output-crc
-```
-
-最近結果：
-
-```text
-limit 1: pass=1 fail=0 skip=0 sample_only=0 total=1
-coverage: refcrc=0 sramcrc=3 finalcrc=2 refB=0 sramB=16777248 finalB=16777232
-
-limit 3: pass=3 fail=0 skip=0 sample_only=0 total=3
-coverage: refcrc=0 sramcrc=12 finalcrc=7 refB=0 sramB=23069440 finalB=23069360
-```
-
-## 下一步
-
-1. 在 L1 response side 加 per-command response queue / skid register。
-   必須同拍鎖住 `resp_valid`、`resp_read`、`resp_source`、`resp_tid`、
-   `resp_rdata`，避免 back-to-back request 時 stale rdata 被新 command 吃掉。
-2. 接回 consumer probe：
-   `REQUANT producer writes L1 -> UDMA STORE reads same L1 address -> UDMA output SRAM CRC`。
-   先用 16B `[requant_out] + zeros`，通過後再擴成多 byte/tile。
-3. 同樣模式推到 POOL/EWE/TNPS：
-   producer engine result byte/line 寫 L1，consumer/UDMA 從同一 L1 address 讀，
-   再做 output SRAM CRC。
-4. 將目前 ref-fill full output CRC 逐步替換成真正 producer output
-   SRAM/L1Mesh image，再做 full output tensor compare/CRC。
-
-## 快速命令
-
-```bash
-./rtl/batch/run_verilog_final.py --filter slice --limit 1 --rerun-all \
-  --require-crc-coverage --require-final-output-crc
-
-./rtl/batch/run_verilog_final.py --filter slice --limit 3 --rerun-all --no-build \
-  --require-crc-coverage --require-final-output-crc
-
-./rtl/batch/run_verilog_final_smoke.py --test host \
-  --program rtl/obj/verilog_final/programs/deeplab_v3_plus_float_L3.final.hex \
-  --ref-program rtl/bin/ETHZ_v6_slice/deeplab_v3_plus_float_L3.bin
 ```
