@@ -869,7 +869,7 @@ module host #(
                                      cmd_mem[base + 2]);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_fp_mode &&
+                        if ((desc_op_class == OP_CONV) && conv_fp_mode &&
                             (conv_fp_sum_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_VERILOG_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
                                      command_index, conv_fp_sum_bits,

@@ -353,6 +353,15 @@ module vf_conv_sample_engine #(
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
+`ifdef MDLA7_DPI_DATAPATH
+    import "DPI-C" function void mdla7_dpi_conv_fp16(
+        input int act0, input int act1, input int act2, input int act3,
+        input int wgt0, input int wgt1, input int wgt2, input int wgt3,
+        input int elem_count,
+        output longint out_bits
+    );
+`endif
+
     localparam [3:0] PH_CFG_DECODE = 4'd1;
     localparam [3:0] PH_ACT_READ   = 4'd2;
     localparam [3:0] PH_WGT_READ   = 4'd3;
@@ -405,6 +414,10 @@ module vf_conv_sample_engine #(
     integer refcrc_byte;
     integer refcrc_i;
     integer refcrc_seek_rc;
+`ifdef MDLA7_DPI_DATAPATH
+    reg dpi_datapath_enabled;
+    reg [63:0] dpi_fp_sum_bits;
+`endif
     reg [1023:0] refcrc_program_path;
     reg [7:0] conv_output_sram [0:MAX_CONV_OUTPUT_SRAM_BYTES-1];
     reg [MAX_ELEMS*8-1:0] active_act_vec;
@@ -511,6 +524,32 @@ module vf_conv_sample_engine #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] vector_lane_wdata;
+        input [63:0] value;
+        input [3:0] lane;
+        integer idx;
+        begin
+            vector_lane_wdata = {DATA_WIDTH{1'b0}};
+            for (idx = 0; idx < 8; idx = idx + 1) begin
+                if ((lane + idx) < (DATA_WIDTH/8))
+                    vector_lane_wdata[(lane + idx)*8 +: 8] = value[idx*8 +: 8];
+            end
+        end
+    endfunction
+
+    function [DATA_WIDTH/8-1:0] vector_lane_wstrb;
+        input [31:0] byte_count;
+        input [3:0] lane;
+        integer idx;
+        begin
+            vector_lane_wstrb = {DATA_WIDTH/8{1'b0}};
+            for (idx = 0; idx < DATA_WIDTH/8; idx = idx + 1) begin
+                if ((idx >= lane) && ((idx - lane) < byte_count))
+                    vector_lane_wstrb[idx] = 1'b1;
+            end
+        end
+    endfunction
+
     function [DATA_WIDTH-1:0] compact_l1_response;
         input [DATA_WIDTH-1:0] data;
         input [3:0] lane;
@@ -532,6 +571,10 @@ module vf_conv_sample_engine #(
     initial begin
         refcrc_program_path = "";
         refcrc_fd = 0;
+`ifdef MDLA7_DPI_DATAPATH
+        dpi_datapath_enabled = $test$plusargs("MDLA7_DATAPATH_DPI");
+        dpi_fp_sum_bits = 64'd0;
+`endif
         if (!$value$plusargs("VERILOG_REF_PROGRAM=%s", refcrc_program_path)) begin
             if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
                 refcrc_program_path = "";
@@ -546,7 +589,11 @@ module vf_conv_sample_engine #(
                                elem_count;
     wire [31:0] sample_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
                                          {24'd0, safe_int_count};
+    wire [31:0] store_bytes = fp_mode ? 32'd8 :
+                              int16_mode ? 32'd4 :
+                              32'd1;
     wire [31:0] payload_cycles = ceil_div(sample_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
+    wire [31:0] store_payload_cycles = ceil_div(store_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
     wire [31:0] mac_cycles = ceil_div(fp_mode ? {24'd0, safe_fp_count} :
                                       int16_mode ? {24'd0, safe_fp_count} :
                                                    {24'd0, safe_int_count}, 32'd16) + 32'd1;
@@ -560,17 +607,23 @@ module vf_conv_sample_engine #(
     assign l1_req_valid = req_state;
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr =
-        ((state == ST_STORE) && conv_partial_final) ?
+        ((state == ST_STORE) && conv_partial_final && !read_sample_from_l1) ?
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
         (state == ST_WGT) ? (l1_req_base_addr + sample_bytes[ADDR_WIDTH-1:0]) :
         l1_req_base_addr;
-    assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count : sample_bytes;
-    assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 : payload_cycles;
+    assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
+                          (state == ST_STORE) ? store_bytes :
+                          sample_bytes;
+    assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 :
+                                   (state == ST_STORE) ? store_payload_cycles :
+                                   payload_cycles;
     assign l1_req_wdata = l1_req_write
-        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        ? (fp_mode ? vector_lane_wdata(fp_sum_bits, l1_req_addr[3:0]) :
+           int16_mode ? vector_lane_wdata({32'd0, int16_acc_out}, l1_req_addr[3:0]) :
+           byte_lane_wdata(out_q[7:0], l1_req_addr[3:0]))
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
-        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        ? vector_lane_wstrb(store_bytes, l1_req_addr[3:0])
         : {DATA_WIDTH/8{1'b0}};
 
     wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
@@ -855,6 +908,23 @@ module vf_conv_sample_engine #(
                           fp16_to_real(conv_mac_wgt_vec[fp_i*16 +: 16]));
         end
         fp_sum_bits = $realtobits(fp_sum);
+`ifdef MDLA7_DPI_DATAPATH
+        if (fp_mode && dpi_datapath_enabled) begin
+            mdla7_dpi_conv_fp16(
+                conv_mac_act_vec[31:0],
+                conv_mac_act_vec[63:32],
+                conv_mac_act_vec[95:64],
+                conv_mac_act_vec[127:96],
+                conv_mac_wgt_vec[31:0],
+                conv_mac_wgt_vec[63:32],
+                conv_mac_wgt_vec[95:64],
+                conv_mac_wgt_vec[127:96],
+                {24'd0, safe_fp_count},
+                dpi_fp_sum_bits
+            );
+            fp_sum_bits = dpi_fp_sum_bits;
+        end
+`endif
         for (i16_i = 0; i16_i < (MAX_ELEMS/2); i16_i = i16_i + 1) begin
             if (i16_i < safe_fp_count) begin
                 i16_av = {{16{conv_mac_act_vec[i16_i*16 + 15]}},
@@ -881,7 +951,7 @@ module vf_conv_sample_engine #(
             end
             ST_STORE: begin
                 phase_id = PH_OUT_WRITE;
-                remaining_cycles = payload_cycles;
+                remaining_cycles = store_payload_cycles;
             end
             ST_REFCRC: begin
                 phase_id = PH_OUT_WRITE;

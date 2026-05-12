@@ -388,18 +388,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Manual per-program timeout. Default: auto by bin size/layer class.")
     ap.add_argument("--max-commands", type=int, default=DEFAULT_MAX_COMMANDS)
     ap.add_argument("--no-build", action="store_true")
-    ap.add_argument("--crc-coverage", action="store_true",
-                    help="Convenience mode for CRC coverage; enables --emit-conv-partial-psum.")
-    ap.add_argument("--closed-loop-dataflow", action="store_true",
-                    help="Generate real .bin probes for DRAM->UDMA->L1->engine->L1->UDMA->DRAM->L1CRC.")
-    ap.add_argument("--microblock-control", action="store_true",
-                    help="Legacy debug mode: emit compact microblock control descriptors without closed-loop datapath coverage.")
     ap.add_argument("--closed-loop-perf-target", action="store_true",
                     help="Pad closed-loop verilog cycles toward synth profile total_cycles for calibration/debug only.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
-    ap.add_argument("--allow-zero-crc-coverage", action="store_true",
-                    help="Debug escape hatch: allow a run to pass without refcrc/sramcrc coverage.")
     ap.add_argument("--min-ref-bytes", type=int, default=0,
                     help="Fail if total refB coverage is below this value.")
     ap.add_argument("--min-sram-bytes", type=int, default=0,
@@ -408,12 +400,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Fail a generated program if it has no final-layer SRAM/L1 CRC coverage.")
     ap.add_argument("--min-final-bytes", type=int, default=0,
                     help="Fail if total final-layer SRAM/L1 CRC bytes are below this value.")
-    ap.add_argument("--emit-conv-partial-psum", action="store_true",
-                    help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
-    ap.add_argument("--full-tensor", action="store_true",
-                    help="Prefer full output tensor traversal when it fits in --max-commands.")
-    ap.add_argument("--sample-descriptors", action="store_true",
-                    help="Use legacy per-engine sample descriptors instead of synth-style microblock descriptors.")
     ap.add_argument("--conv-sram-window-commands", type=int, default=0,
                     help="Pass through SRAM-window command budget for oversized INT8 CONV layers.")
     ap.add_argument("--conv-sram-window-count", type=int, default=0,
@@ -429,18 +415,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="verilog option. Use dpi to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     args = ap.parse_args(argv)
-    if args.crc_coverage:
-        args.emit_conv_partial_psum = True
-        args.sample_descriptors = True
-    if args.full_tensor:
-        args.emit_conv_partial_psum = True
-        args.sample_descriptors = True
-    if (not args.microblock_control and not args.crc_coverage and
-            not args.emit_conv_partial_psum and not args.full_tensor and
-            not args.sample_descriptors):
-        args.closed_loop_dataflow = True
-    if not args.allow_zero_crc_coverage:
-        args.require_crc_coverage = True
+    args.require_crc_coverage = True
     return args
 
 
@@ -458,13 +433,7 @@ def normalized_options(options: list[str]) -> set[str]:
 def run_mode(args: argparse.Namespace) -> str:
     options = normalized_options(args.option)
     suffix = "+dpi" if "dpi" in options else ""
-    if args.closed_loop_dataflow:
-        return "closed_loop_dataflow" + suffix
-    if args.emit_conv_partial_psum:
-        return "crc_coverage" + suffix
-    if args.sample_descriptors:
-        return "sample" + suffix
-    return "microblock_control" + suffix
+    return "closed_loop_dataflow" + suffix
 
 
 def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]:
@@ -596,7 +565,6 @@ def main(argv: list[str]) -> int:
     passed = 0
     failed = 0
     skipped = 0
-    sample_only = 0
     cache_hits = 0
     total_refcrc = 0
     total_sramcrc = 0
@@ -622,7 +590,7 @@ def main(argv: list[str]) -> int:
         info = classify_bin(bin_path)
         run_timeout = args.timeout if args.timeout is not None else info.timeout_s
         cached = None
-        if not args.rerun_all and not args.emit_conv_partial_psum:
+        if not args.rerun_all:
             cached = cache_hit(
                 cache_entries.get(rel_bin),
                 bin_path,
@@ -677,10 +645,7 @@ def main(argv: list[str]) -> int:
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
-                cached_sample_only = not has_tensor_crc(refcrc_count, sramcrc_count, finalcrc_count)
-                if cached_sample_only:
-                    sample_only += 1
-                ans = "SAMPLE" if cached_sample_only else "CACHED"
+                ans = "CACHED"
                 cov = coverage_label(info, refcrc_count, sramcrc_count, finalcrc_bytes)
                 print(
                     f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
@@ -689,9 +654,6 @@ def main(argv: list[str]) -> int:
                     f"{fmt_cycles(verilog_cycles):>20} "
                     f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {0.0:>8.2f}"
                 )
-                if cached_sample_only:
-                    mode = "sample-only" if args.sample_descriptors else "microblock-control"
-                    print(f"     reason: {mode} cached result; no tensor CRC coverage")
             continue
         hex_path = program_dir / f"{bin_path.stem}.verilog.hex"
         synth_cycles_for_target = load_synth_cycles(bin_path, args.profile_root)
@@ -699,16 +661,8 @@ def main(argv: list[str]) -> int:
             sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
             "--max-commands", str(args.max_commands),
         ]
-        if not args.sample_descriptors and not args.emit_conv_partial_psum and not args.closed_loop_dataflow:
-            gen_cmd.append("--microblock-descriptors")
-        if args.emit_conv_partial_psum:
-            gen_cmd.append("--emit-conv-partial-psum")
-        if args.closed_loop_dataflow:
-            gen_cmd.append("--closed-loop-dataflow")
-            if synth_cycles_for_target is not None and args.closed_loop_perf_target:
-                gen_cmd.extend(["--closed-loop-target-cycles", str(synth_cycles_for_target)])
-        if args.full_tensor:
-            gen_cmd.append("--full-tensor")
+        if synth_cycles_for_target is not None and args.closed_loop_perf_target:
+            gen_cmd.extend(["--closed-loop-target-cycles", str(synth_cycles_for_target)])
         if args.conv_sram_window_commands > 0:
             gen_cmd.extend(["--conv-sram-window-commands", str(args.conv_sram_window_commands)])
         if args.conv_sram_window_count > 0:
@@ -755,33 +709,32 @@ def main(argv: list[str]) -> int:
                 f"{'':>20} {'':>9} {0.0:>8.2f}"
             )
             print("     reason: no final command")
-            if not args.emit_conv_partial_psum:
-                cache_entries[rel_bin] = {
-                    "status": "SKIP",
-                    "bin_sig": file_signature(bin_path),
-                    "run_mode": mode,
-                    "runner_mtime_ns": runner_mtime_ns,
-                    "generator_mtime_ns": generator_mtime_ns,
-                    "source_mtime_ns": source_mtime_ns,
-                    "cmds": 0,
-                    "conv": 0,
-                    "pool": 0,
-                    "requant": 0,
-                    "ewe": 0,
-                    "tnps": 0,
-                    "udma": 0,
-                    "refcrc": 0,
-                    "sramcrc": 0,
-                    "refbytes": 0,
-                    "srambytes": 0,
-                    "finalcrc": 0,
-                    "finalbytes": 0,
-                    "synth_cycles": synth_cycles,
-                    "synth_ms": synth_ms,
-                    "verilog_cycles": None,
-                    "done": 0,
-                }
-                save_cache(args.cache_file, cache)
+            cache_entries[rel_bin] = {
+                "status": "SKIP",
+                "bin_sig": file_signature(bin_path),
+                "run_mode": mode,
+                "runner_mtime_ns": runner_mtime_ns,
+                "generator_mtime_ns": generator_mtime_ns,
+                "source_mtime_ns": source_mtime_ns,
+                "cmds": 0,
+                "conv": 0,
+                "pool": 0,
+                "requant": 0,
+                "ewe": 0,
+                "tnps": 0,
+                "udma": 0,
+                "refcrc": 0,
+                "sramcrc": 0,
+                "refbytes": 0,
+                "srambytes": 0,
+                "finalcrc": 0,
+                "finalbytes": 0,
+                "synth_cycles": synth_cycles,
+                "synth_ms": synth_ms,
+                "verilog_cycles": None,
+                "done": 0,
+            }
+            save_cache(args.cache_file, cache)
             continue
         total_refcrc += refcrc_count
         total_sramcrc += sramcrc_count
@@ -811,10 +764,7 @@ def main(argv: list[str]) -> int:
             issued = int(match.group(1))
             done = int(match.group(2))
             passed += 1
-            current_sample_only = not has_tensor_crc(refcrc_count, sramcrc_count, finalcrc_count)
-            if current_sample_only:
-                sample_only += 1
-            ans = "SAMPLE" if current_sample_only else "PASS"
+            ans = "PASS"
             cov = coverage_label(info, refcrc_count, sramcrc_count, finalcrc_bytes)
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
@@ -823,38 +773,34 @@ def main(argv: list[str]) -> int:
                 f"{fmt_cycles(verilog_cycles):>20} "
                 f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {wall:>8.2f}"
             )
-            if current_sample_only:
-                mode = "sample-only" if args.sample_descriptors else "microblock-control"
-                print(f"     reason: {mode}; no tensor CRC coverage")
-            if not args.emit_conv_partial_psum:
-                cache_entries[rel_bin] = {
-                    "status": "SAMPLE" if current_sample_only else "PASS",
-                    "bin_sig": file_signature(bin_path),
-                    "run_mode": mode,
-                    "runner_mtime_ns": runner_mtime_ns,
-                    "generator_mtime_ns": generator_mtime_ns,
-                    "source_mtime_ns": source_mtime_ns,
-                    "cmds": issued,
-                    "conv": conv_count,
-                    "pool": pool_count,
-                    "requant": requant_count,
-                    "ewe": ewe_count,
-                    "tnps": tnps_count,
-                    "udma": udma_count,
-                    "refcrc": refcrc_count,
-                    "sramcrc": sramcrc_count,
-                    "refbytes": refcrc_bytes,
-                    "srambytes": sramcrc_bytes,
-                    "finalcrc": finalcrc_count,
-                    "finalbytes": finalcrc_bytes,
-                    "synth_ms": synth_ms,
-                    "synth_cycles": synth_cycles,
-                    "verilog_ms": verilog_ms,
-                    "verilog_cycles": verilog_cycles,
-                    "done": done,
-                    "wall_s": wall,
-                }
-                save_cache(args.cache_file, cache)
+            cache_entries[rel_bin] = {
+                "status": "PASS",
+                "bin_sig": file_signature(bin_path),
+                "run_mode": mode,
+                "runner_mtime_ns": runner_mtime_ns,
+                "generator_mtime_ns": generator_mtime_ns,
+                "source_mtime_ns": source_mtime_ns,
+                "cmds": issued,
+                "conv": conv_count,
+                "pool": pool_count,
+                "requant": requant_count,
+                "ewe": ewe_count,
+                "tnps": tnps_count,
+                "udma": udma_count,
+                "refcrc": refcrc_count,
+                "sramcrc": sramcrc_count,
+                "refbytes": refcrc_bytes,
+                "srambytes": sramcrc_bytes,
+                "finalcrc": finalcrc_count,
+                "finalbytes": finalcrc_bytes,
+                "synth_ms": synth_ms,
+                "synth_cycles": synth_cycles,
+                "verilog_ms": verilog_ms,
+                "verilog_cycles": verilog_cycles,
+                "done": done,
+                "wall_s": wall,
+            }
+            save_cache(args.cache_file, cache)
         else:
             failed += 1
             reason = "simulation failed"
@@ -876,7 +822,7 @@ def main(argv: list[str]) -> int:
             print("     reason: no final-layer SRAM/L1 CRC coverage")
     print(
         f"[run_verilog] summary: pass={passed} fail={failed} "
-        f"skip={skipped} sample_only={sample_only} total={len(bins)}"
+        f"skip={skipped} total={len(bins)}"
     )
     print(
         f"[run_verilog] coverage: refcrc={total_refcrc} sramcrc={total_sramcrc} "
@@ -891,12 +837,6 @@ def main(argv: list[str]) -> int:
         f"verilog_total_cycles={fmt_cycles(verilog_cycle_total if comparable else None)} "
         f"v/synth={fmt_ratio(verilog_cycle_total if comparable else None, synth_cycle_total if comparable else None)}"
     )
-    if total_refcrc == 0 and total_sramcrc == 0 and not args.emit_conv_partial_psum and not args.closed_loop_dataflow:
-        mode_hint = "legacy sample-path" if args.sample_descriptors else "microblock-control"
-        print(
-            "[run_verilog] coverage_hint: CRC coverage is generated by "
-            f"--crc-coverage; current mode is {mode_hint} without tensor CRC."
-        )
     if args.require_crc_coverage and total_refcrc == 0 and total_sramcrc == 0:
         failed += 1
         print("[run_verilog] coverage_fail: required CRC coverage, but no CRC descriptors ran")

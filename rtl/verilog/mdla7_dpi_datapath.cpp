@@ -92,6 +92,20 @@ extern "C" void mdla7_dpi_conv_int8_mac(
     *out_q = static_cast<int8_t>(q & 0xff);
 }
 
+extern "C" void mdla7_dpi_conv_fp16(
+    int32_t act0, int32_t act1, int32_t act2, int32_t act3,
+    int32_t wgt0, int32_t wgt1, int32_t wgt2, int32_t wgt3,
+    int32_t elem_count, int64_t* out_bits) {
+    const int32_t aw[4] = {act0, act1, act2, act3};
+    const int32_t ww[4] = {wgt0, wgt1, wgt2, wgt3};
+    const int lanes = elem_count < 0 ? 0 : (elem_count > 8 ? 8 : elem_count);
+    double sum = 0.0;
+    for (int i = 0; i < lanes; ++i) {
+        sum += fp16_to_double(lane_u16(aw, i)) * fp16_to_double(lane_u16(ww, i));
+    }
+    *out_bits = double_bits(sum);
+}
+
 extern "C" void mdla7_dpi_pool_fp16(
     int32_t vec0, int32_t vec1, int32_t vec2, int32_t vec3,
     int32_t elem_count, int32_t avg_mode, int64_t* out_bits) {
