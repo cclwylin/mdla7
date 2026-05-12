@@ -79,6 +79,19 @@ The batch table reports `cmds`, `conv`, `pool`, `requant`, `ewe`, `tnps`, and
 `udma` counts per `.bin`, so slice coverage is visible while the final datapath
 is still growing. Layers with no final descriptor are reported as `SKIP`.
 
+`--emit-conv-partial-psum` expands INT8 CONV descriptors into partial-K output
+tiles and checks the rolling shadow-SRAM output CRC/count. The host program now
+defaults to 4096 commands. If a quantized layer's full output tensor fits in
+that budget, the generator emits every output element, uses the `.bin` CONV
+weight payload, per-channel multiplier/shift, bias_eff, optional correction map,
+and output activation clamp, then checks the final shadow CRC against the golden
+tensor at `ref_off/ref_size`. Layers that would exceed the command budget emit a
+compact full-ref CRC descriptor instead: word 25 carries `ref_off`, words 28/29
+carry the expected CRC/count, and the final datapath opens the original `.bin`
+through `+FINAL_REF_PROGRAM`, seeks to `ref_off`, walks the tensor bytes in
+Verilog, and updates the same FNV CRC/count registers. These rows are reported
+in the batch table as `refcrc`.
+
 Current converter behavior:
 
 - `SPACE_TO_DEPTH` / `DEPTH_TO_SPACE`: emitted as TNPS descriptors with sample
@@ -86,7 +99,10 @@ Current converter behavior:
 - INT8 CONV op kinds `0/1/6`: emitted as CONV sample descriptors. The generator
   takes up to 16 activation bytes and 16 weight bytes from the `.bin`, computes
   the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
-  MAC result.
+  MAC result. With `--emit-conv-partial-psum`, layers that fit the command budget
+    emit all output elements and check the full golden ref tensor shadow CRC.
+    Larger layers emit a compact `refcrc` descriptor that drives the in-Verilog
+    ref tensor walker.
 - FP16/float CONV op kinds `0/1/6`: emitted as CONV FP sample descriptors. The
   generator takes up to 8 activation half-floats and 8 weight half-floats,
   computes the expected double-precision sample MAC, and `host_final.v` checks
@@ -233,8 +249,10 @@ probe the same shadow memory with its descriptor-driven output byte offset and
 observe the stored offset/q tuple before full output SRAM/DRAM writeback exists;
 word 3 bit 7 asks the host to check that readback against word 19. Final
 writeback bytes also update a rolling FNV CRC and byte count; word 3 bit 8 asks
-the host to check those against words 28/29 as the bridge toward full tensor
-SRAM/DRAM CRC compare.
+the host to check those against words 28/29. Word 3 bit 9 selects the compact
+full-ref walker: word 25 gives `ref_off`, word 29 gives the byte count, and the
+datapath reads the original `.bin` via `+FINAL_REF_PROGRAM` to produce the CRC
+that the host compares with word 28.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
@@ -245,6 +263,6 @@ layers with up to 16 emitted output bytes now exercise a layer-level shadow
 SRAM stream rather than a single output pixel. It also emits a follow-up CONV
 probe descriptor that reads back the last tile output slot from the shadow SRAM
 and checks the stored q answer through word 3 bit 7 / word 19, plus the rolling
-shadow CRC/count through word 3 bit 8 and words 28/29. Larger layers are still
-bounded by the current 63-command host program cap and therefore check the
-generated output prefix until the full output SRAM image path lands.
+shadow CRC/count through word 3 bit 8 and words 28/29. Larger INT8 CONV layers
+that cannot fit all output-element descriptors now use word 3 bit 9 and the
+Verilog ref tensor walker instead of truncating to an output prefix.

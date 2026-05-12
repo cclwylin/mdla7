@@ -33,9 +33,11 @@ GEN_STATS_RE = re.compile(
     r"(?:\s+requant=([0-9]+))?"
     r"(?:\s+ewe=([0-9]+))?"
     r"\s+tnps=([0-9]+)\s+udma=([0-9]+)"
+    r"(?:\s+refcrc=([0-9]+))?"
 )
 CACHE_VERSION = 3
 WORDS_PER_COMMAND = 32
+DEFAULT_MAX_COMMANDS = 4096
 
 
 def repo_paths() -> tuple[Path, Path]:
@@ -185,7 +187,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="bin filter, glob, path, or alias: slice, ethz, hotspot")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=60.0)
-    ap.add_argument("--max-commands", type=int, default=64)
+    ap.add_argument("--max-commands", type=int, default=DEFAULT_MAX_COMMANDS)
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--emit-conv-partial-psum", action="store_true",
                     help="Pass through generator opt-in for INT8 CONV psum first/accumulate pairs.")
@@ -198,7 +200,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int]:
+def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int]:
     words: list[int] = []
     for line in hex_path.read_text(encoding="ascii").splitlines():
         line = line.strip()
@@ -212,6 +214,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int]:
     ewe = 0
     tnps = 0
     udma = 0
+    refcrc = 0
     for off in range(0, len(words), WORDS_PER_COMMAND):
         op = words[off] & 0xF
         if op == 0:
@@ -223,13 +226,15 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int]:
             udma += 1
         elif op == 1:
             conv += 1
+            if words[off + 3] & (1 << 9):
+                refcrc += 1
         elif op == 2:
             requant += 1
         elif op == 3:
             ewe += 1
         elif op == 4:
             pool += 1
-    return count, conv, pool, requant, ewe, tnps, udma
+    return count, conv, pool, requant, ewe, tnps, udma, refcrc
 
 
 def main(argv: list[str]) -> int:
@@ -255,8 +260,8 @@ def main(argv: list[str]) -> int:
     print(f"[run_verilog_final] cache: {display(args.cache_file, repo_root)}")
     if args.rerun_all:
         print("[run_verilog_final] cache_mode: rerun-all")
-    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma  done  wall_s")
-    print("-----------------------------------------------------------------------------------------------------")
+    print("idx  program                                  ans   cmds  conv  pool requant  ewe  tnps  udma refcrc  done  wall_s")
+    print("------------------------------------------------------------------------------------------------------------")
 
     passed = 0
     failed = 0
@@ -292,14 +297,15 @@ def main(argv: list[str]) -> int:
             ewe_count = int(cached.get("ewe") or 0)
             tnps_count = int(cached.get("tnps") or 0)
             udma_count = int(cached.get("udma") or 0)
+            refcrc_count = int(cached.get("refcrc") or 0)
             done = int(cached.get("done") or 0)
             if status == "SKIP":
                 skipped += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP {command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {done:5d} {0.0:7.2f}")
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
-                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {0.0:7.2f}")
+                print(f"{idx:3d}  {bin_path.stem[:38]:38s} CACHE{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {done:5d} {0.0:7.2f}")
             continue
         hex_path = program_dir / f"{bin_path.stem}.final.hex"
         gen_cmd = [
@@ -323,11 +329,12 @@ def main(argv: list[str]) -> int:
             ewe_count = int(stats_match.group(5) or 0)
             tnps_count = int(stats_match.group(6))
             udma_count = int(stats_match.group(7))
+            refcrc_count = int(stats_match.group(8) or 0)
         else:
-            command_count, conv_count, pool_count, requant_count, ewe_count, tnps_count, udma_count = count_commands(hex_path)
+            command_count, conv_count, pool_count, requant_count, ewe_count, tnps_count, udma_count, refcrc_count = count_commands(hex_path)
         if command_count == 0:
             skipped += 1
-            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0     0    0.00")
+            print(f"{idx:3d}  {bin_path.stem[:38]:38s} SKIP     0     0     0       0    0     0     0      0     0    0.00")
             print("     reason: no final command")
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -343,12 +350,13 @@ def main(argv: list[str]) -> int:
                     "ewe": 0,
                     "tnps": 0,
                     "udma": 0,
+                    "refcrc": 0,
                     "done": 0,
                 }
                 save_cache(args.cache_file, cache)
             continue
 
-        cmd = [str(smoke), "--test", "host", "--program", str(hex_path)]
+        cmd = [str(smoke), "--test", "host", "--program", str(hex_path), "--ref-program", str(bin_path)]
         if build_done:
             cmd.append("--no-build")
         rc, out, wall = run(cmd, repo_root, timeout=args.timeout)
@@ -360,7 +368,7 @@ def main(argv: list[str]) -> int:
             passed += 1
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} PASS "
-                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {done:5d} {wall:7.2f}"
+                f"{issued:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d} {done:5d} {wall:7.2f}"
             )
             if not args.emit_conv_partial_psum:
                 cache_entries[rel_bin] = {
@@ -376,6 +384,7 @@ def main(argv: list[str]) -> int:
                     "ewe": ewe_count,
                     "tnps": tnps_count,
                     "udma": udma_count,
+                    "refcrc": refcrc_count,
                     "done": done,
                     "wall_s": wall,
                 }
@@ -390,7 +399,7 @@ def main(argv: list[str]) -> int:
                 reason = f"TIMEOUT after {args.timeout:.1f}s"
             print(
                 f"{idx:3d}  {bin_path.stem[:38]:38s} FAIL "
-                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d}   n/a  {wall:7.2f}"
+                f"{command_count:5d} {conv_count:5d} {pool_count:5d} {requant_count:7d} {ewe_count:4d} {tnps_count:5d} {udma_count:5d} {refcrc_count:6d}   n/a  {wall:7.2f}"
             )
             print(f"     reason: {reason}")
 

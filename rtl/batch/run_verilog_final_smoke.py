@@ -94,6 +94,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--cxx-stdlib-include", type=Path, default=None)
     ap.add_argument("--program", type=Path, default=None,
                     help="hex descriptor stream passed to the host smoke test as +FINAL_PROGRAM")
+    ap.add_argument("--ref-program", type=Path, default=None,
+                    help="original MDL7 .bin passed to the host smoke test as +FINAL_REF_PROGRAM")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     return ap.parse_args(argv)
 
@@ -148,6 +150,8 @@ def main(argv: list[str]) -> int:
         sim_cmd = [str(exe)]
         if name == "host" and args.program is not None:
             sim_cmd.append(f"+FINAL_PROGRAM={args.program}")
+        if name == "host" and args.ref_program is not None:
+            sim_cmd.append(f"+FINAL_REF_PROGRAM={args.ref_program}")
         rc, output = run(sim_cmd, repo_root, quiet=False)
         if rc != 0 or "PASS:" not in output or "FAIL:" in output:
             failures.append(f"{name}: simulation failed")

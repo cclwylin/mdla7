@@ -67,6 +67,7 @@ UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
 WORDS_PER_COMMAND = 32
+DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 16777619
@@ -83,14 +84,22 @@ class Layer:
     out_c: int
     k_h: int
     k_w: int
+    s_h: int
+    s_w: int
+    p_t: int
+    p_b: int
+    p_l: int
+    p_r: int
     in_size: int
     wgt_size: int
     ref_size: int
     in_off: int
     wgt_off: int
     ref_off: int
+    group: int
     op_kind: int
     dtype: int
+    zp_in_eff: int
     tnps_meta: tuple[int, int, list[int], list[int], list[int], list[int]] | None = None
 
 
@@ -114,6 +123,14 @@ def pack_word(chunk: bytes) -> int:
     return value
 
 
+def rdi32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<i", data, offset)[0]
+
+
+def rdi8(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<b", data, offset)[0]
+
+
 def fnv_byte(crc: int, byte_value: int) -> int:
     return ((crc ^ (byte_value & 0xFF)) * FNV_PRIME) & 0xFFFF_FFFF
 
@@ -121,6 +138,13 @@ def fnv_byte(crc: int, byte_value: int) -> int:
 def fnv_repeated(byte_value: int, count: int) -> int:
     crc = FNV_OFFSET
     for _ in range(count):
+        crc = fnv_byte(crc, byte_value)
+    return crc
+
+
+def fnv_bytes(data: bytes) -> int:
+    crc = FNV_OFFSET
+    for byte_value in data:
         crc = fnv_byte(crc, byte_value)
     return crc
 
@@ -242,6 +266,161 @@ def conv2d_int8_window_sample(
     )
 
 
+@dataclass
+class Int8ConvParams:
+    zp_out: int
+    act_min: int
+    act_max: int
+    mult: list[int]
+    shift: list[int]
+    bias: list[int]
+    corr: bytes
+    corr_per_oc: bool
+    corr_per_pixel: bool
+
+
+def int8_conv_params(layer: Layer, data: bytes) -> Int8ConvParams | None:
+    if layer.out_c <= 0:
+        return None
+    group = layer.group or 1
+    if group <= 0 or layer.in_c % group != 0 or layer.out_c % group != 0:
+        return None
+    kh = layer.k_h or 1
+    kw = layer.k_w or 1
+    in_per_group = layer.in_c // group
+    wgt_bytes = layer.out_c * kh * kw * in_per_group
+    min_params = 12 + layer.out_c * 4 + layer.out_c + layer.out_c * 4
+    if wgt_bytes + min_params > layer.wgt_size:
+        return None
+    prm = layer.wgt_off + wgt_bytes
+    if prm + min_params > len(data):
+        return None
+    mult_off = prm + 12
+    shift_off = mult_off + layer.out_c * 4
+    bias_off = shift_off + layer.out_c
+    corr_off = bias_off + layer.out_c * 4
+    corr_bytes = layer.wgt_size - (wgt_bytes + min_params)
+    corr_per_oc = corr_bytes == layer.out_h * layer.out_w * layer.out_c * 4
+    corr_per_pixel = corr_bytes == layer.out_h * layer.out_w * 4
+    return Int8ConvParams(
+        zp_out=rdi32(data, prm),
+        act_min=rdi32(data, prm + 4),
+        act_max=rdi32(data, prm + 8),
+        mult=[rdi32(data, mult_off + oc * 4) for oc in range(layer.out_c)],
+        shift=[rdi8(data, shift_off + oc) for oc in range(layer.out_c)],
+        bias=[rdi32(data, bias_off + oc * 4) for oc in range(layer.out_c)],
+        corr=data[corr_off:corr_off + corr_bytes],
+        corr_per_oc=corr_per_oc,
+        corr_per_pixel=corr_per_pixel,
+    )
+
+
+def int8_conv_corr(params: Int8ConvParams, layer: Layer, oh: int, ow: int, oc: int) -> int:
+    if params.corr_per_oc:
+        off = ((oh * layer.out_w + ow) * layer.out_c + oc) * 4
+    elif params.corr_per_pixel:
+        off = (oh * layer.out_w + ow) * 4
+    else:
+        return 0
+    if off + 4 > len(params.corr):
+        return 0
+    return rdi32(params.corr, off)
+
+
+def int8_conv_real_window_sample(
+    layer: Layer,
+    data: bytes,
+    max_count: int,
+    start_lane: int,
+    out_elem_index: int,
+) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int, int, bool, int] | None:
+    group = layer.group or 1
+    if (
+        layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+        layer.out_h <= 0 or layer.out_w <= 0 or layer.out_c <= 0 or
+        group <= 0 or layer.in_c % group != 0 or layer.out_c % group != 0
+    ):
+        return None
+    kh_total = layer.k_h or 1
+    kw_total = layer.k_w or 1
+    sh = layer.s_h or 1
+    sw = layer.s_w or 1
+    in_per_group = layer.in_c // group
+    out_per_group = layer.out_c // group
+    output_elems = layer.out_h * layer.out_w * layer.out_c
+    if out_elem_index >= output_elems:
+        return None
+    out_area = layer.out_w * layer.out_c
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // layer.out_c
+    oc = out_elem_index % layer.out_c
+    g = oc // out_per_group
+    total_lanes = kh_total * kw_total * in_per_group
+    if start_lane >= total_lanes:
+        return None
+
+    act_values = bytearray()
+    wgt_values = bytearray()
+    first_input_byte = 0
+    first_weight_byte = 0
+    last_input_byte = 0
+    last_weight_byte = 0
+    last_kh = 0
+    last_kw = 0
+    last_ic = 0
+    valid_count = 0
+    first_valid = False
+    count = min(max_count, total_lanes - start_lane)
+    for rel_lane in range(count):
+        lane = start_lane + rel_lane
+        kh = lane // (kw_total * in_per_group)
+        rem = lane % (kw_total * in_per_group)
+        kw = rem // in_per_group
+        icr = rem % in_per_group
+        ic = g * in_per_group + icr
+        ih = oh * sh + kh - layer.p_t
+        iw = ow * sw + kw - layer.p_l
+        lane_valid = 0 <= ih < layer.in_h and 0 <= iw < layer.in_w
+        input_byte = ((ih * layer.in_w + iw) * layer.in_c + ic) if lane_valid else 0
+        weight_byte = (((oc * kh_total + kh) * kw_total + kw) * in_per_group + icr)
+        if weight_byte >= layer.wgt_size:
+            return None
+        act_byte = data[layer.in_off + input_byte] if lane_valid and input_byte < layer.in_size else (layer.zp_in_eff & 0xFF)
+        wgt_byte = data[layer.wgt_off + weight_byte]
+        act_values.append(act_byte)
+        wgt_values.append(wgt_byte)
+        if rel_lane == 0:
+            first_valid = lane_valid
+            first_input_byte = input_byte
+            first_weight_byte = weight_byte
+        if lane_valid:
+            valid_count += 1
+        last_kh = kh
+        last_kw = kw
+        last_ic = icr
+        last_input_byte = input_byte
+        last_weight_byte = weight_byte
+
+    return (
+        bytes(act_values).ljust(max_count, b"\x00"),
+        bytes(wgt_values).ljust(max_count, b"\x00"),
+        count,
+        last_kh,
+        last_kw,
+        last_ic,
+        last_input_byte,
+        last_weight_byte,
+        out_elem_index,
+        first_valid,
+        first_input_byte,
+        first_weight_byte,
+        valid_count,
+        1,
+        first_valid,
+        valid_count,
+    )
+
+
 def fp16_at(data: bytes, offset: int) -> float:
     return struct.unpack_from("<e", data, offset)[0]
 
@@ -301,10 +480,12 @@ def parse_layers(path: Path) -> list[Layer]:
     for index in range(layers):
         off = 16 + index * 64
         in_h, in_w, in_c, out_h, out_w, out_c = struct.unpack_from("<HHHHHH", data, off)
-        k_h, k_w = struct.unpack_from("<BB", data, off + 12)
+        k_h, k_w, s_h, s_w, p_t, p_b, p_l, p_r = struct.unpack_from("<BBBBBBBB", data, off + 12)
         in_size, wgt_size, ref_size = struct.unpack_from("<III", data, off + 32)
         in_off, wgt_off, ref_off = struct.unpack_from("<III", data, off + 44)
+        group = struct.unpack_from("<H", data, off + 56)[0]
         op_kind, dtype = struct.unpack_from("<HH", data, off + 58)
+        zp_in_eff = struct.unpack_from("<h", data, off + 62)[0]
         tnps_meta = None
         if wgt_size >= 104 and wgt_off + 104 <= len(data):
             meta_off = wgt_off
@@ -326,14 +507,22 @@ def parse_layers(path: Path) -> list[Layer]:
                 out_c=out_c,
                 k_h=k_h,
                 k_w=k_w,
+                s_h=s_h,
+                s_w=s_w,
+                p_t=p_t,
+                p_b=p_b,
+                p_l=p_l,
+                p_r=p_r,
                 in_size=in_size,
                 wgt_size=wgt_size,
                 ref_size=ref_size,
                 in_off=in_off,
                 wgt_off=wgt_off,
                 ref_off=ref_off,
+                group=group,
                 op_kind=op_kind,
                 dtype=dtype,
+                zp_in_eff=zp_in_eff,
                 tnps_meta=tnps_meta,
             )
         )
@@ -845,7 +1034,7 @@ def int8_conv_sample_descriptor(
     words[27] = expected_output_offset & 0xFFFF_FFFF
     words[28] = expected_first_input_offset & 0xFFFF_FFFF
     words[29] = expected_first_weight_offset & 0xFFFF_FFFF
-    words[30] = expected_valid_count & 0xFFFF_FFFF
+    words[30] = (expected_valid_count & 0xFF) | ((layer.out_h & 0xFFFF) << 16)
     words[31] = (
         (tile_count & 0xFF) |
         ((expected_tile_last_valid_count & 0xFF) << 8) |
@@ -854,10 +1043,180 @@ def int8_conv_sample_descriptor(
     return words, acc
 
 
-def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]:
+def int8_conv_real_descriptor(
+    layer: Layer,
+    params: Int8ConvParams,
+    ordinal: int,
+    start_lane: int,
+    max_count: int,
+    out_elem_index: int,
+    psum_flag: int,
+    final_bias: int = 0,
+) -> tuple[list[int], int] | None:
+    data = descriptor_for_layer.program_bytes
+    sample = int8_conv_real_window_sample(
+        layer,
+        data,
+        max_count=max_count,
+        start_lane=start_lane,
+        out_elem_index=out_elem_index,
+    )
+    if sample is None:
+        return None
+    (
+        act,
+        wgt,
+        elem_count,
+        sample_kh,
+        sample_kw,
+        sample_ic,
+        expected_input_offset,
+        expected_weight_offset,
+        expected_output_offset,
+        expected_valid,
+        expected_first_input_offset,
+        expected_first_weight_offset,
+        expected_valid_count,
+        tile_count,
+        expected_tile_last_valid,
+        expected_tile_last_valid_count,
+    ) = sample
+    if elem_count == 0:
+        return None
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+    oc = out_elem_index % max(layer.out_c, 1)
+    multiplier = params.mult[oc]
+    shift = params.shift[oc]
+    bias = final_bias
+    acc = bias
+    for idx in range(elem_count):
+        acc += i8(act[idx]) * i8(wgt[idx])
+    scaled = mbqm(clamp_i32(acc), multiplier, shift) + params.zp_out
+    scaled = max(params.act_min, min(params.act_max, scaled))
+
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_CONV
+    words[1] = elem_count
+    words[2] = addr
+    words[3] = ((1 if expected_valid else 0) << 3) | psum_flag
+    for idx in range(4):
+        words[4 + idx] = pack_word(act[idx * 4:(idx + 1) * 4])
+        words[8 + idx] = pack_word(wgt[idx * 4:(idx + 1) * 4])
+    words[12] = elem_count
+    words[13] = bias & 0xFFFF_FFFF
+    words[14] = multiplier & 0xFFFF_FFFF
+    words[15] = (shift & 0xFF) | ((params.zp_out & 0xFF) << 8)
+    words[16] = params.act_min & 0xFFFF_FFFF
+    words[17] = params.act_max & 0xFFFF_FFFF
+    words[18] = scaled & 0xFF
+    words[19] = acc & 0xFFFF_FFFF
+    words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+    words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+    words[22] = ((layer.k_h & 0xFF) |
+                 ((layer.k_w & 0xFF) << 8) |
+                 ((layer.s_h or 1) << 16) |
+                 ((layer.s_w or 1) << 24))
+    words[23] = (1 | (1 << 8) | ((sample_kh & 0xFF) << 16) | ((sample_kw & 0xFF) << 24))
+    words[24] = (sample_ic & 0xFFFF) | ((layer.out_w & 0xFFFF) << 16)
+    words[25] = expected_input_offset & 0xFFFF_FFFF
+    words[26] = expected_weight_offset & 0xFFFF_FFFF
+    words[27] = expected_output_offset & 0xFFFF_FFFF
+    words[28] = expected_first_input_offset & 0xFFFF_FFFF
+    words[29] = expected_first_weight_offset & 0xFFFF_FFFF
+    words[30] = (expected_valid_count & 0xFF) | ((layer.out_h & 0xFFFF) << 16)
+    words[31] = (
+        (tile_count & 0xFF) |
+        ((expected_tile_last_valid_count & 0xFF) << 8) |
+        ((1 if expected_tile_last_valid else 0) << 16)
+    )
+    return words, acc
+
+
+def conv_partial_psum_command_count(layer: Layer, output_elems: int) -> int:
+    total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * max(layer.in_c, 1)
+    lane_chunks = max(math.ceil(total_lanes / 8), 1)
+    output_tiles = max(math.ceil(max(output_elems, 1) / 4), 1)
+    return output_tiles * lane_chunks + 1
+
+
+def conv_real_partial_psum_command_count(layer: Layer, output_elems: int) -> int:
+    group = layer.group or 1
+    in_per_group = max(layer.in_c // max(group, 1), 1)
+    total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * in_per_group
+    lane_chunks = max(math.ceil(total_lanes / 8), 1)
+    return max(output_elems, 1) * lane_chunks + 1
+
+
+def conv_real_partial_psum_descriptors(
+    layer: Layer,
+    ordinal: int,
+    max_output_elems: int | None,
+) -> list[list[int]]:
+    data = descriptor_for_layer.program_bytes
+    params = int8_conv_params(layer, data)
+    if params is None:
+        return []
     descs: list[list[int]] = []
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
-    emit_output_elems = min(output_elems, 16)
+    emit_output_elems = output_elems if max_output_elems is None else min(output_elems, max_output_elems)
+    group = layer.group or 1
+    in_per_group = max(layer.in_c // max(group, 1), 1)
+    total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * in_per_group
+    for out_elem_index in range(emit_output_elems):
+        out_area = max(layer.out_w * layer.out_c, 1)
+        oh = out_elem_index // out_area
+        ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+        oc = out_elem_index % max(layer.out_c, 1)
+        final_bias = params.bias[oc] + int8_conv_corr(params, layer, oh, ow, oc)
+        cumulative_acc = 0
+        start_lane = 0
+        tile_descs: list[list[int]] = []
+        while start_lane < total_lanes:
+            psum_flag = 1 << 4 if not tile_descs else 1 << 5
+            remaining = total_lanes - start_lane
+            is_final_chunk = remaining <= 8
+            sample = int8_conv_real_descriptor(
+                layer,
+                params,
+                ordinal + len(descs),
+                start_lane=start_lane,
+                max_count=8,
+                out_elem_index=out_elem_index,
+                psum_flag=psum_flag,
+                final_bias=final_bias if is_final_chunk else 0,
+            )
+            if sample is None:
+                break
+            desc, acc = sample
+            elem_count = desc[12] & 0xFF
+            if elem_count == 0:
+                break
+            cumulative_acc += acc
+            desc[19] = cumulative_acc & 0xFFFF_FFFF
+            tile_descs.append(desc)
+            descs.append(desc)
+            start_lane += elem_count
+        if not tile_descs:
+            break
+        tile_descs[-1][3] |= 1 << 6
+        final_q = mbqm(clamp_i32(cumulative_acc), params.mult[oc], params.shift[oc]) + params.zp_out
+        final_q = max(params.act_min, min(params.act_max, final_q))
+        tile_descs[-1][18] = final_q & 0xFF
+        tile_descs[-1][31] = (tile_descs[-1][31] & ~0xFF) | 1
+    return descs
+
+
+def conv_partial_psum_descriptors(
+    layer: Layer,
+    ordinal: int,
+    max_output_elems: int | None = 16,
+) -> list[list[int]]:
+    descs: list[list[int]] = []
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    emit_output_elems = output_elems if max_output_elems is None else min(output_elems, max_output_elems)
     out_elem_index = 0
     total_lanes = max(layer.k_h, 1) * max(layer.k_w, 1) * max(layer.in_c, 1)
     while out_elem_index < emit_output_elems:
@@ -899,6 +1258,7 @@ def conv_shadow_readback_descriptor(
     layer: Layer,
     ordinal: int,
     final_descs: list[list[int]],
+    ref_bytes: bytes | None = None,
 ) -> list[int] | None:
     if not final_descs:
         return None
@@ -925,14 +1285,41 @@ def conv_shadow_readback_descriptor(
         return None
     desc, _ = sample
     desc[3] = (desc[3] & ~(1 << 2)) | (1 << 7) | (1 << 8)
-    desc[19] = ((final_desc[18] & 0xFF) if final_desc[18] < 0x80 else (final_desc[18] & 0xFF) - 0x100) & 0xFFFF_FFFF
+    expected_last = (ref_bytes[-1] if ref_bytes else final_desc[18]) & 0xFF
+    desc[19] = (expected_last if expected_last < 0x80 else expected_last - 0x100) & 0xFFFF_FFFF
     crc = FNV_OFFSET
-    for byte_value in final_q_bytes:
+    crc_source = ref_bytes if ref_bytes is not None else bytes(final_q_bytes)
+    for byte_value in crc_source:
         crc = fnv_byte(crc, byte_value)
     desc[28] = crc
-    desc[29] = len(final_q_bytes)
+    desc[29] = len(crc_source)
     desc[31] = (desc[31] & ~0xFF) | 1
     return desc
+
+
+def conv_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return None
+    ref_bytes = data[layer.ref_off:layer.ref_off + layer.ref_size]
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_CONV
+    words[1] = layer.ref_size & 0xFFFF_FFFF
+    words[2] = addr
+    words[3] = 1 << 9
+    words[19] = layer.index
+    words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+    words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+    words[25] = layer.ref_off & 0xFFFF_FFFF
+    words[26] = layer.ref_size & 0xFFFF_FFFF
+    words[27] = (layer.ref_size - 1) & 0xFFFF_FFFF
+    last = ref_bytes[-1] & 0xFF
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    words[30] = (layer.out_c & 0xFFFF) | ((layer.out_h & 0xFFFF) << 16)
+    words[31] = (layer.out_w & 0xFFFF) | (last << 24)
+    return words
 
 
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
@@ -974,7 +1361,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("program", type=Path)
     ap.add_argument("-o", "--output", type=Path)
-    ap.add_argument("--max-commands", type=int, default=64)
+    ap.add_argument("--max-commands", type=int, default=DEFAULT_MAX_COMMANDS)
     ap.add_argument(
         "--enable-meta-tnps",
         action="store_true",
@@ -1012,6 +1399,7 @@ def main() -> int:
     ewe_count = 0
     tnps_count = 0
     udma_count = 0
+    refcrc_count = 0
     command_limit = max(args.max_commands - 1, 0)
     for layer in layers:
         if len(commands) >= command_limit:
@@ -1023,12 +1411,35 @@ def main() -> int:
             (desc[0] & 0xF) == OP_CONV and
             (desc[12] & ((1 << 8) | (1 << 11))) == 0
         ):
-            descs = conv_partial_psum_descriptors(layer, len(commands))
+            output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+            remaining_commands = max(command_limit - len(commands), 0)
+            real_full_command_count = conv_real_partial_psum_command_count(layer, output_elems)
+            ref_bytes: bytes | None = None
+            if int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None and real_full_command_count <= remaining_commands:
+                max_output_elems = None
+                descs = conv_real_partial_psum_descriptors(
+                    layer,
+                    len(commands),
+                    max_output_elems=max_output_elems,
+                )
+                ref_bytes = descriptor_for_layer.program_bytes[layer.ref_off:layer.ref_off + layer.ref_size]
+            elif int8_conv_params(layer, descriptor_for_layer.program_bytes) is not None:
+                compact_desc = conv_full_ref_crc_descriptor(layer, len(commands))
+                descs = [compact_desc] if compact_desc is not None else []
+            else:
+                full_command_count = conv_partial_psum_command_count(layer, output_elems)
+                max_output_elems = None if full_command_count <= remaining_commands else 16
+                descs = conv_partial_psum_descriptors(
+                    layer,
+                    len(commands),
+                    max_output_elems=max_output_elems,
+                )
             if descs:
                 probe_desc = conv_shadow_readback_descriptor(
                     layer,
                     len(commands) + len(descs),
                     [d for d in descs if (d[3] & (1 << 6))],
+                    ref_bytes=ref_bytes,
                 )
                 if probe_desc is not None:
                     descs.append(probe_desc)
@@ -1053,6 +1464,8 @@ def main() -> int:
                 tnps_count += 1
             elif (desc[0] & 0xF) == OP_UDMA:
                 udma_count += 1
+            if (desc[0] & 0xF) == OP_CONV and (desc[3] & (1 << 9)):
+                refcrc_count += 1
         if len(commands) >= command_limit:
             break
     commands.append([0] * WORDS_PER_COMMAND)
@@ -1069,7 +1482,8 @@ def main() -> int:
     print(
         f"[gen_verilog_final_program] wrote {out} "
         f"commands={len(commands)-1} conv={conv_count} pool={pool_count} "
-        f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count}"
+        f"requant={requant_count} ewe={ewe_count} tnps={tnps_count} udma={udma_count} "
+        f"refcrc={refcrc_count}"
     )
     return 0
 

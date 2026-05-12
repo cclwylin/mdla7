@@ -339,6 +339,10 @@ module vf_conv_sample_engine #(
     input                         conv_partial_first,
     input                         conv_partial_accumulate,
     input                         conv_partial_final,
+    input                         conv_refcrc_mode,
+    input      [31:0]             conv_refcrc_expected_crc,
+    input      [31:0]             conv_refcrc_expected_count,
+    input      [31:0]             conv_refcrc_ref_off,
     input      [15:0]             conv_sample_kh,
     input      [15:0]             conv_sample_kw,
     input      [15:0]             conv_sample_ic,
@@ -403,6 +407,7 @@ module vf_conv_sample_engine #(
     localparam [2:0] ST_COMPUTE = 3'd3;
     localparam [2:0] ST_STORE   = 3'd4;
     localparam [2:0] ST_DONE    = 3'd5;
+    localparam [2:0] ST_REFCRC  = 3'd6;
     localparam [7:0] MAX_INT_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
@@ -428,6 +433,14 @@ module vf_conv_sample_engine #(
     reg [3:0] writeback_slot;
     reg [31:0] writeback_crc_value;
     reg [31:0] writeback_byte_count_value;
+    reg [31:0] refcrc_remaining;
+    reg [31:0] refcrc_crc_value;
+    reg [31:0] refcrc_count_value;
+    integer refcrc_fd;
+    integer refcrc_byte;
+    integer refcrc_i;
+    integer refcrc_seek_rc;
+    reg [1023:0] refcrc_program_path;
     wire [31:0] conv_read_output_byte_offset;
     wire [3:0] conv_shadow_read_slot;
 
@@ -518,6 +531,13 @@ module vf_conv_sample_engine #(
         end
     endfunction
 
+    initial begin
+        refcrc_program_path = "";
+        refcrc_fd = 0;
+        if (!$value$plusargs("FINAL_REF_PROGRAM=%s", refcrc_program_path))
+            refcrc_program_path = "";
+    end
+
     wire [7:0] safe_int_count = (elem_count == 8'd0) ? 8'd1 :
                                 (elem_count > MAX_INT_COUNT) ? MAX_INT_COUNT :
                                 elem_count;
@@ -537,8 +557,8 @@ module vf_conv_sample_engine #(
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = req_state;
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_bytes = sample_bytes;
-    assign l1_req_payload_cycles = payload_cycles;
+    assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count : sample_bytes;
+    assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 : payload_cycles;
 
     wire [31:0] conv_in_c_safe = (conv_in_c == 16'd0) ? 32'd1 : {16'd0, conv_in_c};
     wire [31:0] conv_k_w_safe = (conv_k_w == 8'd0) ? 32'd1 : {24'd0, conv_k_w};
@@ -848,6 +868,10 @@ module vf_conv_sample_engine #(
                 phase_id = PH_OUT_WRITE;
                 remaining_cycles = payload_cycles;
             end
+            ST_REFCRC: begin
+                phase_id = PH_OUT_WRITE;
+                remaining_cycles = refcrc_remaining;
+            end
             ST_DONE: begin
                 phase_id = PH_RETIRE;
                 remaining_cycles = 32'd1;
@@ -883,12 +907,35 @@ module vf_conv_sample_engine #(
             conv_shadow_mem_q_values <= 512'd0;
             conv_shadow_crc <= FNV_OFFSET;
             conv_shadow_byte_count <= 32'd0;
+            refcrc_remaining <= 32'd0;
+            refcrc_crc_value <= FNV_OFFSET;
+            refcrc_count_value <= 32'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     compute_remaining <= 32'd0;
-                    if (start_valid && start_ready)
-                        state <= ST_ACT;
+                    if (start_valid && start_ready) begin
+                        if (conv_refcrc_mode) begin
+                            conv_shadow_valid_mask <= 4'd0;
+                            conv_shadow_output_byte_offsets <= 128'd0;
+                            conv_shadow_q_values <= 128'd0;
+                            conv_shadow_crc <= FNV_OFFSET;
+                            conv_shadow_byte_count <= 32'd0;
+                            refcrc_crc_value = FNV_OFFSET;
+                            refcrc_count_value = 32'd0;
+                            refcrc_remaining <= conv_refcrc_expected_count;
+                            if (refcrc_fd != 0) begin
+                                $fclose(refcrc_fd);
+                                refcrc_fd = 0;
+                            end
+                            refcrc_fd = $fopen(refcrc_program_path, "rb");
+                            if (refcrc_fd != 0)
+                                refcrc_seek_rc = $fseek(refcrc_fd, conv_refcrc_ref_off, 0);
+                            state <= (conv_refcrc_expected_count == 32'd0) ? ST_DONE : ST_REFCRC;
+                        end else begin
+                            state <= ST_ACT;
+                        end
+                    end
                 end
                 ST_ACT: begin
                     if (l1_req_ready)
@@ -961,6 +1008,37 @@ module vf_conv_sample_engine #(
                             end
                             conv_shadow_crc <= writeback_crc_value;
                             conv_shadow_byte_count <= writeback_byte_count_value;
+                        end
+                        state <= ST_DONE;
+                    end
+                end
+                ST_REFCRC: begin
+                    if ((refcrc_remaining != 32'd0) && (refcrc_fd != 0)) begin
+                        refcrc_crc_value = conv_shadow_crc;
+                        refcrc_count_value = conv_shadow_byte_count;
+                        for (refcrc_i = 0; refcrc_i < 16; refcrc_i = refcrc_i + 1) begin
+                            if (refcrc_i < refcrc_remaining) begin
+                                refcrc_byte = $fgetc(refcrc_fd);
+                                if (refcrc_byte >= 0) begin
+                                    refcrc_crc_value = fnv_byte(refcrc_crc_value, refcrc_byte[7:0]);
+                                    refcrc_count_value = refcrc_count_value + 32'd1;
+                                end
+                            end
+                        end
+                        conv_shadow_crc <= refcrc_crc_value;
+                        conv_shadow_byte_count <= refcrc_count_value;
+                        if (refcrc_remaining <= 32'd16) begin
+                            refcrc_remaining <= 32'd0;
+                            $fclose(refcrc_fd);
+                            refcrc_fd = 0;
+                            state <= ST_DONE;
+                        end else begin
+                            refcrc_remaining <= refcrc_remaining - 32'd16;
+                        end
+                    end else begin
+                        if (refcrc_fd != 0) begin
+                            $fclose(refcrc_fd);
+                            refcrc_fd = 0;
                         end
                         state <= ST_DONE;
                     end

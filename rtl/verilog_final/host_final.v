@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 
 module host_final #(
-    parameter MAX_COMMANDS = 64
+    parameter MAX_COMMANDS = 4096
 ) (
     input              clk,
     input              rst_n,
@@ -60,6 +60,10 @@ module host_final #(
     output reg         conv_partial_first,
     output reg         conv_partial_accumulate,
     output reg         conv_partial_final,
+    output reg         conv_refcrc_mode,
+    output reg [31:0]  conv_refcrc_expected_crc,
+    output reg [31:0]  conv_refcrc_expected_count,
+    output reg [31:0]  conv_refcrc_ref_off,
     output reg [15:0]  conv_sample_kh,
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
@@ -229,7 +233,7 @@ module host_final #(
             conv_in_h <= cmd_mem[base + 20][15:0];
             conv_in_w <= cmd_mem[base + 20][31:16];
             conv_in_c <= cmd_mem[base + 21][15:0];
-            conv_out_h <= 16'd1;
+            conv_out_h <= (cmd_mem[base + 30][31:16] == 16'd0) ? 16'd1 : cmd_mem[base + 30][31:16];
             conv_out_w <= (cmd_mem[base + 24][31:16] == 16'd0) ? 16'd1 : cmd_mem[base + 24][31:16];
             conv_out_c <= cmd_mem[base + 21][31:16];
             conv_k_h <= cmd_mem[base + 22][7:0];
@@ -246,6 +250,10 @@ module host_final #(
             conv_partial_first <= cmd_mem[base + 3][4];
             conv_partial_accumulate <= cmd_mem[base + 3][5];
             conv_partial_final <= cmd_mem[base + 3][6];
+            conv_refcrc_mode <= cmd_mem[base + 3][9];
+            conv_refcrc_expected_crc <= cmd_mem[base + 28];
+            conv_refcrc_expected_count <= cmd_mem[base + 29];
+            conv_refcrc_ref_off <= cmd_mem[base + 25];
             conv_sample_kh <= {8'd0, cmd_mem[base + 23][23:16]};
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
@@ -485,6 +493,10 @@ module host_final #(
             conv_partial_first <= 1'b0;
             conv_partial_accumulate <= 1'b0;
             conv_partial_final <= 1'b0;
+            conv_refcrc_mode <= 1'b0;
+            conv_refcrc_expected_crc <= 32'd0;
+            conv_refcrc_expected_count <= 32'd0;
+            conv_refcrc_ref_off <= 32'd0;
             conv_sample_kh <= 16'd0;
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;
@@ -557,6 +569,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][6] &&
                             (conv_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_FINAL_FAIL: CONV sample cmd=%0d acc=%0d scaled=%0d out=%0d expected=%0d",
@@ -565,6 +578,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             cmd_mem[base + 3][2] &&
                             ((conv_sample_input_valid !== cmd_mem[base + 3][3]) ||
                              (conv_sample_input_byte_offset !== cmd_mem[base + 25]) ||
@@ -621,6 +635,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             cmd_mem[base + 3][2] &&
                             (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) &&
                             ((conv_psum_valid_mask !== expected_conv_tile_valid_mask) ||
@@ -639,6 +654,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             cmd_mem[base + 3][7] &&
                             (!conv_shadow_read_valid ||
                              (conv_shadow_read_output_byte_offset !== cmd_mem[base + 27]) ||
@@ -653,6 +669,7 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             cmd_mem[base + 3][8] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]))) begin
@@ -665,6 +682,22 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            cmd_mem[base + 3][9] &&
+                            ((conv_shadow_crc !== cmd_mem[base + 28]) ||
+                             (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
+                             (cmd_mem[base + 1] !== cmd_mem[base + 29]) ||
+                             (cmd_mem[base + 29] == 32'd0))) begin
+                            $display("HOST_FINAL_FAIL: CONV compact refcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d desc_bytes=%0d",
+                                     command_index,
+                                     conv_shadow_crc,
+                                     cmd_mem[base + 28],
+                                     conv_shadow_byte_count,
+                                     cmd_mem[base + 29],
+                                     cmd_mem[base + 1]);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            !cmd_mem[base + 3][9] &&
                             cmd_mem[base + 3][2] && cmd_mem[base + 3][6] &&
                             ((conv_writeback_valid_mask !== expected_conv_tile_valid_mask) ||
                              (conv_writeback_output_byte_offsets[31:0] !== cmd_mem[base + 27]) ||
