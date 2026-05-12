@@ -66,8 +66,8 @@ Also present from previous steps:
 Compile / static checks:
 
 ```bash
-python3 -m py_compile rtl/batch/gen_verilog_program.py rtl/batch/run_verilog.py
-git diff --check -- rtl/verilog rtl/batch/run_verilog.py rtl/batch/gen_verilog_program.py
+python3 -m py_compile batch/gen_verilog_program.py batch/run_verilog.py
+git diff --check -- rtl/verilog batch/run_verilog.py batch/gen_verilog_program.py
 ```
 
 Both passed.
@@ -75,7 +75,7 @@ Both passed.
 UDMA DRAM-to-L1 smoke:
 
 ```bash
-./rtl/batch/run_verilog_smoke.py --test host \
+./batch/run_verilog_smoke.py --test host \
   --program rtl/obj/verilog/programs/udma_dram_to_l1_smoke.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin --no-build
 ```
@@ -89,7 +89,7 @@ PASS: verilog host-driven ... issued=2 done=2 verilog_cycles=87
 UDMA DRAM -> L1 -> DRAM -> L1 roundtrip smoke:
 
 ```bash
-./rtl/batch/run_verilog_smoke.py --test host \
+./batch/run_verilog_smoke.py --test host \
   --program rtl/obj/verilog/programs/udma_dram_l1_store_roundtrip.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
 ```
@@ -111,6 +111,37 @@ Target verilog dataflow:
 ```text
 DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
 ```
+
+## Verilog Unfinished Items
+
+1. CONV still bypasses L1Manager arbitration.
+   - `mdla7_top.v` currently selects `run_conv ? conv_l1_req_* : l1mgr_*`.
+   - Next step is to route CONV L1 traffic through L1Manager like UDMA,
+     REQUANT, POOL, EWE, and TNPS.
+
+2. Several datapaths are still sample / bounded traversal paths.
+   - POOL / EWE / TNPS / CONV have real Verilog primitives, but not every
+     layer runs full tensor traversal.
+   - Large tensors may still use windowed, sample, or bounded descriptors.
+
+3. FP datapath is not yet full silicon-like traversal.
+   - FP CONV / POOL / EWE samples exist.
+   - Full FP tensor datapath still needs to be expanded.
+
+4. `common.v` still contains the DPI CRC helper.
+   - `mdla7_true_datapath` uses Verilator DPI-C under non-synthesis builds.
+   - This should be isolated or removed from the final pure synthable Verilog
+     path so it cannot be mistaken for hardware datapath.
+
+5. Cycle performance is not yet naturally aligned with `cx`.
+   - `run_verilog.py` reports `synth_cycles` and `verilog_cycles`.
+   - Closed-loop load / compute / store / reload / check timing still needs
+     calibration against the `cx` model without relying on debug padding.
+
+6. CRC coverage gates are not default strict enough.
+   - Default `verilog` regression can still pass with zero `refB/sramB`.
+   - Use `--crc-coverage --require-crc-coverage` when a regression must prove
+     datapath bytes were actually checked.
 
 ## Next Step
 
@@ -143,16 +174,16 @@ DRAM -> UDMA -> L1 -> CONV/TNPS/POOL/EWE -> L1 -> UDMA -> DRAM
 - `rtl/verilog/route.v`
 - `rtl/verilog/host.v`
 - `rtl/verilog/Testbench_top_byte_movers.v`
-- `rtl/batch/gen_verilog_program.py`
-- `rtl/batch/run_verilog.py`
-- `rtl/batch/run_verilog_smoke.py`
+- `batch/gen_verilog_program.py`
+- `batch/run_verilog.py`
+- `batch/run_verilog_smoke.py`
 
 ## Commands
 
 Run verilog smoke:
 
 ```bash
-./rtl/batch/run_verilog_smoke.py --test host \
+./batch/run_verilog_smoke.py --test host \
   --program rtl/obj/verilog/programs/udma_dram_l1_store_roundtrip.verilog.hex \
   --ref-program rtl/bin/ETHZ_v6_slice/resnet_quant_L1.bin
 ```
@@ -160,8 +191,8 @@ Run verilog smoke:
 Run regression:
 
 ```bash
-./rtl/batch/run_verilog.py --filter slice
-./rtl/batch/run_verilog.py --filter ethz
+./batch/run_verilog.py --filter slice
+./batch/run_verilog.py --filter ethz
 ```
 
 If Verilator output is stale:
