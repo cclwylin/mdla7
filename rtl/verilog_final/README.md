@@ -191,7 +191,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
@@ -224,9 +224,11 @@ first lane, last lane, valid lane count, and a small multi-output tile prefix
 of its descriptor-driven 2D NHWC/OHWI iterator and check those addresses
 alongside the sample MAC. The tile prefix also emits a 4-entry result buffer:
 valid mask, output element indices, output byte offsets, pre-requant
-accumulators, sample output values, and sample-output sum. This is the
-result-stream skeleton before full psum/writeback buffering.
+accumulators, sample output values, and sample-output sum. When CONV word 3 bit
+6 marks the final partial, the engine also exposes a 4-entry writeback skeleton:
+valid mask, output byte offsets, and output q values.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
-the host checks the cumulative accumulator through the result-buffer skeleton.
+the host checks the cumulative accumulator through the result-buffer skeleton
+and the writeback skeleton offsets/q values.

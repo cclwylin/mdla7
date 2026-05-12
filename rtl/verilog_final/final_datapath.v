@@ -373,6 +373,9 @@ module vf_conv_sample_engine #(
     output reg [127:0]            conv_tile_result_output_byte_offsets,
     output reg [127:0]            conv_tile_result_acc_values,
     output reg [127:0]            conv_tile_result_q_values,
+    output reg [3:0]              conv_writeback_valid_mask,
+    output reg [127:0]            conv_writeback_output_byte_offsets,
+    output reg [127:0]            conv_writeback_q_values,
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
@@ -671,6 +674,9 @@ module vf_conv_sample_engine #(
         conv_tile_result_output_byte_offsets = 128'd0;
         conv_tile_result_acc_values = 128'd0;
         conv_tile_result_q_values = 128'd0;
+        conv_writeback_valid_mask = 4'd0;
+        conv_writeback_output_byte_offsets = 128'd0;
+        conv_writeback_q_values = 128'd0;
         for (tile_i = 0; tile_i < 4; tile_i = tile_i + 1) begin
             tile_result_acc_value = 32'sd0;
             if (tile_i < scoreboard_tile_output_count) begin
@@ -689,6 +695,13 @@ module vf_conv_sample_engine #(
                 conv_tile_result_acc_values[tile_i*32 +: 32] = tile_result_acc_value;
                 conv_tile_result_q_values[tile_i*32 +: 32] =
                     {{24{out_q[7]}}, out_q};
+                if (conv_partial_final) begin
+                    conv_writeback_valid_mask[tile_i] = 1'b1;
+                    conv_writeback_output_byte_offsets[tile_i*32 +: 32] =
+                        conv_tile_result_output_byte_offsets[tile_i*32 +: 32];
+                    conv_writeback_q_values[tile_i*32 +: 32] =
+                        conv_tile_result_q_values[tile_i*32 +: 32];
+                end
             end
         end
         for (fp_i = 0; fp_i < (MAX_ELEMS/2); fp_i = fp_i + 1) begin
