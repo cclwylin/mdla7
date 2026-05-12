@@ -25,6 +25,12 @@ module Testbench_host_program;
     wire [1:0] tnps_elem_bytes;
     wire [31:0] tnps_sample_out_elem_index;
     wire [31:0] tnps_sample_in_elem_index;
+    wire tnps_final_write_mode;
+    wire tnps_sramcrc_mode;
+    wire [7:0] tnps_input_byte;
+    wire [31:0] tnps_out_byte_offset;
+    wire [31:0] tnps_sramcrc_expected_crc;
+    wire [31:0] tnps_sramcrc_expected_count;
     wire [127:0] conv_act_vec;
     wire [127:0] conv_wgt_vec;
     wire [7:0] conv_elem_count;
@@ -112,6 +118,8 @@ module Testbench_host_program;
     wire [31:0] tnps_sample_src_byte_offset;
     wire [31:0] tnps_sample_dst_byte_offset;
     wire tnps_sample_valid;
+    wire [31:0] tnps_sramcrc_crc;
+    wire [31:0] tnps_sramcrc_count;
     wire signed [31:0] conv_acc_out;
     wire signed [31:0] conv_scaled_out;
     wire signed [7:0] conv_out_q;
@@ -199,6 +207,12 @@ module Testbench_host_program;
         .tnps_elem_bytes(tnps_elem_bytes),
         .tnps_sample_out_elem_index(tnps_sample_out_elem_index),
         .tnps_sample_in_elem_index(tnps_sample_in_elem_index),
+        .tnps_final_write_mode(tnps_final_write_mode),
+        .tnps_sramcrc_mode(tnps_sramcrc_mode),
+        .tnps_input_byte(tnps_input_byte),
+        .tnps_out_byte_offset(tnps_out_byte_offset),
+        .tnps_sramcrc_expected_crc(tnps_sramcrc_expected_crc),
+        .tnps_sramcrc_expected_count(tnps_sramcrc_expected_count),
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
@@ -288,6 +302,8 @@ module Testbench_host_program;
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
+        .tnps_sramcrc_crc(tnps_sramcrc_crc),
+        .tnps_sramcrc_count(tnps_sramcrc_count),
         .conv_acc_out(conv_acc_out),
         .conv_scaled_out(conv_scaled_out),
         .conv_out_q(conv_out_q),
@@ -371,6 +387,11 @@ module Testbench_host_program;
         .tnps_elem_bytes(tnps_elem_bytes),
         .tnps_sample_out_elem_index(tnps_sample_out_elem_index),
         .tnps_sample_in_elem_index(tnps_sample_in_elem_index),
+        .tnps_final_write_mode(tnps_final_write_mode),
+        .tnps_sramcrc_mode(tnps_sramcrc_mode),
+        .tnps_input_byte(tnps_input_byte),
+        .tnps_out_byte_offset(tnps_out_byte_offset),
+        .tnps_sramcrc_expected_count(tnps_sramcrc_expected_count),
         .conv_act_vec(conv_act_vec),
         .conv_wgt_vec(conv_wgt_vec),
         .conv_elem_count(conv_elem_count),
@@ -456,6 +477,8 @@ module Testbench_host_program;
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
         .tnps_sample_dst_byte_offset(tnps_sample_dst_byte_offset),
         .tnps_sample_valid(tnps_sample_valid),
+        .tnps_sramcrc_crc(tnps_sramcrc_crc),
+        .tnps_sramcrc_count(tnps_sramcrc_count),
         .placement_route_cycles(placement_route_cycles),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),

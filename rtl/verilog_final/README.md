@@ -123,7 +123,9 @@ compact full-ref `refcrc` descriptor.
 Current converter behavior:
 
 - `SPACE_TO_DEPTH` / `DEPTH_TO_SPACE`: emitted as TNPS descriptors with sample
-  address checks against `vf_tnps_addrgen`.
+  address checks against `vf_tnps_addrgen`. With `--emit-conv-partial-psum`,
+  the generator also emits a validated output-byte prefix, writes it into the
+  TNPS output SRAM image, and checks that image with the SRAM CRC/count walker.
 - INT8 CONV op kinds `0/1/6`: emitted as CONV sample descriptors. The generator
   takes up to 16 activation bytes and 16 weight bytes from the `.bin`, computes
   the expected MBQM-clamped INT8 output, and `host_final.v` checks the Verilog
@@ -254,8 +256,8 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV/POOL final writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check, bit9 CONV/POOL ref CRC, bit10 CONV/REQUANT/POOL SRAM CRC |
-| 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV/POOL/TNPS final writeback, bit7 CONV shadow readback check, bit8 CONV shadow CRC/count check, bit9 CONV/POOL ref CRC, bit10 CONV/REQUANT/EWE/POOL/TNPS SRAM CRC |
+| 4..7 | CONV/POOL/EWE-A/TNPS sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
 | 13 | CONV bias or TNPS element bytes |

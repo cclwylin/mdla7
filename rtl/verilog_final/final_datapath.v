@@ -2281,6 +2281,11 @@ module vf_tnps_engine #(
     input      [1:0]  elem_bytes,
     input      [31:0] sample_out_elem_index,
     input      [31:0] sample_in_elem_index,
+    input             final_write_mode,
+    input             sramcrc_mode,
+    input      [7:0]  input_byte,
+    input      [31:0] out_byte_offset,
+    input      [31:0] sramcrc_expected_count,
     output            l1_req_valid,
     input             l1_req_ready,
     output            l1_req_write,
@@ -2293,19 +2298,32 @@ module vf_tnps_engine #(
     output     [31:0] remaining_cycles,
     output     [31:0] sample_src_byte_offset,
     output     [31:0] sample_dst_byte_offset,
-    output            sample_valid
+    output            sample_valid,
+    output reg [31:0] sramcrc_crc,
+    output reg [31:0] sramcrc_count
 );
     localparam [3:0] PH_CFG_DECODE    = 4'd1;
     localparam [3:0] PH_PAYLOAD_READ  = 4'd2;
     localparam [3:0] PH_PERMUTE_PIPE  = 4'd3;
     localparam [3:0] PH_PAYLOAD_WRITE = 4'd4;
     localparam [3:0] PH_RETIRE        = 4'd5;
+    localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
+    localparam [31:0] FNV_PRIME = 32'd16777619;
+    localparam integer MAX_TNPS_OUTPUT_SRAM_BYTES = 16777216;
 
     function [31:0] ceil_div;
         input [31:0] value;
         input [31:0] denom;
         begin
             ceil_div = (denom == 32'd0) ? 32'd0 : ((value + denom - 32'd1) / denom);
+        end
+    endfunction
+
+    function [31:0] fnv_byte;
+        input [31:0] crc;
+        input [7:0] byte_value;
+        begin
+            fnv_byte = (crc ^ {24'd0, byte_value}) * FNV_PRIME;
         end
     endfunction
 
@@ -2350,8 +2368,17 @@ module vf_tnps_engine #(
     wire payload_phase_active = busy &&
         ((phase_id == PH_PAYLOAD_READ) || (phase_id == PH_PAYLOAD_WRITE));
     reg payload_token_sent;
+    reg [31:0] sramcrc_remaining;
+    reg [31:0] sramcrc_index;
+    reg [31:0] sramcrc_crc_value;
+    reg [31:0] sramcrc_count_value;
+    reg [7:0] output_sram [0:MAX_TNPS_OUTPUT_SRAM_BYTES-1];
+    integer sramcrc_i;
     wire payload_token_fire = l1_req_valid && l1_req_ready;
     wire phase_stall = payload_phase_active && !payload_token_sent && !l1_req_ready;
+
+    wire sramcrc_active = sramcrc_mode && busy && (phase_id == PH_PERMUTE_PIPE);
+    wire final_write_active = final_write_mode && busy && (phase_id == PH_PAYLOAD_WRITE);
 
     assign l1_req_valid = payload_phase_active && !payload_token_sent;
     assign l1_req_write = (phase_id == PH_PAYLOAD_WRITE);
@@ -2369,6 +2396,45 @@ module vf_tnps_engine #(
             payload_token_sent <= 1'b1;
         else if (!payload_phase_active)
             payload_token_sent <= 1'b0;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sramcrc_crc <= FNV_OFFSET;
+            sramcrc_count <= 32'd0;
+            sramcrc_remaining <= 32'd0;
+            sramcrc_index <= 32'd0;
+        end else if (start_fire) begin
+            if (sramcrc_mode) begin
+                sramcrc_crc <= FNV_OFFSET;
+                sramcrc_count <= 32'd0;
+                sramcrc_remaining <= sramcrc_expected_count;
+                sramcrc_index <= out_byte_offset;
+            end
+        end else if (final_write_active && payload_token_fire) begin
+            if (out_byte_offset < MAX_TNPS_OUTPUT_SRAM_BYTES)
+                output_sram[out_byte_offset] <= input_byte;
+        end else if (sramcrc_active && (sramcrc_remaining != 32'd0)) begin
+            sramcrc_crc_value = sramcrc_crc;
+            sramcrc_count_value = sramcrc_count;
+            for (sramcrc_i = 0; sramcrc_i < 16; sramcrc_i = sramcrc_i + 1) begin
+                if ((sramcrc_i < sramcrc_remaining) &&
+                    ((sramcrc_index + sramcrc_i[31:0]) < MAX_TNPS_OUTPUT_SRAM_BYTES)) begin
+                    sramcrc_crc_value =
+                        fnv_byte(sramcrc_crc_value,
+                                 output_sram[sramcrc_index + sramcrc_i[31:0]]);
+                    sramcrc_count_value = sramcrc_count_value + 32'd1;
+                end
+            end
+            sramcrc_crc <= sramcrc_crc_value;
+            sramcrc_count <= sramcrc_count_value;
+            if (sramcrc_remaining <= 32'd16) begin
+                sramcrc_remaining <= 32'd0;
+            end else begin
+                sramcrc_remaining <= sramcrc_remaining - 32'd16;
+                sramcrc_index <= sramcrc_index + 32'd16;
+            end
+        end
     end
 
     mdla7_synth_phase_engine #(

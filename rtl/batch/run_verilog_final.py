@@ -243,6 +243,9 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
         count += 1
         if op == 5:
             tnps += 1
+            if words[off + 3] & (1 << 10):
+                sramcrc += 1
+                srambytes += words[off + 29]
         elif op == 6:
             udma += 1
         elif op == 1:

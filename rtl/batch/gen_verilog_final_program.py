@@ -571,6 +571,133 @@ def tnps_sample(layer: Layer) -> tuple[int, int, int, int, bool]:
     return 0, 0, 0, 0, False
 
 
+def tnps_output_source_byte_offset(layer: Layer, out_byte_index: int) -> int | None:
+    elem = elem_bytes(layer.dtype)
+    if elem <= 0 or out_byte_index < 0 or out_byte_index >= layer.ref_size:
+        return None
+    block = layer.k_h or layer.k_w or 1
+    out_elem = out_byte_index // elem
+    byte_lane = out_byte_index % elem
+    if layer.op_kind == OK_S2SPACE:
+        if (
+            layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+            layer.out_h <= 0 or layer.out_w <= 0 or layer.out_c <= 0 or
+            block <= 0 or layer.out_c != layer.in_c * block * block
+        ):
+            return None
+        out_area = layer.out_w * layer.out_c
+        oh = out_elem // out_area
+        rem = out_elem % out_area
+        ow = rem // layer.out_c
+        oc = rem % layer.out_c
+        q = oc // layer.in_c
+        ic = oc % layer.in_c
+        bh = q // block
+        bw = q % block
+        ih = oh * block + bh
+        iw = ow * block + bw
+        if ih >= layer.in_h or iw >= layer.in_w:
+            return None
+        src_elem = (ih * layer.in_w * layer.in_c) + (iw * layer.in_c) + ic
+        src_byte = src_elem * elem + byte_lane
+        return src_byte if src_byte < layer.in_size else None
+    if layer.op_kind == OK_D2SPACE:
+        if (
+            layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
+            layer.out_h <= 0 or layer.out_w <= 0 or layer.out_c <= 0 or
+            block <= 0 or layer.in_c != layer.out_c * block * block
+        ):
+            return None
+        out_area = layer.out_w * layer.out_c
+        oh = out_elem // out_area
+        rem = out_elem % out_area
+        ow = rem // layer.out_c
+        oc = rem % layer.out_c
+        ih = oh // block
+        iw = ow // block
+        bh = oh % block
+        bw = ow % block
+        q = bh * block + bw
+        ic = q * layer.out_c + oc
+        if ih >= layer.in_h or iw >= layer.in_w or ic >= layer.in_c:
+            return None
+        src_elem = (ih * layer.in_w * layer.in_c) + (iw * layer.in_c) + ic
+        src_byte = src_elem * elem + byte_lane
+        return src_byte if src_byte < layer.in_size else None
+    return None
+
+
+def tnps_output_descriptor(layer: Layer, ordinal: int, out_byte_index: int) -> list[int] | None:
+    data = descriptor_for_layer.program_bytes
+    src_byte = tnps_output_source_byte_offset(layer, out_byte_index)
+    if src_byte is None or layer.in_off + src_byte >= len(data):
+        return None
+    elem = elem_bytes(layer.dtype)
+    block = layer.k_h or layer.k_w or 1
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x28) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_TNPS
+    words[1] = 1
+    words[2] = addr
+    words[3] = (1 << 6) | (0x2 if layer.op_kind == OK_S2SPACE else 0x0)
+    words[4] = data[layer.in_off + src_byte]
+    words[6] = layer.in_h
+    words[7] = layer.in_w
+    words[8] = layer.in_c
+    words[9] = layer.out_h
+    words[10] = layer.out_w
+    words[11] = layer.out_c
+    words[12] = block
+    words[13] = elem
+    words[16] = src_byte & 0xFFFF_FFFF
+    words[17] = out_byte_index & 0xFFFF_FFFF
+    words[18] = 1
+    words[19] = layer.index
+    words[27] = out_byte_index & 0xFFFF_FFFF
+    return words
+
+
+def tnps_output_descriptors(layer: Layer, ordinal: int, max_output_bytes: int) -> list[list[int]]:
+    emit_bytes = min(max_output_bytes, layer.ref_size)
+    descs: list[list[int]] = []
+    for out_byte_index in range(emit_bytes):
+        desc = tnps_output_descriptor(layer, ordinal + len(descs), out_byte_index)
+        if desc is None:
+            break
+        descs.append(desc)
+    return descs
+
+
+def tnps_final_bytes(final_descs: list[list[int]]) -> bytes:
+    return bytes(desc[4] & 0xFF for desc in final_descs)
+
+
+def tnps_sramcrc_probe_descriptor(layer: Layer, ordinal: int, ref_bytes: bytes) -> list[int] | None:
+    if not ref_bytes:
+        return None
+    elem = elem_bytes(layer.dtype)
+    block = layer.k_h or layer.k_w or 1
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x28) & 0x3FFF0)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_TNPS
+    words[1] = max(1, len(ref_bytes) * 8)
+    words[2] = addr
+    words[3] = (1 << 10) | (0x2 if layer.op_kind == OK_S2SPACE else 0x0)
+    words[6] = layer.in_h
+    words[7] = layer.in_w
+    words[8] = layer.in_c
+    words[9] = layer.out_h
+    words[10] = layer.out_w
+    words[11] = layer.out_c
+    words[12] = block
+    words[13] = elem
+    words[19] = layer.index
+    words[27] = 0
+    words[28] = fnv_bytes(ref_bytes)
+    words[29] = len(ref_bytes)
+    return words
+
+
 def shape_product(shape: list[int], rank: int) -> int:
     prod = 1
     for value in shape[:rank]:
@@ -1949,6 +2076,28 @@ def main() -> int:
                     )
                     if ewe_probe_desc is not None:
                         descs.append(ewe_probe_desc)
+        if args.emit_conv_partial_psum and layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
+            remaining_commands = max(command_limit - len(commands) - len(descs), 0)
+            if layer.ref_size > 0 and remaining_commands > 2:
+                max_tnps_bytes = min(layer.ref_size, remaining_commands - 2, 512)
+                tnps_sram_descs = tnps_output_descriptors(
+                    layer,
+                    len(commands) + len(descs),
+                    max_output_bytes=max_tnps_bytes,
+                )
+                generated_tnps = tnps_final_bytes(tnps_sram_descs)
+                ref_tnps = descriptor_for_layer.program_bytes[
+                    layer.ref_off:layer.ref_off + min(len(generated_tnps), layer.ref_size)
+                ]
+                if generated_tnps and generated_tnps == ref_tnps:
+                    descs.extend(tnps_sram_descs)
+                    tnps_probe_desc = tnps_sramcrc_probe_descriptor(
+                        layer,
+                        len(commands) + len(descs),
+                        ref_tnps,
+                    )
+                    if tnps_probe_desc is not None:
+                        descs.append(tnps_probe_desc)
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
         if req_desc is not None:
             descs.append(req_desc)
@@ -1971,7 +2120,7 @@ def main() -> int:
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
                 refcrc_count += 1
                 refcrc_bytes += desc[29]
-            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL) and (desc[3] & (1 << 10)):
+            if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
         if len(commands) >= command_limit:

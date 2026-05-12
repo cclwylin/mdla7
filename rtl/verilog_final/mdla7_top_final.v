@@ -31,6 +31,11 @@ module mdla7_top_final #(
     input      [1:0]            tnps_elem_bytes,
     input      [31:0]           tnps_sample_out_elem_index,
     input      [31:0]           tnps_sample_in_elem_index,
+    input                       tnps_final_write_mode,
+    input                       tnps_sramcrc_mode,
+    input      [7:0]            tnps_input_byte,
+    input      [31:0]           tnps_out_byte_offset,
+    input      [31:0]           tnps_sramcrc_expected_count,
     input      [127:0]          conv_act_vec,
     input      [127:0]          conv_wgt_vec,
     input      [7:0]            conv_elem_count,
@@ -117,6 +122,8 @@ module mdla7_top_final #(
     output     [31:0]           tnps_sample_src_byte_offset,
     output     [31:0]           tnps_sample_dst_byte_offset,
     output                      tnps_sample_valid,
+    output     [31:0]           tnps_sramcrc_crc,
+    output     [31:0]           tnps_sramcrc_count,
     output     [31:0]           placement_route_cycles,
     output     [8:0]            block_busy,
     output     [8:0]            block_done_valid,
@@ -207,6 +214,11 @@ module mdla7_top_final #(
     reg [1:0] tnps_elem_bytes_q;
     reg [31:0] tnps_sample_out_elem_index_q;
     reg [31:0] tnps_sample_in_elem_index_q;
+    reg tnps_final_write_mode_q;
+    reg tnps_sramcrc_mode_q;
+    reg [7:0] tnps_input_byte_q;
+    reg [31:0] tnps_out_byte_offset_q;
+    reg [31:0] tnps_sramcrc_expected_count_q;
     reg [127:0] conv_act_vec_q;
     reg [127:0] conv_wgt_vec_q;
     reg [7:0] conv_elem_count_q;
@@ -697,6 +709,11 @@ module mdla7_top_final #(
         .elem_bytes(tnps_elem_bytes_q),
         .sample_out_elem_index(tnps_sample_out_elem_index_q),
         .sample_in_elem_index(tnps_sample_in_elem_index_q),
+        .final_write_mode(tnps_final_write_mode_q),
+        .sramcrc_mode(tnps_sramcrc_mode_q),
+        .input_byte(tnps_input_byte_q),
+        .out_byte_offset(tnps_out_byte_offset_q),
+        .sramcrc_expected_count(tnps_sramcrc_expected_count_q),
         .l1_req_valid(tnps_l1_req_valid),
         .l1_req_ready(tnps_l1_req_ready),
         .l1_req_write(tnps_l1_req_write),
@@ -709,7 +726,9 @@ module mdla7_top_final #(
         .remaining_cycles(tnps_remaining_cycles),
         .sample_src_byte_offset(tnps_sample_src_byte_offset),
         .sample_dst_byte_offset(tnps_sample_dst_byte_offset),
-        .sample_valid(tnps_sample_valid)
+        .sample_valid(tnps_sample_valid),
+        .sramcrc_crc(tnps_sramcrc_crc),
+        .sramcrc_count(tnps_sramcrc_count)
     );
 
     l1manager u_l1manager (
@@ -829,6 +848,11 @@ module mdla7_top_final #(
             tnps_elem_bytes_q <= 2'd1;
             tnps_sample_out_elem_index_q <= 32'd0;
             tnps_sample_in_elem_index_q <= 32'd0;
+            tnps_final_write_mode_q <= 1'b0;
+            tnps_sramcrc_mode_q <= 1'b0;
+            tnps_input_byte_q <= 8'd0;
+            tnps_out_byte_offset_q <= 32'd0;
+            tnps_sramcrc_expected_count_q <= 32'd0;
             conv_act_vec_q <= 128'd0;
             conv_wgt_vec_q <= 128'd0;
             conv_elem_count_q <= 8'd0;
@@ -929,6 +953,11 @@ module mdla7_top_final #(
                         tnps_elem_bytes_q <= tnps_elem_bytes;
                         tnps_sample_out_elem_index_q <= tnps_sample_out_elem_index;
                         tnps_sample_in_elem_index_q <= tnps_sample_in_elem_index;
+                        tnps_final_write_mode_q <= tnps_final_write_mode;
+                        tnps_sramcrc_mode_q <= tnps_sramcrc_mode;
+                        tnps_input_byte_q <= tnps_input_byte;
+                        tnps_out_byte_offset_q <= tnps_out_byte_offset;
+                        tnps_sramcrc_expected_count_q <= tnps_sramcrc_expected_count;
                         conv_act_vec_q <= conv_act_vec;
                         conv_wgt_vec_q <= conv_wgt_vec;
                         conv_elem_count_q <= conv_elem_count;

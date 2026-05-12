@@ -28,6 +28,12 @@ module host_final #(
     output reg [1:0]   tnps_elem_bytes,
     output reg [31:0]  tnps_sample_out_elem_index,
     output reg [31:0]  tnps_sample_in_elem_index,
+    output reg         tnps_final_write_mode,
+    output reg         tnps_sramcrc_mode,
+    output reg [7:0]   tnps_input_byte,
+    output reg [31:0]  tnps_out_byte_offset,
+    output reg [31:0]  tnps_sramcrc_expected_crc,
+    output reg [31:0]  tnps_sramcrc_expected_count,
     output reg [127:0] conv_act_vec,
     output reg [127:0] conv_wgt_vec,
     output reg [7:0]   conv_elem_count,
@@ -118,6 +124,8 @@ module host_final #(
     input      [31:0]  tnps_sample_src_byte_offset,
     input      [31:0]  tnps_sample_dst_byte_offset,
     input              tnps_sample_valid,
+    input      [31:0]  tnps_sramcrc_crc,
+    input      [31:0]  tnps_sramcrc_count,
     input signed [31:0] conv_acc_out,
     input signed [31:0] conv_scaled_out,
     input signed [7:0]  conv_out_q,
@@ -250,6 +258,12 @@ module host_final #(
             tnps_elem_bytes <= cmd_mem[base + 13][1:0];
             tnps_sample_out_elem_index <= cmd_mem[base + 14];
             tnps_sample_in_elem_index <= cmd_mem[base + 15];
+            tnps_final_write_mode <= cmd_mem[base + 3][6];
+            tnps_sramcrc_mode <= cmd_mem[base + 3][10];
+            tnps_input_byte <= cmd_mem[base + 4][7:0];
+            tnps_out_byte_offset <= cmd_mem[base + 27];
+            tnps_sramcrc_expected_crc <= cmd_mem[base + 28];
+            tnps_sramcrc_expected_count <= cmd_mem[base + 29];
             conv_act_vec <= {cmd_mem[base + 7], cmd_mem[base + 6],
                              cmd_mem[base + 5], cmd_mem[base + 4]};
             conv_wgt_vec <= {cmd_mem[base + 11], cmd_mem[base + 10],
@@ -523,6 +537,12 @@ module host_final #(
             tnps_elem_bytes <= 2'd1;
             tnps_sample_out_elem_index <= 32'd0;
             tnps_sample_in_elem_index <= 32'd0;
+            tnps_final_write_mode <= 1'b0;
+            tnps_sramcrc_mode <= 1'b0;
+            tnps_input_byte <= 8'd0;
+            tnps_out_byte_offset <= 32'd0;
+            tnps_sramcrc_expected_crc <= 32'd0;
+            tnps_sramcrc_expected_count <= 32'd0;
             conv_act_vec <= 128'd0;
             conv_wgt_vec <= 128'd0;
             conv_elem_count <= 8'd0;
@@ -929,7 +949,17 @@ module host_final #(
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_TNPS) &&
+                        if ((desc_op_class == OP_TNPS) && tnps_sramcrc_mode &&
+                            ((tnps_sramcrc_crc !== tnps_sramcrc_expected_crc) ||
+                             (tnps_sramcrc_count !== tnps_sramcrc_expected_count))) begin
+                            $display("HOST_FINAL_FAIL: TNPS sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
+                                     command_index, tnps_sramcrc_crc,
+                                     tnps_sramcrc_expected_crc,
+                                     tnps_sramcrc_count,
+                                     tnps_sramcrc_expected_count);
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_TNPS) && !tnps_sramcrc_mode && !tnps_final_write_mode &&
                             ((tnps_sample_valid != (cmd_mem[base + 18] != 32'd0)) ||
                              ((cmd_mem[base + 18] != 32'd0) &&
                               ((tnps_sample_src_byte_offset != cmd_mem[base + 16]) ||
