@@ -3366,7 +3366,7 @@ def main() -> int:
                     len(commands) + len(descs),
                     result_dram_off,
                 )
-            elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 2:
+            elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 2 and layer.dtype not in DT_FP:
                 closed_loop_descs = closed_loop_int16_ewe_probe(
                     layer,
                     len(commands) + len(descs),
