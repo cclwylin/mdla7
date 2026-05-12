@@ -56,6 +56,7 @@ module host_final #(
     output reg signed [15:0] conv_pad_left,
     output reg [1:0]   conv_elem_bytes,
     output reg [31:0]  conv_out_elem_index,
+    output reg [7:0]   conv_tile_output_count,
     output reg [15:0]  conv_sample_kh,
     output reg [15:0]  conv_sample_kw,
     output reg [15:0]  conv_sample_ic,
@@ -94,6 +95,9 @@ module host_final #(
     input      [31:0]  conv_first_input_byte_offset,
     input      [31:0]  conv_first_weight_byte_offset,
     input      [7:0]   conv_window_valid_count,
+    input      [31:0]  conv_tile_last_output_byte_offset,
+    input              conv_tile_last_input_valid,
+    input      [7:0]   conv_tile_last_window_valid_count,
     input signed [31:0] requant_scaled_out,
     input signed [7:0]  requant_out_q,
     input signed [31:0] pool_out,
@@ -175,7 +179,7 @@ module host_final #(
             conv_in_w <= cmd_mem[base + 20][31:16];
             conv_in_c <= cmd_mem[base + 21][15:0];
             conv_out_h <= 16'd1;
-            conv_out_w <= 16'd1;
+            conv_out_w <= (cmd_mem[base + 24][31:16] == 16'd0) ? 16'd1 : cmd_mem[base + 24][31:16];
             conv_out_c <= cmd_mem[base + 21][31:16];
             conv_k_h <= cmd_mem[base + 22][7:0];
             conv_k_w <= cmd_mem[base + 22][15:8];
@@ -187,6 +191,7 @@ module host_final #(
             conv_pad_left <= 16'sd0;
             conv_elem_bytes <= (cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1;
             conv_out_elem_index <= 32'd0;
+            conv_tile_output_count <= (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0];
             conv_sample_kh <= {8'd0, cmd_mem[base + 23][23:16]};
             conv_sample_kw <= {8'd0, cmd_mem[base + 23][31:24]};
             conv_sample_ic <= cmd_mem[base + 24][15:0];
@@ -235,13 +240,14 @@ module host_final #(
         cmd_mem[21] = 32'h0001_0001;
         cmd_mem[22] = 32'h0101_0601;
         cmd_mem[23] = 32'h0500_0101;
-        cmd_mem[24] = 32'd0;
+        cmd_mem[24] = 32'h0003_0000;
         cmd_mem[25] = 32'd5;
         cmd_mem[26] = 32'd5;
         cmd_mem[27] = 32'd0;
         cmd_mem[28] = 32'd0;
         cmd_mem[29] = 32'd0;
         cmd_mem[30] = 32'd6;
+        cmd_mem[31] = (32'd1 << 16) | (32'd4 << 8) | 32'd3;
 
         // Command 1: REQUANT sample using the CONV raw accumulator.
         cmd_mem[32] = {28'd0, OP_REQUANT};
@@ -360,6 +366,7 @@ module host_final #(
             conv_pad_left <= 16'sd0;
             conv_elem_bytes <= 2'd1;
             conv_out_elem_index <= 32'd0;
+            conv_tile_output_count <= 8'd1;
             conv_sample_kh <= 16'd0;
             conv_sample_kw <= 16'd0;
             conv_sample_ic <= 16'd0;
@@ -446,8 +453,13 @@ module host_final #(
                              (conv_sample_output_byte_offset !== cmd_mem[base + 27]) ||
                              (conv_first_input_byte_offset !== cmd_mem[base + 28]) ||
                              (conv_first_weight_byte_offset !== cmd_mem[base + 29]) ||
-                             (conv_window_valid_count !== cmd_mem[base + 30][7:0]))) begin
-                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d",
+                             (conv_window_valid_count !== cmd_mem[base + 30][7:0]) ||
+                             (conv_tile_last_output_byte_offset !==
+                              ({24'd0, ((cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0])} - 32'd1) *
+                              {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)}) ||
+                             (conv_tile_last_input_valid !== cmd_mem[base + 31][16]) ||
+                             (conv_tile_last_window_valid_count !== cmd_mem[base + 31][15:8]))) begin
+                            $display("HOST_FINAL_FAIL: CONV 2D sample cmd=%0d valid=%0d expected=%0d in=%0d expected=%0d wgt=%0d expected=%0d out=%0d expected=%0d first_in=%0d expected=%0d first_wgt=%0d expected=%0d valid_count=%0d expected=%0d tile_last_out=%0d tile_last_valid=%0d tile_last_count=%0d tile_count=%0d",
                                      command_index,
                                      conv_sample_input_valid, cmd_mem[base + 3][3],
                                      conv_sample_input_byte_offset, cmd_mem[base + 25],
@@ -455,7 +467,11 @@ module host_final #(
                                      conv_sample_output_byte_offset, cmd_mem[base + 27],
                                      conv_first_input_byte_offset, cmd_mem[base + 28],
                                      conv_first_weight_byte_offset, cmd_mem[base + 29],
-                                     conv_window_valid_count, cmd_mem[base + 30][7:0]);
+                                     conv_window_valid_count, cmd_mem[base + 30][7:0],
+                                     conv_tile_last_output_byte_offset,
+                                     conv_tile_last_input_valid,
+                                     conv_tile_last_window_valid_count,
+                                     (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0]);
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

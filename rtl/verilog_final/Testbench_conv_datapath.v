@@ -30,6 +30,7 @@ module Testbench_conv_datapath;
     reg signed [15:0] pad_left;
     reg [1:0] elem_bytes;
     reg [31:0] out_elem_index;
+    reg [7:0] tile_output_count;
     reg [15:0] sample_kh;
     reg [15:0] sample_kw;
     reg [15:0] sample_ic;
@@ -60,6 +61,9 @@ module Testbench_conv_datapath;
     wire [31:0] engine_first_input_byte_offset;
     wire [31:0] engine_first_weight_byte_offset;
     wire [7:0] engine_window_valid_count;
+    wire [31:0] engine_tile_last_output_byte_offset;
+    wire engine_tile_last_input_valid;
+    wire [7:0] engine_tile_last_window_valid_count;
     integer failures;
 
     always #5 clk = ~clk;
@@ -141,6 +145,7 @@ module Testbench_conv_datapath;
         .conv_pad_left(pad_left),
         .conv_elem_bytes(elem_bytes),
         .conv_out_elem_index(out_elem_index),
+        .conv_tile_output_count(tile_output_count),
         .conv_sample_kh(sample_kh),
         .conv_sample_kw(sample_kw),
         .conv_sample_ic(sample_ic),
@@ -165,7 +170,10 @@ module Testbench_conv_datapath;
         .conv_sample_input_valid(engine_input_valid),
         .conv_first_input_byte_offset(engine_first_input_byte_offset),
         .conv_first_weight_byte_offset(engine_first_weight_byte_offset),
-        .conv_window_valid_count(engine_window_valid_count)
+        .conv_window_valid_count(engine_window_valid_count),
+        .conv_tile_last_output_byte_offset(engine_tile_last_output_byte_offset),
+        .conv_tile_last_input_valid(engine_tile_last_input_valid),
+        .conv_tile_last_window_valid_count(engine_tile_last_window_valid_count)
     );
 
     task clear_vecs;
@@ -233,6 +241,9 @@ module Testbench_conv_datapath;
         input [31:0] exp_first_input;
         input [31:0] exp_first_weight;
         input [7:0] exp_valid_count;
+        input [31:0] exp_tile_last_output;
+        input exp_tile_last_valid;
+        input [7:0] exp_tile_last_valid_count;
         begin
             #1;
             if ((engine_input_valid !== exp_valid) ||
@@ -243,8 +254,11 @@ module Testbench_conv_datapath;
                 (engine_out_q !== exp_out) ||
                 (engine_first_input_byte_offset !== exp_first_input) ||
                 (engine_first_weight_byte_offset !== exp_first_weight) ||
-                (engine_window_valid_count !== exp_valid_count)) begin
-                $display("FAIL: %0s engine valid=%0d exp=%0d in=%0d exp=%0d wgt=%0d exp=%0d out_off=%0d exp=%0d acc=%0d exp=%0d q=%0d exp=%0d first_in=%0d exp=%0d first_wgt=%0d exp=%0d valid_count=%0d exp=%0d",
+                (engine_window_valid_count !== exp_valid_count) ||
+                (engine_tile_last_output_byte_offset !== exp_tile_last_output) ||
+                (engine_tile_last_input_valid !== exp_tile_last_valid) ||
+                (engine_tile_last_window_valid_count !== exp_tile_last_valid_count)) begin
+                $display("FAIL: %0s engine valid=%0d exp=%0d in=%0d exp=%0d wgt=%0d exp=%0d out_off=%0d exp=%0d acc=%0d exp=%0d q=%0d exp=%0d first_in=%0d exp=%0d first_wgt=%0d exp=%0d valid_count=%0d exp=%0d tile_last_out=%0d exp=%0d tile_valid=%0d exp=%0d tile_count=%0d exp=%0d",
                          name, engine_input_valid, exp_valid,
                          engine_input_byte_offset, exp_input,
                          engine_weight_byte_offset, exp_weight,
@@ -253,7 +267,10 @@ module Testbench_conv_datapath;
                          engine_out_q, exp_out,
                          engine_first_input_byte_offset, exp_first_input,
                          engine_first_weight_byte_offset, exp_first_weight,
-                         engine_window_valid_count, exp_valid_count);
+                         engine_window_valid_count, exp_valid_count,
+                         engine_tile_last_output_byte_offset, exp_tile_last_output,
+                         engine_tile_last_input_valid, exp_tile_last_valid,
+                         engine_tile_last_window_valid_count, exp_tile_last_valid_count);
                 failures = failures + 1;
             end
         end
@@ -333,6 +350,7 @@ module Testbench_conv_datapath;
         pad_top = 16'sd1;
         pad_left = 16'sd1;
         elem_bytes = 2'd1;
+        tile_output_count = 8'd1;
         out_elem_index = 32'd53; // oh=1, ow=2, oc=5.
         sample_kh = 16'd2;
         sample_kw = 16'd1;
@@ -369,11 +387,12 @@ module Testbench_conv_datapath;
         pad_left = 16'sd0;
         elem_bytes = 2'd1;
         out_elem_index = 32'd0;
+        tile_output_count = 8'd3;
         sample_kh = 16'd1;
         sample_kw = 16'd1;
         sample_ic = 16'd1;
         // 5 + 1 - 2 + 6 - 8 + 15 - 18 + 28 - 32 = -5.
-        expect_engine_sample("2d output pixel sample mac", 1'b1, 32'd7, 32'd7, 32'd0, -32'sd5, -8'sd6, 32'd0, 32'd0, 8'd8);
+        expect_engine_sample("2d output pixel sample mac", 1'b1, 32'd7, 32'd7, 32'd0, -32'sd5, -8'sd6, 32'd0, 32'd0, 8'd8, 32'd2, 1'b0, 8'd0);
 
         in_h = 16'd5;
         in_w = 16'd6;

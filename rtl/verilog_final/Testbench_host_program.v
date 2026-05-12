@@ -53,6 +53,7 @@ module Testbench_host_program;
     wire signed [15:0] conv_pad_left;
     wire [1:0] conv_elem_bytes;
     wire [31:0] conv_out_elem_index;
+    wire [7:0] conv_tile_output_count;
     wire [15:0] conv_sample_kh;
     wire [15:0] conv_sample_kw;
     wire [15:0] conv_sample_ic;
@@ -88,6 +89,9 @@ module Testbench_host_program;
     wire [31:0] conv_first_input_byte_offset;
     wire [31:0] conv_first_weight_byte_offset;
     wire [7:0] conv_window_valid_count;
+    wire [31:0] conv_tile_last_output_byte_offset;
+    wire conv_tile_last_input_valid;
+    wire [7:0] conv_tile_last_window_valid_count;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -160,6 +164,7 @@ module Testbench_host_program;
         .conv_pad_left(conv_pad_left),
         .conv_elem_bytes(conv_elem_bytes),
         .conv_out_elem_index(conv_out_elem_index),
+        .conv_tile_output_count(conv_tile_output_count),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
@@ -197,6 +202,9 @@ module Testbench_host_program;
         .conv_first_input_byte_offset(conv_first_input_byte_offset),
         .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
         .conv_window_valid_count(conv_window_valid_count),
+        .conv_tile_last_output_byte_offset(conv_tile_last_output_byte_offset),
+        .conv_tile_last_input_valid(conv_tile_last_input_valid),
+        .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -265,6 +273,7 @@ module Testbench_host_program;
         .conv_pad_left(conv_pad_left),
         .conv_elem_bytes(conv_elem_bytes),
         .conv_out_elem_index(conv_out_elem_index),
+        .conv_tile_output_count(conv_tile_output_count),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
@@ -304,6 +313,9 @@ module Testbench_host_program;
         .conv_first_input_byte_offset(conv_first_input_byte_offset),
         .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
         .conv_window_valid_count(conv_window_valid_count),
+        .conv_tile_last_output_byte_offset(conv_tile_last_output_byte_offset),
+        .conv_tile_last_input_valid(conv_tile_last_input_valid),
+        .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),

@@ -202,19 +202,20 @@ Descriptor word layout:
 | 21 | CONV 2D sample shape `{out_c, in_c}` |
 | 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
 | 23 | CONV 2D sample dilation/sample-k `{sample_kw, sample_kh, dilation_w, dilation_h}` |
-| 24 | CONV 2D sample input channel |
+| 24 | CONV 2D sample `{out_w, sample_ic}` |
 | 25 | CONV expected sample input byte offset |
 | 26 | CONV expected sample weight byte offset |
 | 27 | CONV expected sample output byte offset |
 | 28 | CONV expected first-lane input byte offset |
 | 29 | CONV expected first-lane weight byte offset |
 | 30 | CONV expected valid lane count across the 16-lane window prefix |
-| 31 | reserved |
+| 31 | CONV tile prefix check `{last_first_valid, last_valid_count, tile_output_count}` in bits 16, 15:8, 7:0 |
 
 For FP descriptors, word 12 marks FP mode (`CONV`: bit 8, `POOL`: bit 9,
 `EWE`: bit 10). For INT16 descriptors, word 12 bit 11 marks INT16 mode for
 `CONV`, `POOL`, and `EWE`.
 words 16/17 hold the expected double-precision sample result bits `{high, low}`.
 INT8 CONV descriptors use words 20..31 to let the sample engine derive the
-first lane, last lane, and valid lane count of its descriptor-driven 2D
-NHWC/OHWI window iterator and check those addresses alongside the sample MAC.
+first lane, last lane, valid lane count, and a small multi-output tile prefix
+of its descriptor-driven 2D NHWC/OHWI iterator and check those addresses
+alongside the sample MAC.

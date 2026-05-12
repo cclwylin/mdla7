@@ -59,6 +59,7 @@ module mdla7_top_final #(
     input signed [15:0]         conv_pad_left,
     input      [1:0]            conv_elem_bytes,
     input      [31:0]           conv_out_elem_index,
+    input      [7:0]            conv_tile_output_count,
     input      [15:0]           conv_sample_kh,
     input      [15:0]           conv_sample_kw,
     input      [15:0]           conv_sample_ic,
@@ -99,6 +100,9 @@ module mdla7_top_final #(
     output     [31:0]           conv_first_input_byte_offset,
     output     [31:0]           conv_first_weight_byte_offset,
     output     [7:0]            conv_window_valid_count,
+    output     [31:0]           conv_tile_last_output_byte_offset,
+    output                      conv_tile_last_input_valid,
+    output     [7:0]            conv_tile_last_window_valid_count,
     output signed [31:0]        requant_scaled_out,
     output signed [7:0]         requant_out_q,
     output signed [31:0]        pool_out,
@@ -171,6 +175,7 @@ module mdla7_top_final #(
     reg signed [15:0] conv_pad_left_q;
     reg [1:0] conv_elem_bytes_q;
     reg [31:0] conv_out_elem_index_q;
+    reg [7:0] conv_tile_output_count_q;
     reg [15:0] conv_sample_kh_q;
     reg [15:0] conv_sample_kw_q;
     reg [15:0] conv_sample_ic_q;
@@ -395,6 +400,7 @@ module mdla7_top_final #(
         .conv_pad_left(conv_pad_left_q),
         .conv_elem_bytes(conv_elem_bytes_q),
         .conv_out_elem_index(conv_out_elem_index_q),
+        .conv_tile_output_count(conv_tile_output_count_q),
         .conv_sample_kh(conv_sample_kh_q),
         .conv_sample_kw(conv_sample_kw_q),
         .conv_sample_ic(conv_sample_ic_q),
@@ -419,7 +425,10 @@ module mdla7_top_final #(
         .conv_sample_input_valid(conv_sample_input_valid),
         .conv_first_input_byte_offset(conv_first_input_byte_offset),
         .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
-        .conv_window_valid_count(conv_window_valid_count)
+        .conv_window_valid_count(conv_window_valid_count),
+        .conv_tile_last_output_byte_offset(conv_tile_last_output_byte_offset),
+        .conv_tile_last_input_valid(conv_tile_last_input_valid),
+        .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count)
     );
 
     vf_requant_sample_engine u_requant (
@@ -696,6 +705,7 @@ module mdla7_top_final #(
             conv_pad_left_q <= 16'sd0;
             conv_elem_bytes_q <= 2'd1;
             conv_out_elem_index_q <= 32'd0;
+            conv_tile_output_count_q <= 8'd1;
             conv_sample_kh_q <= 16'd0;
             conv_sample_kw_q <= 16'd0;
             conv_sample_ic_q <= 16'd0;
@@ -763,6 +773,7 @@ module mdla7_top_final #(
                         conv_pad_left_q <= conv_pad_left;
                         conv_elem_bytes_q <= conv_elem_bytes;
                         conv_out_elem_index_q <= conv_out_elem_index;
+                        conv_tile_output_count_q <= conv_tile_output_count;
                         conv_sample_kh_q <= conv_sample_kh;
                         conv_sample_kw_q <= conv_sample_kw;
                         conv_sample_ic_q <= conv_sample_ic;

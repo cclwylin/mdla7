@@ -59,6 +59,7 @@ module Testbench_top_byte_movers;
     reg signed [15:0] conv_pad_left;
     reg [1:0] conv_elem_bytes;
     reg [31:0] conv_out_elem_index;
+    reg [7:0] conv_tile_output_count;
     reg [15:0] conv_sample_kh;
     reg [15:0] conv_sample_kw;
     reg [15:0] conv_sample_ic;
@@ -94,6 +95,9 @@ module Testbench_top_byte_movers;
     wire [31:0] conv_first_input_byte_offset;
     wire [31:0] conv_first_weight_byte_offset;
     wire [7:0] conv_window_valid_count;
+    wire [31:0] conv_tile_last_output_byte_offset;
+    wire conv_tile_last_input_valid;
+    wire [7:0] conv_tile_last_window_valid_count;
     wire signed [31:0] requant_scaled_out;
     wire signed [7:0] requant_out_q;
     wire signed [31:0] pool_out;
@@ -162,6 +166,7 @@ module Testbench_top_byte_movers;
         .conv_pad_left(conv_pad_left),
         .conv_elem_bytes(conv_elem_bytes),
         .conv_out_elem_index(conv_out_elem_index),
+        .conv_tile_output_count(conv_tile_output_count),
         .conv_sample_kh(conv_sample_kh),
         .conv_sample_kw(conv_sample_kw),
         .conv_sample_ic(conv_sample_ic),
@@ -201,6 +206,9 @@ module Testbench_top_byte_movers;
         .conv_first_input_byte_offset(conv_first_input_byte_offset),
         .conv_first_weight_byte_offset(conv_first_weight_byte_offset),
         .conv_window_valid_count(conv_window_valid_count),
+        .conv_tile_last_output_byte_offset(conv_tile_last_output_byte_offset),
+        .conv_tile_last_input_valid(conv_tile_last_input_valid),
+        .conv_tile_last_window_valid_count(conv_tile_last_window_valid_count),
         .requant_scaled_out(requant_scaled_out),
         .requant_out_q(requant_out_q),
         .pool_out(pool_out),
@@ -281,7 +289,7 @@ module Testbench_top_byte_movers;
         conv_in_w = 16'd1;
         conv_in_c = 16'd1;
         conv_out_h = 16'd1;
-        conv_out_w = 16'd1;
+        conv_out_w = 16'd3;
         conv_out_c = 16'd1;
         conv_k_h = 8'd1;
         conv_k_w = 8'd1;
@@ -293,6 +301,7 @@ module Testbench_top_byte_movers;
         conv_pad_left = 16'sd0;
         conv_elem_bytes = 2'd1;
         conv_out_elem_index = 32'd0;
+        conv_tile_output_count = 8'd1;
         conv_sample_kh = 16'd0;
         conv_sample_kw = 16'd0;
         conv_sample_ic = 16'd0;
@@ -342,7 +351,7 @@ module Testbench_top_byte_movers;
         conv_in_w = 16'd6;
         conv_in_c = 16'd1;
         conv_out_h = 16'd1;
-        conv_out_w = 16'd1;
+        conv_out_w = 16'd3;
         conv_out_c = 16'd1;
         conv_k_h = 8'd1;
         conv_k_w = 8'd6;
@@ -354,6 +363,7 @@ module Testbench_top_byte_movers;
         conv_pad_left = 16'sd0;
         conv_elem_bytes = 2'd1;
         conv_out_elem_index = 32'd0;
+        conv_tile_output_count = 8'd3;
         conv_sample_kh = 16'd0;
         conv_sample_kw = 16'd5;
         conv_sample_ic = 16'd0;
@@ -369,15 +379,21 @@ module Testbench_top_byte_movers;
             (conv_sample_output_byte_offset != 32'd0) ||
             (conv_first_input_byte_offset != 32'd0) ||
             (conv_first_weight_byte_offset != 32'd0) ||
-            (conv_window_valid_count != 8'd6)) begin
-            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d",
+            (conv_window_valid_count != 8'd6) ||
+            (conv_tile_last_output_byte_offset != 32'd2) ||
+            !conv_tile_last_input_valid ||
+            (conv_tile_last_window_valid_count != 8'd4)) begin
+            $display("FAIL: CONV top 2D sample valid=%0d in=%0d wgt=%0d out=%0d first_in=%0d first_wgt=%0d valid_count=%0d tile_last_out=%0d tile_valid=%0d tile_count=%0d",
                      conv_sample_input_valid,
                      conv_sample_input_byte_offset,
                      conv_sample_weight_byte_offset,
                      conv_sample_output_byte_offset,
                      conv_first_input_byte_offset,
                      conv_first_weight_byte_offset,
-                     conv_window_valid_count);
+                     conv_window_valid_count,
+                     conv_tile_last_output_byte_offset,
+                     conv_tile_last_input_valid,
+                     conv_tile_last_window_valid_count);
             failures = failures + 1;
         end
 

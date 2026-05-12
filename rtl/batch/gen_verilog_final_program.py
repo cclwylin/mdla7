@@ -120,7 +120,7 @@ def conv2d_int8_window_sample(
     layer: Layer,
     data: bytes,
     max_count: int = 16,
-) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int]:
+) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int, int, bool, int]:
     """Return one NHWC/OHWI output-pixel sample window for INT8 CONV descriptors."""
     if (
         layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
@@ -129,7 +129,7 @@ def conv2d_int8_window_sample(
         act = data[layer.in_off:layer.in_off + min(max_count, layer.in_size)]
         wgt = data[layer.wgt_off:layer.wgt_off + min(max_count, layer.wgt_size)]
         elem_count = min(len(act), len(wgt), max_count)
-        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, False, 0, 0, 0
+        return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, False, 0, 0, 0, 1, False, 0
 
     act_values = bytearray()
     wgt_values = bytearray()
@@ -168,6 +168,28 @@ def conv2d_int8_window_sample(
 
     elem_count = min(len(act_values), len(wgt_values), max_count)
     valid = elem_count > 0
+    tile_count = min(max(layer.out_w * layer.out_c, 1), 4)
+    last_out_elem = tile_count - 1
+    last_out_area = max(layer.out_w * layer.out_c, 1)
+    last_oh = last_out_elem // last_out_area
+    last_ow = (last_out_elem % last_out_area) // max(layer.out_c, 1)
+    last_valid_count = 0
+    last_first_valid = False
+    for lane in range(elem_count):
+        kh = lane // max(layer.k_w * layer.in_c, 1)
+        rem = lane % max(layer.k_w * layer.in_c, 1)
+        kw = rem // max(layer.in_c, 1)
+        ic = rem % max(layer.in_c, 1)
+        ih = last_oh + kh
+        iw = last_ow + kw
+        lane_valid = (
+            kh < layer.k_h and kw < layer.k_w and ic < layer.in_c and
+            0 <= ih < layer.in_h and 0 <= iw < layer.in_w
+        )
+        if lane == 0:
+            last_first_valid = lane_valid
+        if lane_valid:
+            last_valid_count += 1
     return (
         bytes(act_values).ljust(max_count, b"\x00"),
         bytes(wgt_values).ljust(max_count, b"\x00"),
@@ -182,6 +204,9 @@ def conv2d_int8_window_sample(
         first_input_byte,
         first_weight_byte,
         elem_count,
+        tile_count,
+        last_first_valid,
+        last_valid_count,
     )
 
 
@@ -442,6 +467,9 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
             expected_first_input_offset,
             expected_first_weight_offset,
             expected_valid_count,
+            tile_count,
+            expected_tile_last_valid,
+            expected_tile_last_valid_count,
         ) = conv2d_int8_window_sample(layer, data)
         if elem_count == 0:
             return None
@@ -475,13 +503,18 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
                      (1 << 16) |
                      (1 << 24))
         words[23] = (1 | (1 << 8) | ((sample_kh & 0xFF) << 16) | ((sample_kw & 0xFF) << 24))
-        words[24] = sample_ic & 0xFFFF
+        words[24] = (sample_ic & 0xFFFF) | ((layer.out_w & 0xFFFF) << 16)
         words[25] = expected_input_offset & 0xFFFF_FFFF
         words[26] = expected_weight_offset & 0xFFFF_FFFF
         words[27] = expected_output_offset & 0xFFFF_FFFF
         words[28] = expected_first_input_offset & 0xFFFF_FFFF
         words[29] = expected_first_weight_offset & 0xFFFF_FFFF
         words[30] = expected_valid_count & 0xFFFF_FFFF
+        words[31] = (
+            (tile_count & 0xFF) |
+            ((expected_tile_last_valid_count & 0xFF) << 8) |
+            ((1 if expected_tile_last_valid else 0) << 16)
+        )
         return words
 
     if layer.op_kind in OK_POOL and elem == 1 and layer.in_size > 0:
