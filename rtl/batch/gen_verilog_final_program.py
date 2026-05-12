@@ -990,6 +990,7 @@ def closed_loop_result_check_descriptors(
         ref_bytes,
     )
     if l1_probe_desc is not None:
+        l1_probe_desc[3] |= MICROBLOCK_FLAG
         stamp_synth_microblock_metadata(
             l1_probe_desc,
             layer.index,
@@ -3190,9 +3191,10 @@ def main() -> int:
                     )
                     if l1_probe_desc is not None:
                         descs.append(l1_probe_desc)
-        req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
-        if req_desc is not None:
-            descs.append(req_desc)
+        if not args.closed_loop_dataflow:
+            req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))
+            if req_desc is not None:
+                descs.append(req_desc)
         if layer.index == last_layer_index:
             for desc in descs:
                 if is_sram_crc_descriptor(desc):
@@ -3200,7 +3202,7 @@ def main() -> int:
         for desc in descs:
             if len(commands) >= command_limit:
                 break
-            if not (args.microblock_descriptors and (desc[3] & (1 << 13))):
+            if not ((args.microblock_descriptors or args.closed_loop_dataflow) and (desc[3] & MICROBLOCK_FLAG)):
                 layer_for_meta = layer.index if (desc[0] & 0xF) != OP_L1CRC else desc[19]
                 stamp_microblock_metadata(desc, layer_for_meta, len(commands), len(commands))
             commands.append(desc)

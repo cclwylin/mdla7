@@ -112,6 +112,9 @@ For closed-loop dataflow regression through the batch runner, use:
 The runner reports these rows under `mode: closed_loop_dataflow`; `finalcrc` and
 `finalB` count bytes that completed the shared path through UDMA, L1, an engine,
 UDMA store-back, DRAM reload, and L1CRC.
+Every descriptor emitted in this mode is a microblock descriptor: UDMA load,
+CONV/TNPS/POOL/EWE compute, UDMA store, UDMA reload, and L1CRC final check all
+carry bit13 plus stream metadata flags.
 POOL closed-loop probes use per-byte UDMA scatter loads when the real pooling
 window is not contiguous in DRAM, then present the sampled bytes as a contiguous
 L1 vector to the POOL datapath.
