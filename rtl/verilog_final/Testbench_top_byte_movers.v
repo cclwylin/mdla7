@@ -13,6 +13,10 @@ module Testbench_top_byte_movers;
     reg desc_valid;
     wire desc_ready;
     reg [3:0] desc_op_class;
+    reg [15:0] desc_layer_id;
+    reg [15:0] desc_microblock_id;
+    reg [7:0] desc_stream_slot;
+    reg [7:0] desc_stream_meta_flags;
     reg [31:0] bytes;
     reg [31:0] udma_dram_read_bytes;
     reg [31:0] udma_codec_cycles;
@@ -93,6 +97,10 @@ module Testbench_top_byte_movers;
     wire done_valid;
     wire busy;
     wire [3:0] active_op_class;
+    wire [15:0] active_layer_id;
+    wire [15:0] active_microblock_id;
+    wire [7:0] active_stream_slot;
+    wire [7:0] active_stream_meta_flags;
     wire [3:0] active_phase_id;
     wire [31:0] active_remaining_cycles;
     wire [31:0] l1mesh_crc;
@@ -159,6 +167,10 @@ module Testbench_top_byte_movers;
         .desc_valid(desc_valid),
         .desc_ready(desc_ready),
         .desc_op_class(desc_op_class),
+        .desc_layer_id(desc_layer_id),
+        .desc_microblock_id(desc_microblock_id),
+        .desc_stream_slot(desc_stream_slot),
+        .desc_stream_meta_flags(desc_stream_meta_flags),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
@@ -270,6 +282,10 @@ module Testbench_top_byte_movers;
         .done_ready(1'b1),
         .busy(busy),
         .active_op_class(active_op_class),
+        .active_layer_id(active_layer_id),
+        .active_microblock_id(active_microblock_id),
+        .active_stream_slot(active_stream_slot),
+        .active_stream_meta_flags(active_stream_meta_flags),
         .active_phase_id(active_phase_id),
         .active_remaining_cycles(active_remaining_cycles),
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
@@ -344,6 +360,10 @@ module Testbench_top_byte_movers;
             while (!desc_ready)
                 @(posedge clk);
             desc_op_class = op_class;
+            desc_layer_id = 16'd0;
+            desc_microblock_id = 16'd0;
+            desc_stream_slot = 8'd0;
+            desc_stream_meta_flags = 8'd0;
             desc_valid = 1'b1;
             @(posedge clk);
             desc_valid = 1'b0;
@@ -373,6 +393,10 @@ module Testbench_top_byte_movers;
         rst_n = 1'b0;
         desc_valid = 1'b0;
         desc_op_class = 4'd0;
+        desc_layer_id = 16'd0;
+        desc_microblock_id = 16'd0;
+        desc_stream_slot = 8'd0;
+        desc_stream_meta_flags = 8'd0;
         bytes = 32'd256;
         udma_dram_read_bytes = 32'd512;
         udma_codec_cycles = 32'd3;

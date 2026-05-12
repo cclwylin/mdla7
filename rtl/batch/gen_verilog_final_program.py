@@ -20,6 +20,12 @@ OP_TNPS = 5
 OP_UDMA = 6
 OP_L1CRC = 7
 
+SMF_LOAD_A = 1
+SMF_LOAD_B = 2
+SMF_COMPUTE = 4
+SMF_STORE = 8
+SMF_FINAL_TILE = 16
+
 OK_CONV = {0, 1, 6}
 OK_POOL = {2, 3}
 OK_ADD = 7
@@ -774,6 +780,34 @@ def is_sram_crc_descriptor(desc: list[int]) -> bool:
     return (
         (op == OP_L1CRC and bool(desc[3] & (1 << 10))) or
         (op in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and bool(desc[3] & (1 << 10)))
+    )
+
+
+def microblock_meta_flags(desc: list[int]) -> int:
+    op = desc[0] & 0xF
+    flags = 0
+    if op == OP_UDMA and not (desc[3] & (1 << 6)):
+        flags |= SMF_LOAD_A
+    elif op in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS):
+        flags |= SMF_COMPUTE
+    if (desc[3] & (1 << 6)) or is_sram_crc_descriptor(desc) or op == OP_L1CRC:
+        flags |= SMF_STORE
+    if desc[3] & (1 << 12):
+        flags |= SMF_FINAL_TILE
+    return flags
+
+
+def stamp_microblock_metadata(desc: list[int], layer_index: int, microblock_id: int, stream_slot: int) -> None:
+    op = desc[0] & 0xF
+    desc[0] = (
+        op |
+        ((layer_index & 0xFFFF) << 4) |
+        ((microblock_id & 0x0FFF) << 20)
+    )
+    desc[3] = (
+        (desc[3] & 0x0000_FFFF) |
+        ((stream_slot & 0xFF) << 16) |
+        ((microblock_meta_flags(desc) & 0xFF) << 24)
     )
 
 
@@ -2350,6 +2384,8 @@ def main() -> int:
         for desc in descs:
             if len(commands) >= command_limit:
                 break
+            layer_for_meta = layer.index if (desc[0] & 0xF) != OP_L1CRC else desc[19]
+            stamp_microblock_metadata(desc, layer_for_meta, len(commands), len(commands))
             commands.append(desc)
             if (desc[0] & 0xF) == OP_CONV:
                 conv_count += 1

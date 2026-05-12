@@ -12,6 +12,10 @@ module mdla7_top_final #(
     input                       desc_valid,
     output                      desc_ready,
     input      [3:0]            desc_op_class,
+    input      [15:0]           desc_layer_id,
+    input      [15:0]           desc_microblock_id,
+    input      [7:0]            desc_stream_slot,
+    input      [7:0]            desc_stream_meta_flags,
     input      [31:0]           bytes,
     input      [31:0]           udma_dram_read_bytes,
     input      [31:0]           udma_codec_cycles,
@@ -131,6 +135,10 @@ module mdla7_top_final #(
     input                       done_ready,
     output                      busy,
     output     [3:0]            active_op_class,
+    output     [15:0]           active_layer_id,
+    output     [15:0]           active_microblock_id,
+    output     [7:0]            active_stream_slot,
+    output     [7:0]            active_stream_meta_flags,
     output     [3:0]            active_phase_id,
     output     [31:0]           active_remaining_cycles,
     output     [31:0]           tnps_sample_src_byte_offset,
@@ -213,6 +221,10 @@ module mdla7_top_final #(
     reg [2:0] state;
     reg done_valid_q;
     reg [3:0] op_class_q;
+    reg [15:0] layer_id_q;
+    reg [15:0] microblock_id_q;
+    reg [7:0] stream_slot_q;
+    reg [7:0] stream_meta_flags_q;
     reg start_pending;
     reg engine_done_seen;
     reg [31:0] bytes_q;
@@ -500,6 +512,10 @@ module mdla7_top_final #(
     assign done_valid = done_valid_q;
     assign busy = (state != ST_IDLE);
     assign active_op_class = op_class_q;
+    assign active_layer_id = layer_id_q;
+    assign active_microblock_id = microblock_id_q;
+    assign active_stream_slot = stream_slot_q;
+    assign active_stream_meta_flags = stream_meta_flags_q;
     assign active_phase_id = selected_busy ? selected_phase :
                              l1mgr_busy ? l1mgr_phase_id :
                              l1mesh_busy ? l1mesh_phase_id : 4'd0;
@@ -933,6 +949,10 @@ module mdla7_top_final #(
             state <= ST_IDLE;
             done_valid_q <= 1'b0;
             op_class_q <= 4'd0;
+            layer_id_q <= 16'd0;
+            microblock_id_q <= 16'd0;
+            stream_slot_q <= 8'd0;
+            stream_meta_flags_q <= 8'd0;
             start_pending <= 1'b0;
             engine_done_seen <= 1'b0;
             bytes_q <= 32'd0;
@@ -1048,6 +1068,10 @@ module mdla7_top_final #(
                     done_valid_q <= 1'b0;
                     if (desc_valid && desc_ready) begin
                         op_class_q <= desc_op_class;
+                        layer_id_q <= desc_layer_id;
+                        microblock_id_q <= desc_microblock_id;
+                        stream_slot_q <= desc_stream_slot;
+                        stream_meta_flags_q <= desc_stream_meta_flags;
                         bytes_q <= bytes;
                         udma_dram_read_bytes_q <= udma_dram_read_bytes;
                         udma_codec_cycles_q <= udma_codec_cycles;

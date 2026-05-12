@@ -9,6 +9,10 @@ module host_final #(
     output reg         desc_valid,
     input              desc_ready,
     output reg [3:0]   desc_op_class,
+    output reg [15:0]  desc_layer_id,
+    output reg [15:0]  desc_microblock_id,
+    output reg [7:0]   desc_stream_slot,
+    output reg [7:0]   desc_stream_meta_flags,
     output reg [31:0]  bytes,
     output reg [31:0]  udma_dram_read_bytes,
     output reg [31:0]  udma_codec_cycles,
@@ -275,6 +279,10 @@ module host_final #(
     task load_command;
         begin
             desc_op_class <= cmd_mem[base][3:0];
+            desc_layer_id <= cmd_mem[base][19:4];
+            desc_microblock_id <= {4'd0, cmd_mem[base][31:20]};
+            desc_stream_slot <= cmd_mem[base + 3][23:16];
+            desc_stream_meta_flags <= cmd_mem[base + 3][31:24];
             bytes <= cmd_mem[base + 1];
             l1mesh_addr <= cmd_mem[base + 2][21:0];
             udma_direction_write <= cmd_mem[base + 3][0];
@@ -568,6 +576,10 @@ module host_final #(
             watchdog <= 32'd0;
             desc_valid <= 1'b0;
             desc_op_class <= 4'd0;
+            desc_layer_id <= 16'd0;
+            desc_microblock_id <= 16'd0;
+            desc_stream_slot <= 8'd0;
+            desc_stream_meta_flags <= 8'd0;
             bytes <= 32'd0;
             udma_dram_read_bytes <= 32'd0;
             udma_codec_cycles <= 32'd0;

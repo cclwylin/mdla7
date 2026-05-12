@@ -7,6 +7,10 @@ module Testbench_host_program;
     wire desc_valid;
     wire desc_ready;
     wire [3:0] desc_op_class;
+    wire [15:0] desc_layer_id;
+    wire [15:0] desc_microblock_id;
+    wire [7:0] desc_stream_slot;
+    wire [7:0] desc_stream_meta_flags;
     wire [31:0] bytes;
     wire [31:0] udma_dram_read_bytes;
     wire [31:0] udma_codec_cycles;
@@ -122,6 +126,10 @@ module Testbench_host_program;
     wire done_valid;
     wire busy;
     wire [3:0] active_op_class;
+    wire [15:0] active_layer_id;
+    wire [15:0] active_microblock_id;
+    wire [7:0] active_stream_slot;
+    wire [7:0] active_stream_meta_flags;
     wire [3:0] active_phase_id;
     wire [31:0] active_remaining_cycles;
     wire [31:0] l1mesh_crc;
@@ -202,6 +210,10 @@ module Testbench_host_program;
         .desc_valid(desc_valid),
         .desc_ready(desc_ready),
         .desc_op_class(desc_op_class),
+        .desc_layer_id(desc_layer_id),
+        .desc_microblock_id(desc_microblock_id),
+        .desc_stream_slot(desc_stream_slot),
+        .desc_stream_meta_flags(desc_stream_meta_flags),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
@@ -395,6 +407,10 @@ module Testbench_host_program;
         .desc_valid(desc_valid),
         .desc_ready(desc_ready),
         .desc_op_class(desc_op_class),
+        .desc_layer_id(desc_layer_id),
+        .desc_microblock_id(desc_microblock_id),
+        .desc_stream_slot(desc_stream_slot),
+        .desc_stream_meta_flags(desc_stream_meta_flags),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
@@ -506,6 +522,10 @@ module Testbench_host_program;
         .done_ready(1'b1),
         .busy(busy),
         .active_op_class(active_op_class),
+        .active_layer_id(active_layer_id),
+        .active_microblock_id(active_microblock_id),
+        .active_stream_slot(active_stream_slot),
+        .active_stream_meta_flags(active_stream_meta_flags),
         .active_phase_id(active_phase_id),
         .active_remaining_cycles(active_remaining_cycles),
         .tnps_sample_src_byte_offset(tnps_sample_src_byte_offset),
