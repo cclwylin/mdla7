@@ -170,13 +170,17 @@ module host_final #(
         (expected_conv_tile_count == 8'd1) ? 4'b0001 :
         (expected_conv_tile_count == 8'd2) ? 4'b0011 :
         (expected_conv_tile_count == 8'd3) ? 4'b0111 : 4'b1111;
+    wire [31:0] expected_conv_elem_bytes =
+        {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)};
+    wire [31:0] expected_conv_base_out_elem_index =
+        (expected_conv_elem_bytes == 32'd0) ? 32'd0 : (cmd_mem[base + 27] / expected_conv_elem_bytes);
     wire signed [31:0] expected_conv_tile_q_sum =
         $signed({{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]}) *
         $signed({24'd0, expected_conv_tile_count});
-    wire [31:0] expected_conv_tile_last_index = {24'd0, expected_conv_tile_count} - 32'd1;
+    wire [31:0] expected_conv_tile_last_index =
+        expected_conv_base_out_elem_index + {24'd0, expected_conv_tile_count} - 32'd1;
     wire [31:0] expected_conv_tile_last_byte_offset =
-        expected_conv_tile_last_index *
-        {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)};
+        cmd_mem[base + 27] + (({24'd0, expected_conv_tile_count} - 32'd1) * expected_conv_elem_bytes);
     wire [3:0] expected_conv_tile_last_shadow_slot = expected_conv_tile_last_byte_offset[3:0];
     wire [31:0] expected_conv_tile_q_value =
         {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
@@ -234,8 +238,8 @@ module host_final #(
             conv_dilation_w <= cmd_mem[base + 23][15:8];
             conv_pad_top <= 16'sd0;
             conv_pad_left <= 16'sd0;
-            conv_elem_bytes <= (cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1;
-            conv_out_elem_index <= 32'd0;
+            conv_elem_bytes <= expected_conv_elem_bytes[1:0];
+            conv_out_elem_index <= expected_conv_base_out_elem_index;
             conv_tile_output_count <= (cmd_mem[base + 31][7:0] == 8'd0) ? 8'd1 : cmd_mem[base + 31][7:0];
             conv_partial_first <= cmd_mem[base + 3][4];
             conv_partial_accumulate <= cmd_mem[base + 3][5];
@@ -384,8 +388,38 @@ module host_final #(
         cmd_mem[209] = 32'd2;
         cmd_mem[210] = 32'd1;
 
-        // Command 7: stop.
-        cmd_mem[224] = {28'd0, OP_DONE};
+        // Command 7: CONV nonzero output-index probe of prior shadow writeback.
+        cmd_mem[224] = {28'd0, OP_CONV};
+        cmd_mem[225] = 32'd16;
+        cmd_mem[226] = 32'h0000_02a0;
+        cmd_mem[227] = 32'd140;
+        cmd_mem[228] = 32'h0102_0304;
+        cmd_mem[229] = 32'hfc07_0000;
+        cmd_mem[232] = 32'h0201_ff03;
+        cmd_mem[233] = 32'h0506_0000;
+        cmd_mem[236] = 32'd6;
+        cmd_mem[237] = 32'd5;
+        cmd_mem[238] = 32'sd1073741824;
+        cmd_mem[239] = 32'd1;
+        cmd_mem[240] = -32'sd128;
+        cmd_mem[241] = 32'sd127;
+        cmd_mem[242] = 32'd18;
+        cmd_mem[243] = 32'd36;
+        cmd_mem[244] = 32'h0006_0001;
+        cmd_mem[245] = 32'h0001_0001;
+        cmd_mem[246] = 32'h0101_0601;
+        cmd_mem[247] = 32'h0300_0101;
+        cmd_mem[248] = 32'h0003_0000;
+        cmd_mem[249] = 32'd5;
+        cmd_mem[250] = 32'd3;
+        cmd_mem[251] = 32'd2;
+        cmd_mem[252] = 32'd2;
+        cmd_mem[253] = 32'd0;
+        cmd_mem[254] = 32'd4;
+        cmd_mem[255] = (32'd1 << 16) | (32'd4 << 8) | 32'd1;
+
+        // Command 8: stop.
+        cmd_mem[256] = {28'd0, OP_DONE};
 
         program_path = "";
         if ($value$plusargs("FINAL_PROGRAM=%s", program_path))
@@ -537,15 +571,13 @@ module host_final #(
                              (conv_first_input_byte_offset !== cmd_mem[base + 28]) ||
                              (conv_first_weight_byte_offset !== cmd_mem[base + 29]) ||
                              (conv_window_valid_count !== cmd_mem[base + 30][7:0]) ||
-                             (conv_tile_last_output_byte_offset !==
-                              ({24'd0, expected_conv_tile_count} - 32'd1) *
-                              {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)}) ||
+                             (conv_tile_last_output_byte_offset !== expected_conv_tile_last_byte_offset) ||
                              (conv_tile_last_input_valid !== cmd_mem[base + 31][16]) ||
                              (conv_tile_last_window_valid_count !== cmd_mem[base + 31][15:8]) ||
                              (conv_tile_scoreboard_valid_mask !== expected_conv_tile_valid_mask) ||
                              (conv_tile_scoreboard_q_sum !== expected_conv_tile_q_sum) ||
-                             (conv_tile_result_out_elem_indices[31:0] !== 32'd0) ||
-                             (conv_tile_result_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_tile_result_out_elem_indices[31:0] !== expected_conv_base_out_elem_index) ||
+                             (conv_tile_result_output_byte_offsets[31:0] !== cmd_mem[base + 27]) ||
                              (conv_tile_result_acc_values[31:0] !== expected_conv_tile_acc_value) ||
                              (conv_tile_result_q_values[31:0] !== expected_conv_tile_q_value) ||
                              (conv_tile_result_out_elem_indices[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
@@ -605,27 +637,43 @@ module host_final #(
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                            cmd_mem[base + 3][7] &&
+                            (!conv_shadow_read_valid ||
+                             (conv_shadow_read_output_byte_offset !== cmd_mem[base + 27]) ||
+                             (conv_shadow_read_q_value !== cmd_mem[base + 19]))) begin
+                            $display("HOST_FINAL_FAIL: CONV shadow read cmd=%0d valid=%0d off=%0d expected=%0d q=%0d expected=%0d",
+                                     command_index,
+                                     conv_shadow_read_valid,
+                                     conv_shadow_read_output_byte_offset,
+                                     cmd_mem[base + 27],
+                                     $signed(conv_shadow_read_q_value),
+                                     $signed(cmd_mem[base + 19]));
+                            test_fail <= 1'b1;
+                        end
+                        if ((desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             cmd_mem[base + 3][2] && cmd_mem[base + 3][6] &&
                             ((conv_writeback_valid_mask !== expected_conv_tile_valid_mask) ||
-                             (conv_writeback_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_writeback_output_byte_offsets[31:0] !== cmd_mem[base + 27]) ||
                              (conv_writeback_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_tile_last_byte_offset) ||
                              (conv_writeback_q_values[31:0] !== expected_conv_tile_q_value) ||
                              (conv_writeback_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_tile_q_value) ||
                              (conv_shadow_valid_mask !== expected_conv_tile_valid_mask) ||
-                             (conv_shadow_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_shadow_output_byte_offsets[31:0] !== cmd_mem[base + 27]) ||
                              (conv_shadow_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                              expected_conv_tile_last_byte_offset) ||
                              (conv_shadow_q_values[31:0] !== expected_conv_tile_q_value) ||
                              (conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
                               expected_conv_tile_q_value) ||
-                             !conv_shadow_mem_valid_mask[4'd0] ||
+                             !conv_shadow_mem_valid_mask[cmd_mem[base + 27][3:0]] ||
                              !conv_shadow_mem_valid_mask[expected_conv_tile_last_shadow_slot] ||
-                             (conv_shadow_mem_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_shadow_mem_output_byte_offsets[cmd_mem[base + 27][3:0] * 32 +: 32] !==
+                              cmd_mem[base + 27]) ||
                              (conv_shadow_mem_output_byte_offsets[expected_conv_tile_last_shadow_slot * 32 +: 32] !==
                               expected_conv_tile_last_byte_offset) ||
-                             (conv_shadow_mem_q_values[31:0] !== expected_conv_tile_q_value) ||
+                             (conv_shadow_mem_q_values[cmd_mem[base + 27][3:0] * 32 +: 32] !==
+                              expected_conv_tile_q_value) ||
                              (conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32] !==
                               expected_conv_tile_q_value))) begin
                             $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d mem_mask=%04x mem_last_slot=%0d mem_off_last=%0d mem_q_last=%0d",

@@ -191,7 +191,7 @@ Descriptor word layout:
 | 0 | op class, `1=CONV`, `2=REQUANT`, `3=EWE`, `4=POOL`, `5=TNPS`, `6=UDMA`, `0=stop` |
 | 1 | payload bytes |
 | 2 | L1Mesh address |
-| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback |
+| 3 | flags: bit0 UDMA direction write, bit1 TNPS space-to-depth, bit2 CONV 2D sample check enable, bit3 CONV expected valid, bit4 CONV psum first, bit5 CONV psum accumulate, bit6 CONV psum final/writeback, bit7 CONV shadow readback check |
 | 4..7 | CONV/POOL/EWE-A sample bytes, REQUANT input value, or UDMA DRAM read bytes / codec fields |
 | 8..11 | CONV weight sample bytes or EWE-B sample bytes |
 | 12 | CONV `{zp_in, elem_count}`, POOL `{avg_mode, elem_count}`, EWE `{op_mode, elem_count}`, or TNPS block |
@@ -201,7 +201,7 @@ Descriptor word layout:
 | 16 | CONV activation min or expected TNPS sample source byte offset |
 | 17 | CONV activation max or expected TNPS sample destination byte offset |
 | 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
-| 19 | source layer index, or expected psum accumulator when CONV word 3 bit4/bit5/bit6 is set |
+| 19 | source layer index, expected psum accumulator when CONV word 3 bit4/bit5/bit6 is set, or expected shadow readback q when bit7 is set |
 | 20 | CONV 2D sample shape `{in_w, in_h}` |
 | 21 | CONV 2D sample shape `{out_c, in_c}` |
 | 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
@@ -230,7 +230,8 @@ accumulators, exposes a 4-entry writeback skeleton, latches the same
 mask/offset/q tuple, and updates a 16-slot shadow output memory indexed by
 output byte offset low bits on the store handshake. A later CONV command can
 probe the same shadow memory with its descriptor-driven output byte offset and
-observe the stored offset/q tuple before full output SRAM/DRAM writeback exists.
+observe the stored offset/q tuple before full output SRAM/DRAM writeback exists;
+word 3 bit 7 asks the host to check that readback against word 19.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
 experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state. The last partial is marked final so
