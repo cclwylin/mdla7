@@ -200,7 +200,7 @@ Descriptor word layout:
 | 16 | CONV activation min or expected TNPS sample source byte offset |
 | 17 | CONV activation max or expected TNPS sample destination byte offset |
 | 18 | CONV/REQUANT/POOL expected output byte, EWE expected vector sum, or expected TNPS sample-valid bit |
-| 19 | source layer index |
+| 19 | source layer index, or expected psum accumulator when CONV word 3 bit4/bit5 is set |
 | 20 | CONV 2D sample shape `{in_w, in_h}` |
 | 21 | CONV 2D sample shape `{out_c, in_c}` |
 | 22 | CONV 2D sample kernel/stride `{stride_w, stride_h, k_w, k_h}` |
@@ -226,5 +226,5 @@ valid mask, output element indices, output byte offsets, pre-requant
 accumulators, sample output values, and sample-output sum. This is the
 result-stream skeleton before full psum/writeback buffering.
 `rtl/batch/gen_verilog_final_program.py --emit-conv-partial-psum` can
-experimentally duplicate generated INT8 CONV samples as psum first/accumulate
+experimentally split generated INT8 CONV samples into psum first/accumulate
 pairs to exercise the partial-K psum state.

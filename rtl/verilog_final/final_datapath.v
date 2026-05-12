@@ -451,22 +451,25 @@ module vf_conv_sample_engine #(
     wire [7:0] scoreboard_tile_output_count = (safe_tile_output_count > 8'd4) ? 8'd4 : safe_tile_output_count;
     wire [31:0] conv_tile_last_out_elem_index =
         conv_out_elem_index + {24'd0, scoreboard_tile_output_count} - 32'd1;
-    wire [31:0] conv_window_lane = (safe_int_count == 8'd0) ? 32'd0 : {24'd0, safe_int_count - 8'd1};
     wire [31:0] conv_window_col_span = conv_k_w_safe * conv_in_c_safe;
-    wire [31:0] conv_window_kh =
-        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_lane / conv_window_col_span;
-    wire [31:0] conv_window_rem =
-        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_lane % conv_window_col_span;
-    wire [31:0] conv_window_kw =
-        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_rem / conv_in_c_safe;
-    wire [31:0] conv_window_ic =
-        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_rem % conv_in_c_safe;
-    /* verilator lint_off UNUSEDSIGNAL */
-    wire [47:0] explicit_sample_coord_unused = {conv_sample_kh, conv_sample_kw, conv_sample_ic};
-    /* verilator lint_on UNUSEDSIGNAL */
+    wire [31:0] conv_sample_lane =
+        ((({16'd0, conv_sample_kh} * conv_k_w_safe) + {16'd0, conv_sample_kw}) *
+         conv_in_c_safe) + {16'd0, conv_sample_ic};
+    wire [31:0] conv_window_start_lane =
+        (conv_sample_lane >= {24'd0, safe_int_count}) ?
+        (conv_sample_lane - {24'd0, safe_int_count} + 32'd1) : 32'd0;
+    wire [31:0] conv_window_start_kh =
+        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_start_lane / conv_window_col_span;
+    wire [31:0] conv_window_start_rem =
+        (conv_window_col_span == 32'd0) ? 32'd0 : conv_window_start_lane % conv_window_col_span;
+    wire [31:0] conv_window_start_kw =
+        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_start_rem / conv_in_c_safe;
+    wire [31:0] conv_window_start_ic =
+        (conv_in_c_safe == 32'd0) ? 32'd0 : conv_window_start_rem % conv_in_c_safe;
 
     function [7:0] conv_window_valid_count_at;
         input [31:0] out_elem_index;
+        input [31:0] start_lane;
         integer idx;
         reg [31:0] col_span;
         reg [31:0] lane;
@@ -491,7 +494,7 @@ module vf_conv_sample_engine #(
                  (out_elem_index % {16'd0, conv_out_c});
             for (idx = 0; idx < MAX_ELEMS; idx = idx + 1) begin
                 if (idx < safe_int_count) begin
-                    lane = idx;
+                    lane = start_lane + idx[31:0];
                     kh = (col_span == 32'd0) ? 32'd0 : lane / col_span;
                     rem = (col_span == 32'd0) ? 32'd0 : lane % col_span;
                     kw = (conv_in_c_safe == 32'd0) ? 32'd0 : rem / conv_in_c_safe;
@@ -552,9 +555,9 @@ module vf_conv_sample_engine #(
         .pad_left(conv_pad_left),
         .elem_bytes(conv_elem_bytes),
         .out_elem_index(conv_out_elem_index),
-        .sample_kh(conv_window_kh[15:0]),
-        .sample_kw(conv_window_kw[15:0]),
-        .sample_ic(conv_window_ic[15:0]),
+        .sample_kh(conv_sample_kh),
+        .sample_kw(conv_sample_kw),
+        .sample_ic(conv_sample_ic),
         .input_byte_offset(conv_sample_input_byte_offset),
         .weight_byte_offset(conv_sample_weight_byte_offset),
         .output_byte_offset(conv_sample_output_byte_offset),
@@ -578,9 +581,9 @@ module vf_conv_sample_engine #(
         .pad_left(conv_pad_left),
         .elem_bytes(conv_elem_bytes),
         .out_elem_index(conv_out_elem_index),
-        .sample_kh(16'd0),
-        .sample_kw(16'd0),
-        .sample_ic(16'd0),
+        .sample_kh(conv_window_start_kh[15:0]),
+        .sample_kw(conv_window_start_kw[15:0]),
+        .sample_ic(conv_window_start_ic[15:0]),
         .input_byte_offset(conv_first_input_byte_offset),
         .weight_byte_offset(conv_first_weight_byte_offset),
         .output_byte_offset(),
@@ -604,9 +607,9 @@ module vf_conv_sample_engine #(
         .pad_left(conv_pad_left),
         .elem_bytes(conv_elem_bytes),
         .out_elem_index(conv_tile_last_out_elem_index),
-        .sample_kh(16'd0),
-        .sample_kw(16'd0),
-        .sample_ic(16'd0),
+        .sample_kh(conv_window_start_kh[15:0]),
+        .sample_kw(conv_window_start_kw[15:0]),
+        .sample_ic(conv_window_start_ic[15:0]),
         .input_byte_offset(),
         .weight_byte_offset(),
         .output_byte_offset(conv_tile_last_output_byte_offset),
@@ -657,8 +660,9 @@ module vf_conv_sample_engine #(
         i16_av = 32'sd0;
         i16_wv = 32'sd0;
         i16_acc64 = 64'sd0;
-        conv_window_valid_count = conv_window_valid_count_at(conv_out_elem_index);
-        conv_tile_last_window_valid_count = conv_window_valid_count_at(conv_tile_last_out_elem_index);
+        conv_window_valid_count = conv_window_valid_count_at(conv_out_elem_index, conv_window_start_lane);
+        conv_tile_last_window_valid_count =
+            conv_window_valid_count_at(conv_tile_last_out_elem_index, conv_window_start_lane);
         conv_tile_scoreboard_valid_mask = 4'd0;
         conv_tile_scoreboard_q_sum = 32'sd0;
         conv_tile_result_out_elem_indices = 128'd0;

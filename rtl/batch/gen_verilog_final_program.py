@@ -120,14 +120,17 @@ def conv2d_int8_window_sample(
     layer: Layer,
     data: bytes,
     max_count: int = 16,
+    start_lane: int = 0,
 ) -> tuple[bytes, bytes, int, int, int, int, int, int, int, bool, int, int, int, int, bool, int]:
     """Return one NHWC/OHWI output-pixel sample window for INT8 CONV descriptors."""
     if (
         layer.in_h <= 0 or layer.in_w <= 0 or layer.in_c <= 0 or
         layer.out_c <= 0 or layer.k_h <= 0 or layer.k_w <= 0
     ):
-        act = data[layer.in_off:layer.in_off + min(max_count, layer.in_size)]
-        wgt = data[layer.wgt_off:layer.wgt_off + min(max_count, layer.wgt_size)]
+        act_off = layer.in_off + min(start_lane, layer.in_size)
+        wgt_off = layer.wgt_off + min(start_lane, layer.wgt_size)
+        act = data[act_off:act_off + min(max_count, max(layer.in_size - start_lane, 0))]
+        wgt = data[wgt_off:wgt_off + min(max_count, max(layer.wgt_size - start_lane, 0))]
         elem_count = min(len(act), len(wgt), max_count)
         return act.ljust(max_count, b"\x00"), wgt.ljust(max_count, b"\x00"), elem_count, 0, 0, 0, 0, 0, 0, False, 0, 0, 0, 1, False, 0
 
@@ -140,9 +143,13 @@ def conv2d_int8_window_sample(
     last_weight_byte = 0
     first_input_byte = 0
     first_weight_byte = 0
+    lane_index = 0
     for kh in range(layer.k_h):
         for kw in range(layer.k_w):
             for ic in range(layer.in_c):
+                if lane_index < start_lane:
+                    lane_index += 1
+                    continue
                 if len(act_values) >= max_count:
                     break
                 input_elem = ((kh * layer.in_w + kw) * layer.in_c) + ic
@@ -150,6 +157,7 @@ def conv2d_int8_window_sample(
                 input_byte = input_elem
                 weight_byte = weight_elem
                 if input_byte >= layer.in_size or weight_byte >= layer.wgt_size:
+                    lane_index += 1
                     continue
                 act_values.append(data[layer.in_off + input_byte])
                 wgt_values.append(data[layer.wgt_off + weight_byte])
@@ -161,6 +169,7 @@ def conv2d_int8_window_sample(
                 last_ic = ic
                 last_input_byte = input_byte
                 last_weight_byte = weight_byte
+                lane_index += 1
             if len(act_values) >= max_count:
                 break
         if len(act_values) >= max_count:
@@ -175,7 +184,8 @@ def conv2d_int8_window_sample(
     last_ow = (last_out_elem % last_out_area) // max(layer.out_c, 1)
     last_valid_count = 0
     last_first_valid = False
-    for lane in range(elem_count):
+    for rel_lane in range(elem_count):
+        lane = start_lane + rel_lane
         kh = lane // max(layer.k_w * layer.in_c, 1)
         rem = lane % max(layer.k_w * layer.in_c, 1)
         kw = rem // max(layer.in_c, 1)
@@ -186,7 +196,7 @@ def conv2d_int8_window_sample(
             kh < layer.k_h and kw < layer.k_w and ic < layer.in_c and
             0 <= ih < layer.in_h and 0 <= iw < layer.in_w
         )
-        if lane == 0:
+        if rel_lane == 0:
             last_first_valid = lane_valid
         if lane_valid:
             last_valid_count += 1
@@ -739,12 +749,107 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
     return None
 
 
-def conv_partial_psum_descriptors(desc: list[int]) -> list[list[int]]:
-    first = list(desc)
-    accum = list(desc)
-    first[3] |= 1 << 4
-    accum[3] |= 1 << 5
-    return [first, accum]
+def int8_conv_sample_descriptor(
+    layer: Layer,
+    ordinal: int,
+    start_lane: int = 0,
+    max_count: int = 16,
+    psum_flag: int = 0,
+    expected_psum: int | None = None,
+) -> tuple[list[int], int] | None:
+    data = descriptor_for_layer.program_bytes
+    addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20) & 0x3FFF0)
+    (
+        act,
+        wgt,
+        elem_count,
+        sample_kh,
+        sample_kw,
+        sample_ic,
+        expected_input_offset,
+        expected_weight_offset,
+        expected_output_offset,
+        expected_valid,
+        expected_first_input_offset,
+        expected_first_weight_offset,
+        expected_valid_count,
+        tile_count,
+        expected_tile_last_valid,
+        expected_tile_last_valid_count,
+    ) = conv2d_int8_window_sample(layer, data, max_count=max_count, start_lane=start_lane)
+    if elem_count == 0:
+        return None
+    bias = 0
+    multiplier = 1073741824
+    shift = 1
+    acc = bias
+    for idx in range(elem_count):
+        acc += i8(act[idx]) * i8(wgt[idx])
+    scaled = mbqm(clamp_i32(acc), multiplier, shift)
+    scaled = max(-128, min(127, scaled))
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_CONV
+    words[1] = elem_count
+    words[2] = addr
+    words[3] = (1 << 2) | ((1 if expected_valid else 0) << 3) | psum_flag
+    for idx in range(4):
+        words[4 + idx] = pack_word(act[idx * 4:(idx + 1) * 4])
+        words[8 + idx] = pack_word(wgt[idx * 4:(idx + 1) * 4])
+    words[12] = elem_count
+    words[13] = bias & 0xFFFF_FFFF
+    words[14] = multiplier & 0xFFFF_FFFF
+    words[15] = shift & 0xFF
+    words[16] = (-128) & 0xFFFF_FFFF
+    words[17] = 127
+    words[18] = scaled & 0xFF
+    words[19] = (expected_psum if expected_psum is not None else layer.index) & 0xFFFF_FFFF
+    words[20] = (layer.in_h & 0xFFFF) | ((layer.in_w & 0xFFFF) << 16)
+    words[21] = (layer.in_c & 0xFFFF) | ((layer.out_c & 0xFFFF) << 16)
+    words[22] = ((layer.k_h & 0xFF) |
+                 ((layer.k_w & 0xFF) << 8) |
+                 (1 << 16) |
+                 (1 << 24))
+    words[23] = (1 | (1 << 8) | ((sample_kh & 0xFF) << 16) | ((sample_kw & 0xFF) << 24))
+    words[24] = (sample_ic & 0xFFFF) | ((layer.out_w & 0xFFFF) << 16)
+    words[25] = expected_input_offset & 0xFFFF_FFFF
+    words[26] = expected_weight_offset & 0xFFFF_FFFF
+    words[27] = expected_output_offset & 0xFFFF_FFFF
+    words[28] = expected_first_input_offset & 0xFFFF_FFFF
+    words[29] = expected_first_weight_offset & 0xFFFF_FFFF
+    words[30] = expected_valid_count & 0xFFFF_FFFF
+    words[31] = (
+        (tile_count & 0xFF) |
+        ((expected_tile_last_valid_count & 0xFF) << 8) |
+        ((1 if expected_tile_last_valid else 0) << 16)
+    )
+    return words, acc
+
+
+def conv_partial_psum_descriptors(layer: Layer, ordinal: int) -> list[list[int]]:
+    first = int8_conv_sample_descriptor(
+        layer,
+        ordinal,
+        start_lane=0,
+        max_count=8,
+        psum_flag=1 << 4,
+    )
+    if first is None:
+        return []
+    first_desc, first_acc = first
+    first_desc[19] = first_acc & 0xFFFF_FFFF
+    second = int8_conv_sample_descriptor(
+        layer,
+        ordinal + 1,
+        start_lane=first_desc[12] & 0xFF,
+        max_count=8,
+        psum_flag=1 << 5,
+        expected_psum=first_acc,
+    )
+    if second is None:
+        return [first_desc]
+    second_desc, second_acc = second
+    second_desc[19] = (first_acc + second_acc) & 0xFFFF_FFFF
+    return [first_desc, second_desc]
 
 
 def requant_descriptor_for_conv(layer: Layer, ordinal: int) -> list[int] | None:
@@ -805,7 +910,7 @@ def parse_args() -> argparse.Namespace:
         "--emit-conv-partial-psum",
         action="store_true",
         help=(
-            "Experimental: duplicate generated INT8 CONV sample descriptors as "
+            "Experimental: split generated INT8 CONV sample descriptors into "
             "psum first/accumulate pairs."
         ),
     )
@@ -832,7 +937,7 @@ def main() -> int:
             (desc[0] & 0xF) == OP_CONV and
             (desc[12] & ((1 << 8) | (1 << 11))) == 0
         ):
-            descs = conv_partial_psum_descriptors(desc)
+            descs = conv_partial_psum_descriptors(layer, len(commands))
         else:
             descs = [desc] if desc is not None else []
         req_desc = requant_descriptor_for_conv(layer, len(commands) + len(descs))

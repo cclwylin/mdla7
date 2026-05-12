@@ -168,7 +168,7 @@ module host_final #(
         {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
     wire [31:0] expected_conv_tile_acc_value = conv_acc_out;
     wire [31:0] expected_conv_psum_acc_value =
-        cmd_mem[base + 3][5] ? (conv_acc_out + conv_acc_out) : conv_acc_out;
+        (cmd_mem[base + 3][4] || cmd_mem[base + 3][5]) ? cmd_mem[base + 19] : conv_acc_out;
 
     assign top_done_ready = 1'b1;
 
@@ -268,6 +268,7 @@ module host_final #(
         cmd_mem[16] = -32'sd128;
         cmd_mem[17] = 32'sd127;
         cmd_mem[18] = 32'd18;
+        cmd_mem[19] = 32'd18;
         cmd_mem[20] = 32'h0006_0001;
         cmd_mem[21] = 32'h0001_0001;
         cmd_mem[22] = 32'h0101_0601;
@@ -297,6 +298,7 @@ module host_final #(
         cmd_mem[48] = -32'sd128;
         cmd_mem[49] = 32'sd127;
         cmd_mem[50] = 32'd18;
+        cmd_mem[51] = 32'd36;
         cmd_mem[52] = 32'h0006_0001;
         cmd_mem[53] = 32'h0001_0001;
         cmd_mem[54] = 32'h0101_0601;
