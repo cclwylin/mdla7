@@ -113,6 +113,9 @@ module Testbench_top_byte_movers;
     wire [3:0] conv_shadow_valid_mask;
     wire [127:0] conv_shadow_output_byte_offsets;
     wire [127:0] conv_shadow_q_values;
+    wire [15:0] conv_shadow_mem_valid_mask;
+    wire [511:0] conv_shadow_mem_output_byte_offsets;
+    wire [511:0] conv_shadow_mem_q_values;
     wire [3:0] conv_psum_valid_mask;
     wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
@@ -241,6 +244,9 @@ module Testbench_top_byte_movers;
         .conv_shadow_valid_mask(conv_shadow_valid_mask),
         .conv_shadow_output_byte_offsets(conv_shadow_output_byte_offsets),
         .conv_shadow_q_values(conv_shadow_q_values),
+        .conv_shadow_mem_valid_mask(conv_shadow_mem_valid_mask),
+        .conv_shadow_mem_output_byte_offsets(conv_shadow_mem_output_byte_offsets),
+        .conv_shadow_mem_q_values(conv_shadow_mem_q_values),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
@@ -481,8 +487,14 @@ module Testbench_top_byte_movers;
             (conv_shadow_output_byte_offsets[31:0] != 32'd0) ||
             (conv_shadow_output_byte_offsets[95:64] != 32'd2) ||
             ($signed(conv_shadow_q_values[31:0]) != 32'sd80) ||
-            ($signed(conv_shadow_q_values[95:64]) != 32'sd80)) begin
-            $display("FAIL: CONV psum accumulate mask=%04b psum0=%0d psum2=%0d tile_q_sum=%0d wb_mask=%04b wb_off2=%0d wb_q2=%0d shadow_mask=%04b shadow_q2=%0d",
+            ($signed(conv_shadow_q_values[95:64]) != 32'sd80) ||
+            (conv_shadow_mem_valid_mask[0] != 1'b1) ||
+            (conv_shadow_mem_valid_mask[2] != 1'b1) ||
+            (conv_shadow_mem_output_byte_offsets[31:0] != 32'd0) ||
+            (conv_shadow_mem_output_byte_offsets[95:64] != 32'd2) ||
+            ($signed(conv_shadow_mem_q_values[31:0]) != 32'sd80) ||
+            ($signed(conv_shadow_mem_q_values[95:64]) != 32'sd80)) begin
+            $display("FAIL: CONV psum accumulate mask=%04b psum0=%0d psum2=%0d tile_q_sum=%0d wb_mask=%04b wb_off2=%0d wb_q2=%0d shadow_mask=%04b shadow_q2=%0d mem_mask=%04x mem_q2=%0d",
                      conv_psum_valid_mask,
                      $signed(conv_psum_acc_values[31:0]),
                      $signed(conv_psum_acc_values[95:64]),
@@ -491,7 +503,9 @@ module Testbench_top_byte_movers;
                      conv_writeback_output_byte_offsets[95:64],
                      $signed(conv_writeback_q_values[95:64]),
                      conv_shadow_valid_mask,
-                     $signed(conv_shadow_q_values[95:64]));
+                     $signed(conv_shadow_q_values[95:64]),
+                     conv_shadow_mem_valid_mask,
+                     $signed(conv_shadow_mem_q_values[95:64]));
             failures = failures + 1;
         end
         conv_partial_accumulate = 1'b0;

@@ -379,6 +379,9 @@ module vf_conv_sample_engine #(
     output reg [3:0]              conv_shadow_valid_mask,
     output reg [127:0]            conv_shadow_output_byte_offsets,
     output reg [127:0]            conv_shadow_q_values,
+    output reg [15:0]             conv_shadow_mem_valid_mask,
+    output reg [511:0]            conv_shadow_mem_output_byte_offsets,
+    output reg [511:0]            conv_shadow_mem_q_values,
     output reg [3:0]              conv_psum_valid_mask,
     output reg [127:0]            conv_psum_acc_values
 );
@@ -409,10 +412,13 @@ module vf_conv_sample_engine #(
     reg signed [31:0] i16_acc;
     integer tile_i;
     integer psum_i;
+    integer wb_i;
     reg signed [31:0] tile_result_acc_value;
     reg signed [31:0] tile_result_quantized;
     reg signed [31:0] tile_result_clamped;
     reg signed [31:0] tile_result_q_value;
+    reg [31:0] writeback_offset_value;
+    reg [3:0] writeback_slot;
 
     function [31:0] ceil_div;
         input [31:0] value;
@@ -845,6 +851,9 @@ module vf_conv_sample_engine #(
             conv_shadow_valid_mask <= 4'd0;
             conv_shadow_output_byte_offsets <= 128'd0;
             conv_shadow_q_values <= 128'd0;
+            conv_shadow_mem_valid_mask <= 16'd0;
+            conv_shadow_mem_output_byte_offsets <= 512'd0;
+            conv_shadow_mem_q_values <= 512'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -894,6 +903,18 @@ module vf_conv_sample_engine #(
                             conv_shadow_valid_mask <= conv_writeback_valid_mask;
                             conv_shadow_output_byte_offsets <= conv_writeback_output_byte_offsets;
                             conv_shadow_q_values <= conv_writeback_q_values;
+                            for (wb_i = 0; wb_i < 4; wb_i = wb_i + 1) begin
+                                if (conv_writeback_valid_mask[wb_i]) begin
+                                    writeback_offset_value =
+                                        conv_writeback_output_byte_offsets[wb_i*32 +: 32];
+                                    writeback_slot = writeback_offset_value[3:0];
+                                    conv_shadow_mem_valid_mask[writeback_slot] <= 1'b1;
+                                    conv_shadow_mem_output_byte_offsets[writeback_slot*32 +: 32] <=
+                                        conv_writeback_output_byte_offsets[wb_i*32 +: 32];
+                                    conv_shadow_mem_q_values[writeback_slot*32 +: 32] <=
+                                        conv_writeback_q_values[wb_i*32 +: 32];
+                                end
+                            end
                         end
                         state <= ST_DONE;
                     end

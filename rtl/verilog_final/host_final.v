@@ -113,6 +113,9 @@ module host_final #(
     input      [3:0]   conv_shadow_valid_mask,
     input      [127:0] conv_shadow_output_byte_offsets,
     input      [127:0] conv_shadow_q_values,
+    input      [15:0]  conv_shadow_mem_valid_mask,
+    input      [511:0] conv_shadow_mem_output_byte_offsets,
+    input      [511:0] conv_shadow_mem_q_values,
     input      [3:0]   conv_psum_valid_mask,
     input      [127:0] conv_psum_acc_values,
     input signed [31:0] requant_scaled_out,
@@ -171,6 +174,7 @@ module host_final #(
     wire [31:0] expected_conv_tile_last_byte_offset =
         expected_conv_tile_last_index *
         {30'd0, ((cmd_mem[base + 12][8] || cmd_mem[base + 12][11]) ? 2'd2 : 2'd1)};
+    wire [3:0] expected_conv_tile_last_shadow_slot = expected_conv_tile_last_byte_offset[3:0];
     wire [31:0] expected_conv_tile_q_value =
         {{24{cmd_mem[base + 18][7]}}, cmd_mem[base + 18][7:0]};
     wire [31:0] expected_conv_tile_acc_value =
@@ -609,11 +613,19 @@ module host_final #(
                              (conv_shadow_valid_mask !== expected_conv_tile_valid_mask) ||
                              (conv_shadow_output_byte_offsets[31:0] !== 32'd0) ||
                              (conv_shadow_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
-                              expected_conv_tile_last_byte_offset) ||
+                             expected_conv_tile_last_byte_offset) ||
                              (conv_shadow_q_values[31:0] !== expected_conv_tile_q_value) ||
                              (conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32] !==
+                              expected_conv_tile_q_value) ||
+                             !conv_shadow_mem_valid_mask[4'd0] ||
+                             !conv_shadow_mem_valid_mask[expected_conv_tile_last_shadow_slot] ||
+                             (conv_shadow_mem_output_byte_offsets[31:0] !== 32'd0) ||
+                             (conv_shadow_mem_output_byte_offsets[expected_conv_tile_last_shadow_slot * 32 +: 32] !==
+                              expected_conv_tile_last_byte_offset) ||
+                             (conv_shadow_mem_q_values[31:0] !== expected_conv_tile_q_value) ||
+                             (conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32] !==
                               expected_conv_tile_q_value))) begin
-                            $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d",
+                            $display("HOST_FINAL_FAIL: CONV writeback cmd=%0d mask=%04b expected=%04b off0=%0d off_last=%0d expected=%0d q0=%0d q_last=%0d expected=%0d shadow_mask=%04b shadow_off_last=%0d shadow_q_last=%0d mem_mask=%04x mem_last_slot=%0d mem_off_last=%0d mem_q_last=%0d",
                                      command_index,
                                      conv_writeback_valid_mask,
                                      expected_conv_tile_valid_mask,
@@ -625,7 +637,11 @@ module host_final #(
                                      $signed(expected_conv_tile_q_value),
                                      conv_shadow_valid_mask,
                                      conv_shadow_output_byte_offsets[(expected_conv_tile_count - 8'd1) * 32 +: 32],
-                                     $signed(conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]));
+                                     $signed(conv_shadow_q_values[(expected_conv_tile_count - 8'd1) * 32 +: 32]),
+                                     conv_shadow_mem_valid_mask,
+                                     expected_conv_tile_last_shadow_slot,
+                                     conv_shadow_mem_output_byte_offsets[expected_conv_tile_last_shadow_slot * 32 +: 32],
+                                     $signed(conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32]));
                             test_fail <= 1'b1;
                         end
                         if ((desc_op_class == OP_REQUANT) &&

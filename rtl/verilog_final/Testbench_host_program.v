@@ -107,6 +107,9 @@ module Testbench_host_program;
     wire [3:0] conv_shadow_valid_mask;
     wire [127:0] conv_shadow_output_byte_offsets;
     wire [127:0] conv_shadow_q_values;
+    wire [15:0] conv_shadow_mem_valid_mask;
+    wire [511:0] conv_shadow_mem_output_byte_offsets;
+    wire [511:0] conv_shadow_mem_q_values;
     wire [3:0] conv_psum_valid_mask;
     wire [127:0] conv_psum_acc_values;
     wire signed [31:0] requant_scaled_out;
@@ -237,6 +240,9 @@ module Testbench_host_program;
         .conv_shadow_valid_mask(conv_shadow_valid_mask),
         .conv_shadow_output_byte_offsets(conv_shadow_output_byte_offsets),
         .conv_shadow_q_values(conv_shadow_q_values),
+        .conv_shadow_mem_valid_mask(conv_shadow_mem_valid_mask),
+        .conv_shadow_mem_output_byte_offsets(conv_shadow_mem_output_byte_offsets),
+        .conv_shadow_mem_q_values(conv_shadow_mem_q_values),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
@@ -365,6 +371,9 @@ module Testbench_host_program;
         .conv_shadow_valid_mask(conv_shadow_valid_mask),
         .conv_shadow_output_byte_offsets(conv_shadow_output_byte_offsets),
         .conv_shadow_q_values(conv_shadow_q_values),
+        .conv_shadow_mem_valid_mask(conv_shadow_mem_valid_mask),
+        .conv_shadow_mem_output_byte_offsets(conv_shadow_mem_output_byte_offsets),
+        .conv_shadow_mem_q_values(conv_shadow_mem_q_values),
         .conv_psum_valid_mask(conv_psum_valid_mask),
         .conv_psum_acc_values(conv_psum_acc_values),
         .requant_scaled_out(requant_scaled_out),
