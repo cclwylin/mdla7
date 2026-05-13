@@ -24,7 +24,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-OUT_DIR = HERE / "output"
+OUT_ROOT = HERE / "output"
+OUT_DIR = OUT_ROOT
 OUTPUT_DIR = OUT_DIR
 SYSTEMC_DIR = REPO_ROOT / "systemc"
 COMPILE_PY = SYSTEMC_DIR / "scripts" / "compile_model.py"
@@ -96,6 +97,14 @@ if VENV_PY.exists() and Path(sys.prefix).resolve() != VENV_DIR.resolve():
     os.execv(str(VENV_PY), [str(VENV_PY), __file__, *sys.argv[1:]])
 
 
+def _set_output_dir(mode: str) -> None:
+    global OUT_DIR, OUTPUT_DIR
+    safe = (mode or "fast").replace("/", "-")
+    OUT_DIR = OUT_ROOT / safe
+    OUTPUT_DIR = OUT_DIR
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def _artefact_paths(model: Path) -> dict[str, Path]:
     """Per-model output paths under output/<stem>.* — mdla7_model_runner derives
     .profile.json / .profile.csv from the program.bin stem so we just need
@@ -104,7 +113,7 @@ def _artefact_paths(model: Path) -> dict[str, Path]:
     Note: model names like 'mobilenet_v1_0.25_128_quant.tflite' contain dots
     in the stem, so we use f-strings rather than Path.with_suffix() (which
     treats '.25_128_quant' as a suffix and strips it)."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stem = model.stem
     return {
         "prog":  OUTPUT_DIR / f"{stem}.bin",
@@ -182,7 +191,8 @@ def _status_with_compile_skips(status: str, compile_stdout: str) -> str:
 
 
 def _write_html_report(model: Path, paths: dict[str, Path],
-                       log_lines: list[str]) -> Path:
+                       log_lines: list[str],
+                       mode_label: str = "") -> Path:
     """Bundle console output + profile summary + interactive Gantt into one HTML.
 
     Self-contained — no CDN deps. The Gantt is a vanilla-JS SVG widget driven
@@ -953,7 +963,8 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         "original-TFLite final-output checker</span>"
     )
 
-    title = f"MDLA7 profile — {model.name}"
+    tag = f" ({mode_label})" if mode_label else ""
+    title = f"MDLA7 profile — {model.name}{tag}"
     n_pass = int(summary.get("pass", 0) or 0)
     n_fail = int(summary.get("fail", 0) or 0)
     n_total = int(summary.get("layers", 0) or 0)
@@ -2058,12 +2069,13 @@ def _mode_paths(model_path: Path, mode: str) -> dict[str, Path]:
     if mode == "fast":
         return paths
     stem = model_path.stem
+    file_stem = stem if OUT_DIR.name == mode else f"{stem}.{mode}"
     return {
-        "prog":  OUT_DIR / f"{stem}.{mode}.bin",
-        "prof":  OUT_DIR / f"{stem}.{mode}.profile.json",
-        "csv":   OUT_DIR / f"{stem}.{mode}.profile.csv",
-        "gantt": OUT_DIR / f"{stem}.{mode}.profile.png",
-        "html":  OUT_DIR / f"{stem}.{mode}.html",
+        "prog":  OUT_DIR / f"{file_stem}.bin",
+        "prof":  OUT_DIR / f"{file_stem}.profile.json",
+        "csv":   OUT_DIR / f"{file_stem}.profile.csv",
+        "gantt": OUT_DIR / f"{file_stem}.profile.png",
+        "html":  OUT_DIR / f"{file_stem}.html",
     }
 
 
@@ -2082,7 +2094,8 @@ def _selected_log_lines(compile_stdout: str, sim_stdout: str) -> list[str]:
 
 
 def _write_mode_html(model_path: Path, paths: dict[str, Path],
-                     compile_stdout: str, sim_stdout: str) -> Path:
+                     compile_stdout: str, sim_stdout: str,
+                     mode_label: str = "") -> Path:
     if not paths["prof"].exists():
         raise RuntimeError(f"profile missing: {paths['prof'].name}")
 
@@ -2095,7 +2108,8 @@ def _write_mode_html(model_path: Path, paths: dict[str, Path],
         raise RuntimeError(f"gantt-fail: {msg[:80]}")
 
     return _write_html_report(model_path, paths,
-                              _selected_log_lines(compile_stdout, sim_stdout))
+                              _selected_log_lines(compile_stdout, sim_stdout),
+                              mode_label)
 
 
 def _write_combined_html(model_path: Path,
@@ -2249,7 +2263,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
             last = "corrupt .tflite"
         return pattern, None, None, None, f"compile-fail: {last[:80]}", "", ""
 
-    # ---- simulate: fast report path ----
+    # ---- simulate/report path ----
     if progress:
         progress(f"simulate {_mode_display(l1_timing, engine_model)}")
     ms, status, fast_stdout = _simulate_one(bin_path, l1_timing, engine_model=engine_model)
@@ -2257,9 +2271,10 @@ def run_one(pattern: str, model_dir: Path, progress=None,
     fast_html = OUT_DIR / f"{canonical}.fast.html" if not suffix else paths["html"]
     if not skip_html:
         if progress:
-            progress("html fast")
+            progress(f"html {_mode_display(l1_timing, engine_model)}")
         try:
-            _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout)
+            _write_mode_html(model_path, paths, cr.stdout or "", fast_stdout,
+                             _mode_display(l1_timing, engine_model))
             if paths["html"].exists() and paths["html"] != fast_html:
                 fast_html.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(paths["html"], fast_html)
@@ -2288,7 +2303,8 @@ def run_one(pattern: str, model_dir: Path, progress=None,
         if progress:
             progress("html conflict")
         try:
-            _write_mode_html(model_path, conflict_paths, cr.stdout or "", conflict_stdout)
+            _write_mode_html(model_path, conflict_paths, cr.stdout or "", conflict_stdout,
+                             "conflict")
         except Exception as e:
             if conflict_status == "ok":
                 conflict_status = f"html-fail: {str(e)[:80]}"
@@ -2311,7 +2327,8 @@ def run_one(pattern: str, model_dir: Path, progress=None,
         if progress:
             progress("html mesh")
         try:
-            _write_mode_html(model_path, mesh_paths, cr.stdout or "", mesh_stdout)
+            _write_mode_html(model_path, mesh_paths, cr.stdout or "", mesh_stdout,
+                             "mesh")
         except Exception as e:
             if mesh_status == "ok":
                 mesh_status = f"html-fail: {str(e)[:80]}"
@@ -2944,15 +2961,22 @@ def run_corpus(*,
     args.compare_rtl_fast = False
     args.compare_cx_rtl = False
 
-    OUT_DIR.mkdir(exist_ok=True)
-    default_csv = Path(default_csv_out)
+    output_mode = _mode_display(args.l1_timing, args.engine_model)
+    _set_output_dir(output_mode)
+    configured_csv = Path(args.csv_out)
+    configured_is_default = configured_csv == Path(default_csv_out)
+    default_csv = OUT_DIR / Path(default_csv_out).name
+    if configured_is_default:
+        args.csv_out = str(default_csv)
     suffix = "" if (args.compare_rtl_fast or args.compare_cx_rtl) else _mode_suffix(
         args.l1_timing, args.engine_model)
-    if suffix and Path(args.csv_out) == default_csv:
+    if suffix and OUT_DIR.name != suffix and configured_is_default:
         args.csv_out = str(default_csv.with_name(
             f"{default_csv.stem}.{suffix}{default_csv.suffix}"))
     profile_suffix = "" if (args.compare_rtl_fast or args.compare_cx_rtl) else _profile_mode_suffix(
         args.l1_timing, args.engine_model)
+    if not profile_suffix and not (args.compare_rtl_fast or args.compare_cx_rtl):
+        profile_suffix = "fast"
     if profile_suffix:
         profile_path = Path(profile_html)
         profile_html = str(profile_path.with_name(

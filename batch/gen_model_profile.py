@@ -111,6 +111,17 @@ def _candidate_output_paths(stem: str, suffix: str) -> list[Path]:
     base = Path(stem).name
     if base != stem:
         paths.append(OUT_DIR / f"{base}{suffix}")
+    for mode in ("fast", "cx"):
+        paths.append(OUT_DIR / mode / f"{stem}{suffix}")
+        if base != stem:
+            paths.append(OUT_DIR / mode / f"{base}{suffix}")
+        marker = f".{mode}"
+        if stem.endswith(marker):
+            plain = stem[: -len(marker)]
+            paths.append(OUT_DIR / mode / f"{plain}{suffix}")
+            plain_base = Path(plain).name
+            if plain_base != plain:
+                paths.append(OUT_DIR / mode / f"{plain_base}{suffix}")
     return paths
 
 
@@ -240,7 +251,13 @@ def collect_rows(metrics_csvs: list[Path],
         rows.sort(key=lambda row: str(row.get("pattern") or ""))
         return rows
     allowed = None
-    for html in sorted(OUT_DIR.glob("*.html")):
+    seen: set[str] = set()
+    htmls = (
+        sorted(OUT_DIR.glob("*.html")) +
+        sorted((OUT_DIR / "fast").glob("*.html")) +
+        sorted((OUT_DIR / "cx").glob("*.html"))
+    )
+    for html in htmls:
         stem = html.stem
         if stem.startswith(("model_profile", "profile_")) or stem.startswith("._"):
             continue
@@ -248,6 +265,9 @@ def collect_rows(metrics_csvs: list[Path],
             continue
         if allowed is not None and stem not in allowed:
             continue
+        if stem in seen:
+            continue
+        seen.add(stem)
         metric = metrics.get(stem, {
             "pattern": stem, "mdla6_cx": "", "ms": "", "conflict_ms": "", "mesh_ms": "",
             "fuse_hit": "", "fuse_flows": "", "streamed_layers": "",
@@ -293,7 +313,7 @@ def collect_rows(metrics_csvs: list[Path],
             "label": _link_label(stem),
             "type": "Hotspot" if "_L" in stem else (
                 "Transformer" if stem in TRANSFORMER_PATTERNS else ""),
-            "link": f"output/{html.name}",
+            "link": _link_for_output(html, stem),
             "mdla6_cx": mdla6_cx,
             "our_ms": our_ms,
             "conflict_ms": conflict_ms,
@@ -391,12 +411,19 @@ def main() -> None:
       <th><button class="sort-btn" data-sort-key="mb_stages">mb stages <span class="sort-mark"></span></button></th>""" if show_mb else ""
     live_csv = DEFAULT_REGRESSION_CSV
     for path in reversed(metrics_csvs):
-        if path.parent.resolve() == OUT_DIR.resolve():
-            live_csv = path
-            break
+        try:
+            path.resolve().relative_to(OUT_DIR.resolve())
+        except ValueError:
+            continue
+        live_csv = path
+        break
     live_csv_rel = _relative_url(live_csv.resolve(), html_out.parent)
     live_csv_json = json.dumps(live_csv_rel)
     output_dir_json = json.dumps(_relative_url(OUT_DIR.resolve(), html_out.parent) + "/")
+    output_dirs_json = json.dumps([
+        _relative_url((OUT_DIR / mode).resolve(), html_out.parent) + "/"
+        for mode in ("fast", "cx")
+    ] + [json.loads(output_dir_json)])
     only_metric_rows_json = "true" if args.only_metrics_rows else "false"
     html = f"""<!doctype html>
 <html>
@@ -470,6 +497,7 @@ tr:hover td {{ background:#f4f7fb; }}
 const EMBEDDED_ROWS = {rows_json};
 const LIVE_CSV = {live_csv_json};
 const OUTPUT_DIR = {output_dir_json};
+const OUTPUT_DIRS = {output_dirs_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
 const SHOW_MDLA6_CX = {show_mdla6_cx_json};
 const SHOW_MODE_COLUMNS = {show_mode_columns_json};
@@ -718,28 +746,39 @@ async function refreshFromOutput() {{
   const status = document.getElementById("status");
   try {{
     status.textContent = "checking output/ ...";
-    const [dirText, csvText] = await Promise.all([
-      fetch(OUTPUT_DIR).then(r => r.text()),
+    const [dirTexts, csvText] = await Promise.all([
+      Promise.all(OUTPUT_DIRS.map(dir =>
+        fetch(dir).then(r => r.ok ? r.text() : "").catch(() => "")
+      )),
       fetch(LIVE_CSV).then(r => r.ok ? r.text() : "").catch(() => "")
     ]);
     const mdla6Cx = csvParse(csvText);
-    const doc = new DOMParser().parseFromString(dirText, "text/html");
-    const names = [...doc.querySelectorAll("a")]
-      .map(a => a.getAttribute("href") || "")
-      .map(h => decodeURIComponent(h.split("/").pop()))
-      .filter(n => n && n.endsWith(".html") && n !== "model_profile.html" &&
-                   !n.startsWith("profile_") &&
-                   !n.startsWith("._") && !n.endsWith(".fast.html") &&
-                   !n.endsWith(".conflict.html") && !n.endsWith(".mesh.html"));
+    const entries = [];
+    for (const [idx, dirText] of dirTexts.entries()) {{
+      const dir = OUTPUT_DIRS[idx];
+      const doc = new DOMParser().parseFromString(dirText, "text/html");
+      for (const a of doc.querySelectorAll("a")) {{
+        const n = decodeURIComponent((a.getAttribute("href") || "").split("/").pop());
+        if (n && n.endsWith(".html") && n !== "model_profile.html" &&
+            !n.startsWith("profile_") &&
+            !n.startsWith("._") && !n.endsWith(".fast.html") &&
+            !n.endsWith(".conflict.html") && !n.endsWith(".mesh.html")) {{
+          entries.push([dir, n]);
+        }}
+      }}
+    }}
     const next = [];
-    for (const name of names) {{
+    const seen = new Set();
+    for (const [dir, name] of entries) {{
       const stem = name.replace(/\\.html$/, "");
+      if (seen.has(stem)) continue;
+      seen.add(stem);
       if (ONLY_METRIC_ROWS && !mdla6Cx[stem]) continue;
       let ms = mdla6Cx[stem] && mdla6Cx[stem].ms ? Number(mdla6Cx[stem].ms) : null;
       const conflictMs = mdla6Cx[stem] && mdla6Cx[stem].conflict_ms ? Number(mdla6Cx[stem].conflict_ms) : null;
       const meshMs = mdla6Cx[stem] && mdla6Cx[stem].mesh_ms ? Number(mdla6Cx[stem].mesh_ms) : null;
       try {{
-        const p = await fetch(`${{OUTPUT_DIR}}${{stem}}.profile.json`);
+        const p = await fetch(`${{dir}}${{stem}}.profile.json`);
         if (p.ok) {{
           const j = await p.json();
           if (ms === null && j.summary && j.summary.total_cycles !== undefined)
@@ -748,7 +787,7 @@ async function refreshFromOutput() {{
       }} catch (_) {{}}
       next.push({{
         pattern: (mdla6Cx[stem] && mdla6Cx[stem].pattern) || stem,
-        stem, label: shortLinkLabel(stem), link: `${{OUTPUT_DIR}}${{name}}`,
+        stem, label: shortLinkLabel(stem), link: `${{dir}}${{name}}`,
         type: transformerType(stem),
         mdla6_cx: (mdla6Cx[stem] && mdla6Cx[stem].mdla6_cx) || "",
         our_ms: ms,

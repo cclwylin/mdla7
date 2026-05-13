@@ -82,7 +82,6 @@ MAX_FINAL_OUTPUT_SRAM_BYTES = 16 * 1024 * 1024
 PROBE_DESCRIPTOR_FLAG = 1 << 15
 READ_FROM_L1_FLAG = 1 << 11
 MICROBLOCK_FLAG = 1 << 13
-CYCLE_STREAM_FLAG = 1 << 12
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
@@ -91,8 +90,6 @@ DEFAULT_CONV_SAMPLE_COUNT = 3
 CONV_TILE_MAX_ELEMS = 255
 CONV_TILE_MAX_OUTPUTS = 32768
 CONV_PROBE_COMMANDS = 6
-CYCLE_MB_OUTPUT_GROUPS = 1024
-CYCLE_MB_BYTES = 64 * 1024
 POOL_TILE_MAX_BYTES = 8192
 BYTE_TILE_SWEEP_PROBES = 4
 MICRO_TILE_BYTES = 1 << 20
@@ -1628,106 +1625,6 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         return words
 
     return None
-
-
-def cycle_udma_descriptor(
-    layer: Layer,
-    ordinal: int,
-    byte_count: int,
-    stream_flags: int,
-    direction_write: bool = False,
-) -> list[int] | None:
-    if byte_count <= 0:
-        return None
-    payload_bytes = max(byte_count, 1)
-    addr = 0x70000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
-    words = [0] * WORDS_PER_COMMAND
-    words[0] = OP_UDMA
-    words[1] = payload_bytes & 0xFFFF_FFFF
-    words[2] = addr & 0x003F_FFFF
-    words[3] = (1 if not direction_write else (1 << 6)) | MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
-    words[4] = payload_bytes & 0xFFFF_FFFF
-    words[5] = 1 + (payload_bytes // 4096)
-    words[19] = layer.index
-    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
-    return words
-
-
-def cycle_layer_descriptors(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> list[list[int]]:
-    descs: list[list[int]] = []
-    load_a = cycle_udma_descriptor(
-        layer,
-        ordinal + len(descs),
-        min(max(layer.in_size, layer.ref_size, 1), CYCLE_MB_BYTES),
-        SMF_LOAD_A,
-    )
-    if load_a is not None:
-        descs.append(load_a)
-    if layer.wgt_size > 0:
-        load_b = cycle_udma_descriptor(
-            layer,
-            ordinal + len(descs),
-            min(layer.wgt_size, CYCLE_MB_BYTES),
-            SMF_LOAD_B,
-        )
-        if load_b is not None:
-            descs.append(load_b)
-
-    compute = descriptor_for_layer(layer, ordinal + len(descs), enable_meta_tnps)
-    if compute is None and layer.op_kind in GENERIC_REF_OPS:
-        compute = udma_ref_fill_descriptor(layer, ordinal + len(descs))
-    if compute is not None:
-        if (compute[0] & 0xF) != OP_UDMA:
-            compute[3] |= (1 << 14) | MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
-        if (compute[0] & 0xF) == OP_CONV:
-            output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
-            output_groups = ceil_div(output_elems, 16) if layer.op_kind == 6 else output_elems
-            remaining = max(output_groups, 1)
-            while remaining > 0:
-                chunk = min(remaining, CYCLE_MB_OUTPUT_GROUPS)
-                desc = compute.copy()
-                desc[31] = chunk & 0xFFFF_FFFF
-                desc[27] = ((output_groups - remaining) * max(elem_bytes(layer.dtype), 1)) & 0xFFFF_FFFF
-                stamp_synth_microblock_metadata(
-                    desc,
-                    layer.index,
-                    ordinal + len(descs),
-                    ordinal + len(descs),
-                    SMF_COMPUTE,
-                )
-                descs.append(desc)
-                remaining -= chunk
-        elif (compute[0] & 0xF) != OP_UDMA:
-            stamp_synth_microblock_metadata(
-                compute,
-                layer.index,
-                ordinal + len(descs),
-                ordinal + len(descs),
-                SMF_COMPUTE,
-            )
-            descs.append(compute)
-        else:
-            compute[3] |= MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
-            if ((compute[3] >> 24) & 0xFF) == 0:
-                stamp_synth_microblock_metadata(
-                    compute,
-                    layer.index,
-                    ordinal + len(descs),
-                    ordinal + len(descs),
-                    SMF_COMPUTE,
-                )
-            descs.append(compute)
-
-    store = cycle_udma_descriptor(
-        layer,
-        ordinal + len(descs),
-        min(max(layer.ref_size, 1), CYCLE_MB_BYTES),
-        SMF_STORE | SMF_FINAL_TILE,
-        direction_write=True,
-    )
-    if store is not None:
-        descs.append(store)
-    return descs
 
 
 def int8_conv_sample_descriptor(
@@ -3471,11 +3368,6 @@ def parse_args() -> argparse.Namespace:
             "fallback layer, even when only the final layer is otherwise checked."
         ),
     )
-    ap.add_argument(
-        "--cycle-only",
-        action="store_true",
-        help="Emit op descriptors for cycle measurement only; skip output/final CRC checks.",
-    )
     args = ap.parse_args()
     return args
 
@@ -3483,7 +3375,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     descriptor_for_layer.program_bytes = args.program.read_bytes()
-    descriptor_for_layer.max_payload_bytes = 0 if args.cycle_only else args.max_payload_bytes
+    descriptor_for_layer.max_payload_bytes = args.max_payload_bytes
     layers = parse_layers(args.program)
     commands: list[list[int]] = []
     conv_count = 0
@@ -3503,10 +3395,9 @@ def main() -> int:
     for layer in layers:
         check_materialized_layer = (
             args.check_materialized_layers and
-            not args.cycle_only and
             layer.op_kind == OK_MATERIALIZE
         )
-        if not (args.check_all_layers or args.cycle_only or check_materialized_layer) and layer.index != last_layer_index:
+        if not (args.check_all_layers or check_materialized_layer) and layer.index != last_layer_index:
             continue
         if len(commands) >= command_limit:
             break
@@ -3515,9 +3406,7 @@ def main() -> int:
         closed_loop_descs: list[list[int]] = []
         result_dram_off = closed_loop_result_dram_off(layer, len(commands))
         is_final_layer = layer.index == last_layer_index
-        if args.cycle_only:
-            descs.extend(cycle_layer_descriptors(layer, len(commands), args.enable_meta_tnps))
-        elif check_materialized_layer:
+        if check_materialized_layer:
             fill_desc = udma_ref_fill_descriptor(
                 layer,
                 len(commands),
@@ -3576,9 +3465,9 @@ def main() -> int:
         elif layer.op_kind in GENERIC_REF_OPS:
             closed_loop_descs = closed_loop_ref_passthrough_probe(
                 layer, len(commands), result_dram_off)
-        if not args.cycle_only and closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
+        if closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
             descs.extend(closed_loop_descs)
-        if not args.cycle_only and layer.index == last_layer_index:
+        if layer.index == last_layer_index:
             for desc in descs:
                 if is_sram_crc_descriptor(desc):
                     desc[3] |= SMF_FINAL_TILE << 24

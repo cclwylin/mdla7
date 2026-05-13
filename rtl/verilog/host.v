@@ -289,6 +289,10 @@ module host #(
         ((next_op == OP_UDMA) && cmd_mem[base + 3][12]);
     wire cycle_stream_descriptor_mode = cycle_only_descriptor_mode && microblock_descriptor_mode &&
         descriptor_has_stream_flags;
+    wire cycle_stream_done_expected =
+        !((desc_op_class == OP_UDMA) &&
+          ((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0) &&
+          ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_STORE | SMF_FINAL_TILE)) == 8'd0));
 
     assign top_done_ready = 1'b1;
 
@@ -782,8 +786,9 @@ module host #(
                         desc_valid <= 1'b1;
                     if (desc_valid && desc_ready) begin
                         desc_valid <= 1'b0;
-                        issued_count <= issued_count + 32'd1;
                         if (cycle_stream_descriptor_mode) begin
+                            if (cycle_stream_done_expected)
+                                issued_count <= issued_count + 32'd1;
                             measured_cycle_count <= measured_cycle_count + 32'd1;
                             if (descriptor_has_stream_flags) begin
                                 if ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0)
@@ -798,6 +803,7 @@ module host #(
                             command_index <= command_index + 32'd1;
                             state <= ST_LOAD;
                         end else begin
+                            issued_count <= issued_count + 32'd1;
                             state <= ST_WAIT;
                         end
                     end

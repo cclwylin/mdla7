@@ -289,6 +289,14 @@ module Testbench_host_program;
     wire [31:0] microblock_compute_count;
     wire [31:0] microblock_store_count;
     wire [31:0] microblock_final_count;
+    wire [31:0] perf_total_cycles;
+    wire [31:0] perf_conv_cycles;
+    wire [31:0] perf_requant_cycles;
+    wire [31:0] perf_ewe_cycles;
+    wire [31:0] perf_pool_cycles;
+    wire [31:0] perf_tnps_cycles;
+    wire [31:0] perf_udma_r_cycles;
+    wire [31:0] perf_udma_w_cycles;
     wire [8:0] block_busy;
     wire [8:0] block_done_valid;
     wire test_done;
@@ -690,6 +698,14 @@ module Testbench_host_program;
         .microblock_compute_count(microblock_compute_count),
         .microblock_store_count(microblock_store_count),
         .microblock_final_count(microblock_final_count),
+        .perf_total_cycles(perf_total_cycles),
+        .perf_conv_cycles(perf_conv_cycles),
+        .perf_requant_cycles(perf_requant_cycles),
+        .perf_ewe_cycles(perf_ewe_cycles),
+        .perf_pool_cycles(perf_pool_cycles),
+        .perf_tnps_cycles(perf_tnps_cycles),
+        .perf_udma_r_cycles(perf_udma_r_cycles),
+        .perf_udma_w_cycles(perf_udma_w_cycles),
         .block_busy(block_busy),
         .block_done_valid(block_done_valid),
         .conv_acc_out(conv_acc_out),
@@ -772,8 +788,11 @@ module Testbench_host_program;
             $display("FAIL: verilog host program counts issued=%0d done=%0d",
                      issued_count, done_count);
         end else begin
-            $display("PASS: verilog host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d verilog_cycles=%0d",
-                     issued_count, done_count, measured_cycle_count);
+            $display("PASS: verilog host-driven CONV/REQUANT/POOL/EWE/UDMA/TNPS program issued=%0d done=%0d verilog_cycles=%0d perf_total=%0d perf_conv=%0d perf_requant=%0d perf_ewe=%0d perf_pool=%0d perf_tnps=%0d perf_udma_r=%0d perf_udma_w=%0d",
+                     issued_count, done_count, measured_cycle_count,
+                     perf_total_cycles, perf_conv_cycles, perf_requant_cycles,
+                     perf_ewe_cycles, perf_pool_cycles, perf_tnps_cycles,
+                     perf_udma_r_cycles, perf_udma_w_cycles);
         end
         $finish;
     end

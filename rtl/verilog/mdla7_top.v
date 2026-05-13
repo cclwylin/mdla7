@@ -715,6 +715,14 @@ module mdla7_top #(
     output     [31:0]           microblock_compute_count,
     output     [31:0]           microblock_store_count,
     output     [31:0]           microblock_final_count,
+    output reg [31:0]           perf_total_cycles,
+    output reg [31:0]           perf_conv_cycles,
+    output reg [31:0]           perf_requant_cycles,
+    output reg [31:0]           perf_ewe_cycles,
+    output reg [31:0]           perf_pool_cycles,
+    output reg [31:0]           perf_tnps_cycles,
+    output reg [31:0]           perf_udma_r_cycles,
+    output reg [31:0]           perf_udma_w_cycles,
     output     [8:0]            block_busy,
     output     [8:0]            block_done_valid,
     output signed [31:0]        conv_acc_out,
@@ -1123,6 +1131,9 @@ module mdla7_top #(
     wire udma_start = start_pending && run_udma;
     wire tnps_start = start_pending && run_tnps;
     wire l1mesh_crc_start = start_pending && run_l1crc && !l1mesh_crc_busy;
+    wire perf_mb_load = mb_busy && (mb_active_phase_id == 4'd2);
+    wire perf_mb_compute = mb_busy && ((mb_active_phase_id == 4'd4) || (mb_active_phase_id == 4'd6));
+    wire perf_mb_store = mb_busy && (mb_active_phase_id == 4'd7);
 
     assign desc_ready = stream_desc_mode ? mb_desc_ready : (state == ST_IDLE);
     assign done_valid = mb_busy ? mb_done_valid : done_valid_q;
@@ -1672,6 +1683,14 @@ module mdla7_top #(
             stream_meta_flags_q <= 8'd0;
             start_pending <= 1'b0;
             engine_done_seen <= 1'b0;
+            perf_total_cycles <= 32'd0;
+            perf_conv_cycles <= 32'd0;
+            perf_requant_cycles <= 32'd0;
+            perf_ewe_cycles <= 32'd0;
+            perf_pool_cycles <= 32'd0;
+            perf_tnps_cycles <= 32'd0;
+            perf_udma_r_cycles <= 32'd0;
+            perf_udma_w_cycles <= 32'd0;
             bytes_q <= 32'd0;
             udma_dram_read_bytes_q <= 32'd0;
             udma_codec_cycles_q <= 32'd0;
@@ -1792,6 +1811,22 @@ module mdla7_top #(
             l1_resp_source_q <= l1mesh_resp_source;
             l1_resp_tid_q <= l1mesh_resp_tid;
             l1_resp_rdata_q <= l1mesh_rdata;
+            if (busy)
+                perf_total_cycles <= perf_total_cycles + 32'd1;
+            if (conv_busy || (perf_mb_compute && (mb_active_op_class == OP_CONV)))
+                perf_conv_cycles <= perf_conv_cycles + 32'd1;
+            if (requant_busy || (perf_mb_compute && (mb_active_op_class == OP_REQUANT)))
+                perf_requant_cycles <= perf_requant_cycles + 32'd1;
+            if (ewe_busy || (perf_mb_compute && (mb_active_op_class == OP_EWE)))
+                perf_ewe_cycles <= perf_ewe_cycles + 32'd1;
+            if (pool_busy || (perf_mb_compute && (mb_active_op_class == OP_POOL)))
+                perf_pool_cycles <= perf_pool_cycles + 32'd1;
+            if (tnps_busy || (perf_mb_compute && (mb_active_op_class == OP_TNPS)))
+                perf_tnps_cycles <= perf_tnps_cycles + 32'd1;
+            if ((udma_busy && !udma_direction_write_q) || perf_mb_load)
+                perf_udma_r_cycles <= perf_udma_r_cycles + 32'd1;
+            if ((udma_busy && udma_direction_write_q) || perf_mb_store)
+                perf_udma_w_cycles <= perf_udma_w_cycles + 32'd1;
             case (state)
                 ST_IDLE: begin
                     done_valid_q <= 1'b0;
