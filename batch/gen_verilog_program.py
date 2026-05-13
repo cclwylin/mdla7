@@ -90,6 +90,8 @@ DEFAULT_CONV_SAMPLE_COUNT = 3
 CONV_TILE_MAX_ELEMS = 255
 CONV_TILE_MAX_OUTPUTS = 32768
 CONV_PROBE_COMMANDS = 6
+CYCLE_MB_OUTPUT_GROUPS = 1024
+CYCLE_MB_BYTES = 64 * 1024
 POOL_TILE_MAX_BYTES = 8192
 BYTE_TILE_SWEEP_PROBES = 4
 MICRO_TILE_BYTES = 1 << 20
@@ -1612,6 +1614,97 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         return words
 
     return None
+
+
+def cycle_udma_descriptor(
+    layer: Layer,
+    ordinal: int,
+    byte_count: int,
+    stream_flags: int,
+    direction_write: bool = False,
+) -> list[int] | None:
+    if byte_count <= 0:
+        return None
+    payload_bytes = max(byte_count, 1)
+    addr = 0x70000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_UDMA
+    words[1] = payload_bytes & 0xFFFF_FFFF
+    words[2] = addr & 0x003F_FFFF
+    words[3] = (1 if not direction_write else (1 << 6)) | MICROBLOCK_FLAG
+    words[4] = payload_bytes & 0xFFFF_FFFF
+    words[5] = 1 + (payload_bytes // 4096)
+    words[19] = layer.index
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, stream_flags)
+    return words
+
+
+def cycle_layer_descriptors(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> list[list[int]]:
+    descs: list[list[int]] = []
+    load_a = cycle_udma_descriptor(
+        layer,
+        ordinal + len(descs),
+        min(max(layer.in_size, layer.ref_size, 1), CYCLE_MB_BYTES),
+        SMF_LOAD_A,
+    )
+    if load_a is not None:
+        descs.append(load_a)
+    if layer.wgt_size > 0:
+        load_b = cycle_udma_descriptor(
+            layer,
+            ordinal + len(descs),
+            min(layer.wgt_size, CYCLE_MB_BYTES),
+            SMF_LOAD_B,
+        )
+        if load_b is not None:
+            descs.append(load_b)
+
+    compute = descriptor_for_layer(layer, ordinal + len(descs), enable_meta_tnps)
+    if compute is None and layer.op_kind in GENERIC_REF_OPS:
+        compute = udma_ref_fill_descriptor(layer, ordinal + len(descs))
+    if compute is not None:
+        if (compute[0] & 0xF) != OP_UDMA:
+            compute[3] |= (1 << 14) | MICROBLOCK_FLAG
+        if (compute[0] & 0xF) == OP_CONV:
+            output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+            output_groups = ceil_div(output_elems, 16) if layer.op_kind == 6 else output_elems
+            remaining = max(output_groups, 1)
+            while remaining > 0:
+                chunk = min(remaining, CYCLE_MB_OUTPUT_GROUPS)
+                desc = compute.copy()
+                desc[31] = chunk & 0xFFFF_FFFF
+                desc[27] = ((output_groups - remaining) * max(elem_bytes(layer.dtype), 1)) & 0xFFFF_FFFF
+                stamp_synth_microblock_metadata(
+                    desc,
+                    layer.index,
+                    ordinal + len(descs),
+                    ordinal + len(descs),
+                    SMF_COMPUTE,
+                )
+                descs.append(desc)
+                remaining -= chunk
+        elif (compute[0] & 0xF) != OP_UDMA:
+            stamp_synth_microblock_metadata(
+                compute,
+                layer.index,
+                ordinal + len(descs),
+                ordinal + len(descs),
+                SMF_COMPUTE,
+            )
+            descs.append(compute)
+        else:
+            descs.append(compute)
+
+    store = cycle_udma_descriptor(
+        layer,
+        ordinal + len(descs),
+        min(max(layer.ref_size, 1), CYCLE_MB_BYTES),
+        SMF_STORE | SMF_FINAL_TILE,
+        direction_write=True,
+    )
+    if store is not None:
+        descs.append(store)
+    return descs
 
 
 def int8_conv_sample_descriptor(
@@ -3356,16 +3449,7 @@ def main() -> int:
         closed_loop_descs: list[list[int]] = []
         result_dram_off = closed_loop_result_dram_off(layer, len(commands))
         if args.cycle_only:
-            desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
-            if desc is None and layer.op_kind in GENERIC_REF_OPS:
-                desc = udma_ref_fill_descriptor(layer, len(commands))
-            if desc is not None and (desc[0] & 0xF) != OP_UDMA:
-                desc[3] |= 1 << 14
-            if desc is not None and (desc[0] & 0xF) == OP_CONV:
-                output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
-                desc[31] = output_elems & 0xFFFF_FFFF
-            if desc is not None:
-                descs.append(desc)
+            descs.extend(cycle_layer_descriptors(layer, len(commands), args.enable_meta_tnps))
         elif layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_pool_probes(
                 layer, len(commands), result_dram_off, remaining_commands)
