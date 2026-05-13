@@ -565,22 +565,31 @@ def parse_layers(path: Path) -> list[Layer]:
     data = path.read_bytes()
     if len(data) < 16:
         raise SystemExit(f"program too small: {path}")
-    magic, _version, layers, _data_offset = struct.unpack_from("<IIII", data, 0)
+    magic, version, layers, _data_offset = struct.unpack_from("<IIII", data, 0)
     if magic != MAGIC_MDL7:
         raise SystemExit(f"bad MDL7 magic: {path}")
-    if len(data) < 16 + layers * 64:
+    if version not in (2, 3, 4):
+        raise SystemExit(f"bad MDL7 version {version}: {path}")
+    layer_size = 76 if version >= 4 else 64
+    if len(data) < 16 + layers * layer_size:
         raise SystemExit(f"truncated layer table: {path}")
 
     out: list[Layer] = []
     for index in range(layers):
-        off = 16 + index * 64
+        off = 16 + index * layer_size
         in_h, in_w, in_c, out_h, out_w, out_c = struct.unpack_from("<HHHHHH", data, off)
         k_h, k_w, s_h, s_w, p_t, p_b, p_l, p_r = struct.unpack_from("<BBBBBBBB", data, off + 12)
         in_size, wgt_size, ref_size = struct.unpack_from("<III", data, off + 32)
-        in_off, wgt_off, ref_off = struct.unpack_from("<III", data, off + 44)
-        group = struct.unpack_from("<H", data, off + 56)[0]
-        op_kind, dtype = struct.unpack_from("<HH", data, off + 58)
-        zp_in_eff = struct.unpack_from("<h", data, off + 62)[0]
+        if version >= 4:
+            in_off, wgt_off, ref_off = struct.unpack_from("<QQQ", data, off + 44)
+            group = struct.unpack_from("<H", data, off + 68)[0]
+            op_kind, dtype = struct.unpack_from("<HH", data, off + 70)
+            zp_in_eff = struct.unpack_from("<h", data, off + 74)[0]
+        else:
+            in_off, wgt_off, ref_off = struct.unpack_from("<III", data, off + 44)
+            group = struct.unpack_from("<H", data, off + 56)[0]
+            op_kind, dtype = struct.unpack_from("<HH", data, off + 58)
+            zp_in_eff = struct.unpack_from("<h", data, off + 62)[0]
         tnps_meta = None
         if wgt_size >= 104 and wgt_off + 104 <= len(data):
             meta_off = wgt_off
@@ -1094,7 +1103,7 @@ def closed_loop_ref_passthrough_probe(
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return []
-    byte_count = min(layer.ref_size, max(max_bytes, 1), 16)
+    byte_count = min(layer.ref_size, max(max_bytes, 1))
     expected = data[layer.ref_off:layer.ref_off + byte_count]
     if not expected:
         return []
@@ -1169,6 +1178,10 @@ def microblock_meta_flags(desc: list[int]) -> int:
     if desc[3] & (1 << 12):
         flags |= SMF_FINAL_TILE
     return flags
+
+
+def is_final_crc_descriptor(desc: list[int]) -> bool:
+    return bool(((desc[3] >> 24) & SMF_FINAL_TILE) != 0)
 
 
 def stamp_microblock_metadata(desc: list[int], layer_index: int, microblock_id: int, stream_slot: int) -> None:
@@ -3011,11 +3024,25 @@ def pool_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None
     return words
 
 
-def udma_ref_fill_descriptor(layer: Layer, ordinal: int, max_fill_bytes: int = MAX_FINAL_OUTPUT_SRAM_BYTES) -> list[int] | None:
+def _bounded_ref_check_size(layer: Layer, max_bytes: int) -> int:
+    if layer.ref_size <= 0:
+        return 0
+    cap = MAX_FINAL_OUTPUT_SRAM_BYTES if max_bytes <= 0 else min(max_bytes, MAX_FINAL_OUTPUT_SRAM_BYTES)
+    return min(layer.ref_size, cap)
+
+
+def udma_ref_fill_descriptor(
+    layer: Layer,
+    ordinal: int,
+    max_fill_bytes: int = MAX_FINAL_OUTPUT_SRAM_BYTES,
+    final_tile: bool = True,
+) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
-    fill_size = min(layer.ref_size, max(max_fill_bytes, 1))
+    fill_size = _bounded_ref_check_size(layer, max_fill_bytes)
+    if fill_size <= 0:
+        return None
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
@@ -3027,7 +3054,10 @@ def udma_ref_fill_descriptor(layer: Layer, ordinal: int, max_fill_bytes: int = M
     words[19] = layer.index
     words[25] = layer.ref_off & 0xFFFF_FFFF
     words[27] = 0
-    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
+    # Ref-fill is a testbench byte materialization action. Keep identity metadata
+    # for host ordering, but do not claim STORE/FINAL stream phases here; the
+    # following SRAM CRC descriptor owns the checked boundary.
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, 0)
     return mark_probe_descriptor(words)
 
 
@@ -3211,18 +3241,25 @@ def requant_l1_output_sram_crc_probe(layer: Layer, ordinal: int) -> list[list[in
     return descs
 
 
-def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+def udma_output_sram_crc_descriptor(
+    layer: Layer,
+    ordinal: int,
+    max_crc_bytes: int = MAX_FINAL_OUTPUT_SRAM_BYTES,
+    final_tile: bool = True,
+) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
-    crc_size = min(layer.ref_size, MAX_FINAL_OUTPUT_SRAM_BYTES)
+    crc_size = _bounded_ref_check_size(layer, max_crc_bytes)
+    if crc_size <= 0:
+        return None
     ref_bytes = data[layer.ref_off:layer.ref_off + crc_size]
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x3c) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
     words[1] = crc_size & 0xFFFF_FFFF
     words[2] = addr
-    words[3] = (1 << 10) | (1 << 12) | (1 << 13)
+    words[3] = (1 << 10) | (1 << 13)
     words[4] = crc_size & 0xFFFF_FFFF
     words[5] = 1
     words[19] = layer.index
@@ -3230,7 +3267,8 @@ def udma_output_sram_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | N
     words[27] = 0
     words[28] = fnv_bytes(ref_bytes)
     words[29] = len(ref_bytes)
-    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, SMF_STORE | SMF_FINAL_TILE)
+    flags = SMF_STORE | (SMF_FINAL_TILE if final_tile else 0)
+    stamp_synth_microblock_metadata(words, layer.index, ordinal, ordinal, flags)
     return mark_probe_descriptor(words)
 
 
@@ -3416,9 +3454,22 @@ def parse_args() -> argparse.Namespace:
         help="Validate every INT8 CONV output sample instead of the default sampled probes.",
     )
     ap.add_argument(
+        "--full-final-ref",
+        action="store_true",
+        help="Validate the final layer's full reference byte range with a closed-loop byte mover CRC.",
+    )
+    ap.add_argument(
         "--check-all-layers",
         action="store_true",
         help="Emit closed-loop checks for every layer. Default: only check the final layer.",
+    )
+    ap.add_argument(
+        "--check-materialized-layers",
+        action="store_true",
+        help=(
+            "Emit compact UDMA ref-fill + SRAM CRC checks for every materialized "
+            "fallback layer, even when only the final layer is otherwise checked."
+        ),
     )
     ap.add_argument(
         "--cycle-only",
@@ -3450,7 +3501,12 @@ def main() -> int:
     command_limit = max(args.max_commands - 1, 0)
     last_layer_index = layers[-1].index if layers else -1
     for layer in layers:
-        if not (args.check_all_layers or args.cycle_only) and layer.index != last_layer_index:
+        check_materialized_layer = (
+            args.check_materialized_layers and
+            not args.cycle_only and
+            layer.op_kind == OK_MATERIALIZE
+        )
+        if not (args.check_all_layers or args.cycle_only or check_materialized_layer) and layer.index != last_layer_index:
             continue
         if len(commands) >= command_limit:
             break
@@ -3458,8 +3514,35 @@ def main() -> int:
         remaining_commands = max(command_limit - len(commands), 0)
         closed_loop_descs: list[list[int]] = []
         result_dram_off = closed_loop_result_dram_off(layer, len(commands))
+        is_final_layer = layer.index == last_layer_index
         if args.cycle_only:
             descs.extend(cycle_layer_descriptors(layer, len(commands), args.enable_meta_tnps))
+        elif check_materialized_layer:
+            fill_desc = udma_ref_fill_descriptor(
+                layer,
+                len(commands),
+                args.max_payload_bytes,
+                final_tile=is_final_layer,
+            )
+            if fill_desc is not None:
+                closed_loop_descs.append(fill_desc)
+            crc_desc = udma_output_sram_crc_descriptor(
+                layer,
+                len(commands) + len(closed_loop_descs),
+                args.max_payload_bytes,
+                final_tile=is_final_layer,
+            )
+            if crc_desc is not None:
+                closed_loop_descs.append(crc_desc)
+        elif args.full_final_ref and is_final_layer:
+            fill_desc = udma_ref_fill_descriptor(
+                layer, len(commands), args.max_payload_bytes)
+            if fill_desc is not None:
+                closed_loop_descs.append(fill_desc)
+            crc_desc = udma_output_sram_crc_descriptor(
+                layer, len(commands) + len(closed_loop_descs), args.max_payload_bytes)
+            if crc_desc is not None:
+                closed_loop_descs.append(crc_desc)
         elif layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_pool_probes(
                 layer, len(commands), result_dram_off, remaining_commands)
@@ -3498,7 +3581,7 @@ def main() -> int:
         if not args.cycle_only and layer.index == last_layer_index:
             for desc in descs:
                 if is_sram_crc_descriptor(desc):
-                    desc[3] |= 1 << 12
+                    desc[3] |= SMF_FINAL_TILE << 24
         for desc in descs:
             if len(commands) >= command_limit:
                 break
@@ -3521,7 +3604,7 @@ def main() -> int:
             if (desc[0] & 0xF) == OP_L1CRC:
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
-                if desc[3] & (1 << 12):
+                if is_final_crc_descriptor(desc):
                     finalcrc_count += 1
                     finalcrc_bytes += desc[29]
             if (desc[0] & 0xF) in (OP_CONV, OP_POOL) and (desc[3] & (1 << 9)):
@@ -3530,7 +3613,7 @@ def main() -> int:
             if (desc[0] & 0xF) in (OP_CONV, OP_REQUANT, OP_EWE, OP_POOL, OP_TNPS, OP_UDMA) and (desc[3] & (1 << 10)):
                 sramcrc_count += 1
                 sramcrc_bytes += desc[29]
-                if desc[3] & (1 << 12):
+                if is_final_crc_descriptor(desc):
                     finalcrc_count += 1
                     finalcrc_bytes += desc[29]
         if len(commands) >= command_limit:

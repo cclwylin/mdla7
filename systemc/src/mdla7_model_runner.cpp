@@ -437,13 +437,49 @@ int sc_main(int argc, char* argv[]) {
     f.seekg(0); f.read(reinterpret_cast<char*>(file.data()), file.size());
 
     auto* hdr = reinterpret_cast<ProgHeader*>(file.data());
-    if (hdr->magic != 0x374C444Du || (hdr->version != 2u && hdr->version != 3u)) {
+    if (hdr->magic != 0x374C444Du || (hdr->version != 2u && hdr->version != 3u && hdr->version != 4u)) {
         std::cerr << "bad magic/version\n"; return 2;
     }
-    auto* metas = reinterpret_cast<LayerMeta*>(file.data() + sizeof(ProgHeader));
     const uint32_t N = hdr->num_layers;
+    const size_t layer_meta_disk_size = (hdr->version >= 4u) ? sizeof(LayerMetaDiskV4) : sizeof(LayerMetaDiskV3);
+    const size_t layer_table_end = sizeof(ProgHeader) + layer_meta_disk_size * size_t(N);
+    if (file.size() < layer_table_end || hdr->data_offset > file.size()) {
+        std::cerr << "truncated program image\n"; return 2;
+    }
+    std::vector<LayerMeta> metas_storage(N);
+    for (uint32_t i = 0; i < N; ++i) {
+        LayerMeta L{};
+        const uint8_t* p = file.data() + sizeof(ProgHeader) + layer_meta_disk_size * size_t(i);
+        if (hdr->version >= 4u) {
+            auto* D = reinterpret_cast<const LayerMetaDiskV4*>(p);
+            L.in_h = D->in_h; L.in_w = D->in_w; L.in_c = D->in_c;
+            L.out_h = D->out_h; L.out_w = D->out_w; L.out_c = D->out_c;
+            L.k_h = D->k_h; L.k_w = D->k_w; L.s_h = D->s_h; L.s_w = D->s_w;
+            L.p_t = D->p_t; L.p_b = D->p_b; L.p_l = D->p_l; L.p_r = D->p_r;
+            L.dram_in = D->dram_in; L.dram_wgt = D->dram_wgt; L.dram_out = D->dram_out;
+            L.in_size = D->in_size; L.wgt_size = D->wgt_size; L.ref_size = D->ref_size;
+            L.in_off = D->in_off; L.wgt_off = D->wgt_off; L.ref_off = D->ref_off;
+            L.group = D->group; L.op_kind = D->op_kind; L.dtype = D->dtype; L.zp_in_eff = D->zp_in_eff;
+        } else {
+            auto* D = reinterpret_cast<const LayerMetaDiskV3*>(p);
+            L.in_h = D->in_h; L.in_w = D->in_w; L.in_c = D->in_c;
+            L.out_h = D->out_h; L.out_w = D->out_w; L.out_c = D->out_c;
+            L.k_h = D->k_h; L.k_w = D->k_w; L.s_h = D->s_h; L.s_w = D->s_w;
+            L.p_t = D->p_t; L.p_b = D->p_b; L.p_l = D->p_l; L.p_r = D->p_r;
+            L.dram_in = D->dram_in; L.dram_wgt = D->dram_wgt; L.dram_out = D->dram_out;
+            L.in_size = D->in_size; L.wgt_size = D->wgt_size; L.ref_size = D->ref_size;
+            L.in_off = D->in_off; L.wgt_off = D->wgt_off; L.ref_off = D->ref_off;
+            L.group = D->group; L.op_kind = D->op_kind; L.dtype = D->dtype; L.zp_in_eff = D->zp_in_eff;
+        }
+        if (L.in_off + uint64_t(L.in_size) > file.size() ||
+            L.wgt_off + uint64_t(L.wgt_size) > file.size() ||
+            L.ref_off + uint64_t(L.ref_size) > file.size()) {
+            std::cerr << "truncated layer blob at layer " << i << "\n"; return 2;
+        }
+        metas_storage[i] = L;
+    }
+    auto* metas = metas_storage.data();
     const GraphMeta* graph_metas = nullptr;
-    const size_t layer_table_end = sizeof(ProgHeader) + sizeof(LayerMeta) * size_t(N);
     const size_t graph_table_end = layer_table_end + sizeof(GraphMeta) * size_t(N);
     if (hdr->version >= 3u && hdr->data_offset >= graph_table_end && file.size() >= graph_table_end) {
         graph_metas = reinterpret_cast<const GraphMeta*>(file.data() + layer_table_end);
@@ -461,7 +497,7 @@ int sc_main(int argc, char* argv[]) {
     // (DRAM_BASE + {0, 64, 128} MB), each growing per-layer; for big segmentation
     // models (deeplab_v3_plus has ~1 GB of activations) the default 256 MB
     // segfaults `sys.dram.write` out-of-bounds.
-    constexpr uint32_t DRAM_BASE_ADDR = 0x10000000u;
+    constexpr uint32_t DRAM_BASE_ADDR = mdla7::DRAM_BASE;
     uint64_t max_addr = 256ull * 1024 * 1024;     // floor: keep small models cheap
     for (uint32_t i = 0; i < N; ++i) {
         const auto& L = metas[i];
@@ -622,9 +658,26 @@ int sc_main(int argc, char* argv[]) {
             c = decltype(c){target, meta};
         return c;
     };
+    auto fp_binary_scalar_b = [&](const LayerMeta& L) -> bool {
+        if (!(L.dtype == DT_FP16 || L.dtype == DT_BFP16 || L.dtype == DT_FP8))
+            return false;
+        if (L.wgt_size < 50)
+            return false;
+        const uint32_t b_payload = L.wgt_size - 48;
+        if (b_payload != 2 || L.wgt_off + uint64_t(L.wgt_size) > file.size())
+            return false;
+        uint32_t marker[3] = {0, 0, 0};
+        std::memcpy(marker, file.data() + L.wgt_off + b_payload + 8, sizeof(marker));
+        return marker[0] == FP_BINARY_BCAST_MAGIC && marker[1] == FP_BINARY_BCAST_SCALAR;
+    };
     auto make_binary_b_load = [&](const LayerMeta& L, uint32_t dram_addr, uint32_t l1_addr,
                                   uint32_t raw_bytes, uint8_t signal_tag,
                                   uint8_t wait_a = 0, uint8_t wait_b = 0) {
+        if (fp_binary_scalar_b(L)) {
+            return std::pair<Descriptor, uint64_t>(
+                make_udma(L.dram_wgt, l1_addr, 2, /*dir*/ 0, signal_tag, wait_a, wait_b),
+                2);
+        }
         uint64_t charged = raw_bytes;
         Descriptor d = make_udma(dram_addr, l1_addr, raw_bytes,
                                  /*dir*/ 0, signal_tag, wait_a, wait_b);
@@ -1639,6 +1692,46 @@ int sc_main(int argc, char* argv[]) {
     for (uint32_t k = 0; k + 1 < N; ++k) {
         const auto& P = metas[k];
         const auto& S = metas[k + 1];
+        if ((is_conv_class_meta(P) || is_binary_meta(P) ||
+             P.op_kind == OK_HARD_SWISH || P.op_kind == OK_GELU ||
+             P.op_kind == OK_LOGISTIC) &&
+            graph_metas[k].consumer_count > 1) {
+            // Fanout producers must keep their DRAM checkpoint. One branch
+            // may be fused through L1, while another later consumer reloads
+            // the original tensor from the aliased DRAM slot.
+            producer_no_store[k] = false;
+        }
+        const bool generic_dram_consumer =
+            S.op_kind == OK_SOFTMAX ||
+            (S.in_size >= (256u << 10) &&
+             (is_conv_class_meta(S) ||
+              S.op_kind == OK_ADD || S.op_kind == OK_MUL || S.op_kind == OK_SUB ||
+              S.op_kind == OK_HARD_SWISH || S.op_kind == OK_GELU ||
+              S.op_kind == OK_LOGISTIC ||
+              S.op_kind == OK_AVG_POOL || S.op_kind == OK_MAX_POOL ||
+              S.op_kind == OK_MATERIALIZE || S.op_kind == OK_RESHAPE ||
+              S.op_kind == OK_D2SPACE));
+        if (generic_dram_consumer) {
+            // These generic large consumer paths reload input from the aliased
+            // DRAM address. A skipped producer store leaves only the 1-byte
+            // stream barrier in that buffer, creating tiny input corruption
+            // that can fan out through conv/layout tails.
+            producer_no_store[k] = false;
+        }
+        if (S.op_kind == OK_ADD || S.op_kind == OK_MUL || S.op_kind == OK_SUB) {
+            // Binary EWE consumers still use their DRAM input slots as the
+            // authoritative operand boundary.  Keeping the predecessor store
+            // avoids feeding stale/synthetic bytes into small attention tails
+            // such as BMM score scale + mask.
+            producer_no_store[k] = false;
+        }
+        if (S.op_kind == OK_D2SPACE && S.k_h != 2) {
+            // The direct streamed CONV->D2SPACE tail is only validated for
+            // block=2 today. XLSR uses block=3, so keep the producer output
+            // materialized and let the generic D2SPACE path do the checked
+            // layout transform.
+            producer_no_store[k] = false;
+        }
         const bool int8_rgb_tail_consumer =
             (S.dtype == DT_INT8x8) && is_binary_meta(S) &&
             (S.in_h >= 1024) && (S.in_w >= 1024) && (S.in_c <= 4);
@@ -1658,6 +1751,16 @@ int sc_main(int argc, char* argv[]) {
              ((P.op_kind == OK_AVG_POOL || P.op_kind == OK_MAX_POOL) &&
               is_conv_class_meta(S)));
         if (int8_large_upsample_tail && !exact_large_layout_handoff) {
+            producer_no_store[k] = false;
+        }
+    }
+
+    for (uint32_t k = 0; k < N; ++k) {
+        if (metas[k].op_kind == OK_MATERIALIZE) {
+            // MATERIALIZE is an explicit compiler fallback/reference boundary,
+            // not a transparent metadata view.  Suppressing its store can
+            // replace the fallback bytes with an unrelated streamed producer
+            // tensor and hide the actual supported-but-not-native op.
             producer_no_store[k] = false;
         }
     }
@@ -4345,6 +4448,8 @@ int sc_main(int argc, char* argv[]) {
             if (A.out_h != D.in_h || A.out_w != D.in_w || A.out_c != D.in_c)
                 return false;
             const uint16_t block = D.k_h ? D.k_h : 1;
+            if (block != 2)
+                return false;
             if (!block || D.in_c != uint32_t(D.out_c) * block * block)
                 return false;
             if (D.out_h != uint32_t(D.in_h) * block ||
@@ -10641,9 +10746,16 @@ int sc_main(int argc, char* argv[]) {
                 chain_alt = 0;
                 break;
             }
-            sys.dram.write(L.dram_in, file.data() + L.ref_off, L.ref_size);
+            // Materialized compiler fallbacks synthesize the layer's reference
+            // output.  Their dram_in can alias the previous layer's dram_out in
+            // graph-chain placement, so staging the ref there is racy: the
+            // previous descriptor may overwrite it during simulation.  Stage at
+            // this layer's unique output address and issue a self-copy so the
+            // layer still consumes TNPS time without depending on an aliased
+            // producer slot.
+            sys.dram.write(L.dram_out, file.data() + L.ref_off, L.ref_size);
             const uint8_t tnps_tag = alloc_tag();
-            program.push_back(make_tnps(L.dram_in, L.dram_out, L.ref_size, tnps_tag));
+            program.push_back(make_tnps(L.dram_out, L.dram_out, L.ref_size, tnps_tag));
             acc[i].dram_r += L.ref_size;
             acc[i].dram_w += L.ref_size;
             acc[i].sram_r += L.ref_size;

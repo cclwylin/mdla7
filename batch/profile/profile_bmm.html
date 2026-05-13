@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MDLA7 ETHZ_v6 Profiles</title>
+<title>MDLA7 BMM Profiles</title>
 <style>
 :root {
   color-scheme: light;
@@ -42,11 +42,10 @@ tr:hover td { background:#f4f7fb; }
 </head>
 <body>
 <main>
-<h1>MDLA7 ETHZ_v6 Profiles</h1>
+<h1>MDLA7 BMM Profiles</h1>
 <div class="bar">
   <button id="refresh">Refresh Output</button>
 
-  <button id="chart-btn">Generate cx/mdla6_cx Chart</button>
   <input id="filter" placeholder="filter pattern">
   <span class="meta" id="status"></span>
 </div>
@@ -57,11 +56,9 @@ tr:hover td { background:#f4f7fb; }
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
 
-      <th class="num"><button class="sort-btn" data-sort-key="mdla6_cx">mdla6_cx <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="our_ms">cx <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="our_ms">fast <span class="sort-mark"></span></button></th>
 
 
-      <th class="num"><button class="sort-btn" data-sort-key="ratio">cx/mdla6_cx <span class="sort-mark"></span></button></th>
 
 
     </tr>
@@ -70,15 +67,15 @@ tr:hover td { background:#f4f7fb; }
 </table>
 </main>
 <script>
-const EMBEDDED_ROWS = [{"pattern":"mobilenet_v3_float","stem":"mobilenet_v3_float","label":"mobilenet_v3_float","type":"","link":"../output/mobilenet_v3_float.html","mdla6_cx":"0.610","our_ms":0.96,"conflict_ms":null,"mesh_ms":null,"ratio":1.5737704918032787,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"mobilenet_v3_quant","stem":"mobilenet_v3_quant","label":"mobilenet_v3_quant","type":"","link":"../output/mobilenet_v3_quant.html","mdla6_cx":"0.250","our_ms":0.347,"conflict_ms":null,"mesh_ms":null,"ratio":1.388,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"mv3_depth_quant","stem":"mv3_depth_quant","label":"mv3_depth_quant","type":"","link":"../output/mv3_depth_quant.html","mdla6_cx":"0.600","our_ms":0.507,"conflict_ms":null,"mesh_ms":null,"ratio":0.8450000000000001,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"resnet_float","stem":"resnet_float","label":"resnet_float","type":"","link":"../output/resnet_float.html","mdla6_cx":"0.020","our_ms":0.005,"conflict_ms":null,"mesh_ms":null,"ratio":0.25,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"resnet_quant","stem":"resnet_quant","label":"resnet_quant","type":"","link":"../output/resnet_quant.html","mdla6_cx":"0.020","our_ms":0.003,"conflict_ms":null,"mesh_ms":null,"ratio":0.15,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"xlsr_quant","stem":"xlsr_quant","label":"xlsr_quant","type":"","link":"../output/xlsr_quant.html","mdla6_cx":"0.330","our_ms":0.446,"conflict_ms":null,"mesh_ms":null,"ratio":1.3515151515151516,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"yolo_v8_quant","stem":"yolo_v8_quant","label":"yolo_v8_quant","type":"","link":"../output/yolo_v8_quant.html","mdla6_cx":"0.600","our_ms":1.14,"conflict_ms":null,"mesh_ms":null,"ratio":1.9,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""}];
-const LIVE_CSV = "../output/ethz_v6_regression.L1-cx.cx.csv";
+const EMBEDDED_ROWS = [{"pattern":"bmm_softmax_bmm_fp32","stem":"bmm_softmax_bmm_fp32","label":"bmm_softmax_bmm_fp32","type":"","link":"../output/bmm_softmax_bmm_fp32.html","mdla6_cx":"","our_ms":0.0,"conflict_ms":null,"mesh_ms":null,"ratio":null,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"bmm_softmax_bmm_int8","stem":"bmm_softmax_bmm_int8","label":"bmm_softmax_bmm_int8","type":"","link":"../output/bmm_softmax_bmm_int8.html","mdla6_cx":"","our_ms":0.0,"conflict_ms":null,"mesh_ms":null,"ratio":null,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""},{"pattern":"bmm_softmax_bmm_sam_quant_L22_L61","stem":"bmm_softmax_bmm_sam_quant_L22_L61","label":"bmm_softmax_bmm_sam_quant_L22_L61","type":"Hotspot","link":"../output/bmm_softmax_bmm_sam_quant_L22_L61.html","mdla6_cx":"","our_ms":0.295,"conflict_ms":null,"mesh_ms":null,"ratio":null,"conflict_ratio":null,"mesh_ratio":null,"mesh_conflict_ratio":null,"fuse_hit":"","fuse_flows":"","streamed_layers":"","mb_hit":"","mb_count":"","mb_layers":"","mb_stages":""}];
+const LIVE_CSV = "../output/bmm_regression.csv";
 const OUTPUT_DIR = "../output/";
 const ONLY_METRIC_ROWS = true;
-const SHOW_MDLA6_CX = true;
+const SHOW_MDLA6_CX = false;
 const SHOW_MODE_COLUMNS = false;
 const SHOW_MB = false;
-const DEFAULT_SORT_KEY = "ratio";
-const RATIO_LABEL = "cx/mdla6_cx";
+const DEFAULT_SORT_KEY = "our_ms";
+const RATIO_LABEL = "f/mdla6_cx";
 let rows = EMBEDDED_ROWS.slice();
 let sortState = { key: DEFAULT_SORT_KEY, dir: "desc", default: true };
 

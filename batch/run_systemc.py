@@ -5,6 +5,7 @@ Examples:
     ./batch/run_systemc.py --filter ethz
     ./batch/run_systemc.py --filter ethz_v6 --model-filter mobilenet --limit 3
     ./batch/run_systemc.py --filter hotspot --cx
+    ./batch/run_systemc.py --filter bmm
 """
 
 from __future__ import annotations
@@ -159,6 +160,25 @@ def _parse_compile_log(log_lines: list[str]) -> list[dict]:
                 "status": f"skipped ({m.group(6)})",
             })
     return rows
+
+
+def _compile_skipped_rows(compile_stdout: str) -> list[dict]:
+    return [
+        row for row in _parse_compile_log((compile_stdout or "").splitlines())
+        if not str(row.get("status", "")).startswith("ready")
+    ]
+
+
+def _status_with_compile_skips(status: str, compile_stdout: str) -> str:
+    skipped = _compile_skipped_rows(compile_stdout)
+    if not skipped:
+        return status
+    tag = f"compile-skipped:{len(skipped)}"
+    if status == "ok":
+        return tag
+    if tag in status:
+        return status
+    return f"{status}; {tag}"
 
 
 def _write_html_report(model: Path, paths: dict[str, Path],
@@ -917,6 +937,21 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     n_compile = len(compile_rows_data)
     n_skipped_compile = sum(1 for c in compile_rows_data
                             if not c["status"].startswith("ready"))
+    if n_skipped_compile:
+        graph_coverage_row = (
+            f"  <span class=\"kv warn\"><b>Graph coverage:</b> INCOMPLETE — "
+            f"{n_skipped_compile}/{n_compile} compile rows skipped; simulator PASS covers compiled layers only</span>"
+        )
+    else:
+        graph_coverage_row = (
+            f"  <span class=\"kv\"><b>Graph coverage:</b> complete — "
+            f"0/{n_compile} compile rows skipped</span>"
+        )
+    verification_row = (
+        "  <span class=\"kv\"><b>Verification:</b> per compiled-layer DRAM "
+        "reference compare, including the final compiled layer; no separate "
+        "original-TFLite final-output checker</span>"
+    )
 
     title = f"MDLA7 profile — {model.name}"
     n_pass = int(summary.get("pass", 0) or 0)
@@ -985,12 +1020,15 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 .filter-info {{ display: inline-block; margin-left: 8px; color: #888; font-size: 11px; }}
 .kv {{ display: block; margin: 2px 0; }}
 .kv b {{ color:#556; font-weight:600; }}
+.warn {{ color:#a06000; font-weight:600; }}
 </style></head>
 <body>
 <h1>{html.escape(title)}</h1>
 <div>
   <span class="kv"><b>Model:</b> {html.escape(str(model.relative_to(REPO_ROOT)))}</span>
-  <span class="kv"><b>Layers:</b> {n_total} (PASS {n_pass} / FAIL {n_fail})</span>
+  <span class="kv"><b>Compiled layers:</b> {n_total} (PASS {n_pass} / FAIL {n_fail})</span>
+{graph_coverage_row}
+{verification_row}
   <span class="kv"><b>Sim time:</b> {total_cyc/1.9e6:.3f} ms @ 1.9 GHz ({total_cyc:,} cycles)</span>
   <span class="kv"><b>Util:</b> avg {float(summary.get('util_avg_pct',0.0) or 0.0):.1f}% / peak {float(summary.get('util_peak_pct',0.0) or 0.0):.1f}% ({html.escape(str(summary.get('util_peak_engine','')))})</span>
   <span class="kv"><b>DRAM r/w:</b> {summary.get('dram_read_bytes',0)/1e6:.2f} / {summary.get('dram_write_bytes',0)/1e6:.2f} MB</span>
@@ -1967,12 +2005,18 @@ def _normalise_l1(l1_timing: str) -> str:
 def _mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
     l1_timing = _normalise_l1(l1_timing)
     engine_model = _normalise_engine(engine_model)
+    if l1_timing == "cx" and engine_model == "cx":
+        return "cx"
     suffixes: list[str] = []
     if l1_timing != "fast":
         suffixes.append(f"L1-{l1_timing}")
     if engine_model != "fast":
         suffixes.append(engine_model)
     return ".".join(suffixes)
+
+
+def _profile_mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
+    return _mode_suffix(l1_timing, engine_model)
 
 
 def _arg_was_set(*names: str) -> bool:
@@ -2213,6 +2257,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
                 status = f"html-fail: {str(e)[:80]}"
             else:
                 status = f"{status}; html-fail"
+    status = _status_with_compile_skips(status, cr.stdout or "")
 
     if fast_only:
         return pattern, ms, None, None, status, "", ""
@@ -2238,6 +2283,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
                 conflict_status = f"html-fail: {str(e)[:80]}"
             else:
                 conflict_status = f"{conflict_status}; html-fail"
+    conflict_status = _status_with_compile_skips(conflict_status, cr.stdout or "")
 
     # ---- simulate: mesh timing + report ----
     if progress:
@@ -2260,6 +2306,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
                 mesh_status = f"html-fail: {str(e)[:80]}"
             else:
                 mesh_status = f"{mesh_status}; html-fail"
+    mesh_status = _status_with_compile_skips(mesh_status, cr.stdout or "")
 
     if not skip_html:
         if progress:
@@ -2327,11 +2374,39 @@ def _load_cached_result_from_artefacts(pattern: str,
         return None
     if cycles <= 0 or n_fail != 0:
         return None
+    status = "ok"
+    if paths["html"].exists():
+        try:
+            text = paths["html"].read_text(errors="ignore")
+            skip_match = re.search(
+                r"Graph coverage:</b>\s*INCOMPLETE\s+—\s*(\d+)/", text)
+            if skip_match is None:
+                skip_match = re.search(r"Compile log \(\d+ layers,\s*(\d+) skipped\)", text)
+            if skip_match and int(skip_match.group(1)) > 0:
+                status = f"compile-skipped:{int(skip_match.group(1))}"
+        except Exception:
+            pass
     return {
         "pattern": canonical,
         "mdla7_ms": f"{cycles / 1.9e6:.3f}",
-        "status": "ok",
+        "status": status,
     }
+
+
+def _raise_if_not_clean(rows: list[dict], *, context: str = "run_systemc") -> None:
+    bad = [
+        (str(row.get("pattern", "")), str(row.get("status", "")))
+        for row in rows
+        if row.get("status") != "ok"
+    ]
+    if not bad:
+        return
+    print(f"[{context}] FAIL: {len(bad)}/{len(rows)} rows are not clean ok", flush=True)
+    for pattern, status in bad[:12]:
+        print(f"  {pattern}: {status}", flush=True)
+    if len(bad) > 12:
+        print(f"  ... {len(bad) - 12} more", flush=True)
+    raise SystemExit(1)
 
 
 def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False) -> list[str]:
@@ -2403,7 +2478,8 @@ def _refresh_profile_index(title: str,
                            *,
                            show_mdla6_cx: bool = False,
                            primary_label: str = "fast",
-                           ratio_label: str = "f/mdla6_cx") -> None:
+                           ratio_label: str = "f/mdla6_cx",
+                           report_suffix: str = "") -> None:
     try:
         html_path = Path(html_out)
         if not html_path.is_absolute():
@@ -2419,11 +2495,18 @@ def _refresh_profile_index(title: str,
              "--hide-mode-columns",
              "--primary-label", primary_label,
              "--ratio-label", ratio_label,
+             *(["--report-suffix", report_suffix] if report_suffix else []),
              *([] if show_mdla6_cx else ["--hide-mdla6-cx"])],
             cwd=str(HERE), capture_output=True, text=True,
         )
     except Exception:
         pass
+
+
+def _profile_title_for_mode(title: str, primary_label: str) -> str:
+    if primary_label == "cx":
+        return f"{title} （CX)"
+    return title
 
 
 def _ms_cell(value: str) -> str:
@@ -2857,10 +2940,12 @@ def run_corpus(*,
     if suffix and Path(args.csv_out) == default_csv:
         args.csv_out = str(default_csv.with_name(
             f"{default_csv.stem}.{suffix}{default_csv.suffix}"))
-    if suffix:
+    profile_suffix = "" if (args.compare_rtl_fast or args.compare_cx_rtl) else _profile_mode_suffix(
+        args.l1_timing, args.engine_model)
+    if profile_suffix:
         profile_path = Path(profile_html)
         profile_html = str(profile_path.with_name(
-            f"{profile_path.stem}.{suffix}{profile_path.suffix}"))
+            f"{profile_path.stem}.{profile_suffix}{profile_path.suffix}"))
     model_dir = Path(args.model_dir)
     patterns = _discover_models(model_dir, args.filter, recursive=recursive)
     order_source: Path | str | None
@@ -3044,6 +3129,7 @@ def run_corpus(*,
         print(f"csv: {csv_path}", flush=True)
         if not args.no_html:
             print(f"html: {HERE / compare_html}", flush=True)
+        _raise_if_not_clean(rows_out)
         return
 
     if args.compare_cx_rtl:
@@ -3204,6 +3290,7 @@ def run_corpus(*,
         print(f"csv: {csv_path}", flush=True)
         if not args.no_html:
             print(f"html: {HERE / compare_html}", flush=True)
+        _raise_if_not_clean(rows_out)
         return
 
     csv_path = Path(args.csv_out)
@@ -3285,9 +3372,7 @@ def run_corpus(*,
             cache_source = "artefact"
         if cached is not None:
             cached = _attach_mdla6_cx(cached)
-            mode_suffix = _mode_suffix(args.l1_timing, args.engine_model)
-            model_suffix = "" if not mode_suffix else f"/{mode_suffix}"
-            suffix = cached.get("status", "ok") + model_suffix
+            status_text = cached.get("status", "ok")
             model_path = model_dir / f"{pat}.tflite"
             mb = (_microblock_metrics_for(model_path, args.l1_timing, args.engine_model)
                   if microblock_metrics else {})
@@ -3300,7 +3385,7 @@ def run_corpus(*,
                        f"{primary_label}={_ms_cell(cached.get('mdla7_ms', ''))} "
                        f"{ratio_label + '=' + _ratio_cell(cached.get('f_over_cx', cached.get('fast_over_mdla6_cx', ''))) + ' ' if has_mdla6_cx else ''}"
                        f"cached:{cache_source}  "
-                       f"{suffix}{mb_suffix}")
+                       f"{status_text}{mb_suffix}")
             row = {
                 "pattern": pat,
                 "mdla6_cx": cached.get("mdla6_cx", ""),
@@ -3328,9 +3413,6 @@ def run_corpus(*,
             l1_timing=args.l1_timing)
         elapsed = time.time() - t0
         ms_str = f"{ms:>8.2f} ms" if ms is not None else f"{'—':>8s}    "
-        mode_suffix = _mode_suffix(args.l1_timing, args.engine_model)
-        model_suffix = "" if not mode_suffix else f"/{mode_suffix}"
-        suffix = status + model_suffix
         model_path = model_dir / f"{pat}.tflite"
         mb = (_microblock_metrics_for(model_path, args.l1_timing, args.engine_model)
               if microblock_metrics else {})
@@ -3345,7 +3427,7 @@ def run_corpus(*,
                    f"{primary_label}={ms_str} "
                    f"{ratio_label + '=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
                    f"({elapsed:5.1f}s)  "
-                   f"{suffix}{mb_suffix}")
+                   f"{status}{mb_suffix}")
         row = {
             "pattern": pat,
             "mdla6_cx": _format_ms(mdla6_cx_ms),
@@ -3379,18 +3461,23 @@ def run_corpus(*,
                     pass
 
     n_fast = sum(1 for r in rows_out if r.get("mdla7_ms"))
+    n_clean = sum(1 for r in rows_out if r.get("status") == "ok")
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
     total_s = time.time() - t_total
     print(f"\n==== summary: {primary_label} {n_fast}/{len(rows_out)} ran, "
+          f"clean {n_clean}/{len(rows_out)}, "
           f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
           flush=True)
     print(f"csv: {csv_path}", flush=True)
     if not args.no_html:
-        _refresh_profile_index(profile_title, profile_html, csv_path,
+        _refresh_profile_index(_profile_title_for_mode(profile_title, primary_label),
+                               profile_html, csv_path,
                                show_mdla6_cx=has_mdla6_cx,
                                primary_label=primary_label,
-                               ratio_label=ratio_label)
+                               ratio_label=ratio_label,
+                               report_suffix=suffix)
         print(f"html: {HERE / profile_html}", flush=True)
+    _raise_if_not_clean(rows_out)
 
 # ---- Unified public CLI ----
 
@@ -3445,6 +3532,32 @@ CORPORA = {
         "title": "MDLA7 MLPerf_Tiny Profiles",
         "order": None,
     },
+    "bmm": {
+        "name": "BMM",
+        "model_dir": REPO_ROOT / "model" / "BMM",
+        "csv": OUT_DIR / "bmm_regression.csv",
+        "profile": "profile_bmm.html",
+        "title": "MDLA7 BMM Profiles",
+        "order": None,
+    },
+    "unit": {
+        "name": "UnitTest",
+        "model_dir": REPO_ROOT / "model" / "UnitTest",
+        "csv": OUT_DIR / "unittest_regression.csv",
+        "profile": "profile_unittest.html",
+        "title": "MDLA7 UnitTest TFLite Profiles",
+        "order": None,
+        "recursive": True,
+    },
+    "unittest": {
+        "name": "UnitTest",
+        "model_dir": REPO_ROOT / "model" / "UnitTest",
+        "csv": OUT_DIR / "unittest_regression.csv",
+        "profile": "profile_unittest.html",
+        "title": "MDLA7 UnitTest TFLite Profiles",
+        "order": None,
+        "recursive": True,
+    },
 }
 
 
@@ -3456,7 +3569,7 @@ def _has_option(args: list[str], *names: str) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     ap.add_argument("--filter", default="ethz",
-                    help="corpus selector: ethz, ethz_v6, ethz_v5, hotspot, slice, mlperf")
+                    help="corpus selector: ethz, ethz_v6, ethz_v5, hotspot, slice, mlperf, bmm")
     ap.add_argument("--model-filter", default="",
                     help="substring filter inside the selected corpus")
     ap.add_argument("-h", "--help", action="store_true")
@@ -3471,7 +3584,8 @@ def main() -> None:
         print("Corpus keys:", ", ".join(sorted(k for k in CORPORA if k != "ethz")))
         return
     if corpus_key not in CORPORA:
-        raise SystemExit(f"unknown --filter corpus {ns.filter!r}; use ethz_v6/ethz_v5/hotspot/slice/mlperf")
+        valid = "/".join(k for k in ("ethz_v6", "ethz_v5", "hotspot", "slice", "mlperf", "bmm", "unit"))
+        raise SystemExit(f"unknown --filter corpus {ns.filter!r}; use {valid}")
 
     runner_args = list(rest)
     if ns.model_filter:

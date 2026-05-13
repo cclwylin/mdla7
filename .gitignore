@@ -1,12 +1,16 @@
 # macOS metadata sidecars (the 4T_OFFICE volume creates these on every file)
 .DS_Store
 ._*
+._*
 
 # Test models — too large for git; download separately per setup.sh / handoff.md
 # Keep Hotspot slices because they are small regression/debug micro-patterns.
 model/*
 !model/Hotspot/
 !model/Hotspot/*.tflite
+!model/BMM/
+!model/BMM/*.md
+!model/BMM/*.tflite
 !model/ETHZ_v6/
 model/ETHZ_v6/*
 !model/ETHZ_v6/.gitkeep

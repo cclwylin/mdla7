@@ -152,14 +152,23 @@ def _rewrite_row_links(rows: list[dict[str, object]], html_out: Path) -> None:
         row["link"] = _relative_url(HERE / link, base_dir)
 
 
+def _first_existing_report_html(stem: str, report_suffix: str = "") -> Path | None:
+    if report_suffix:
+        path = _first_existing_output_path(f"{stem}.{report_suffix}", ".html")
+        if path is not None:
+            return path
+    return _first_existing_output_path(stem, ".html")
+
+
 def _row_from_metric(stem: str,
-                     metric: dict[str, str]) -> dict[str, object] | None:
+                     metric: dict[str, str],
+                     report_suffix: str = "") -> dict[str, object] | None:
     pat = metric.get("pattern", stem)
     mdla6_cx = metric.get("mdla6_cx", "")
     csv_ms = metric.get("ms", "")
     csv_conflict_ms = metric.get("conflict_ms", "")
     csv_mesh_ms = metric.get("mesh_ms", "")
-    html = _first_existing_output_path(stem, ".html")
+    html = _first_existing_report_html(stem, report_suffix)
     if html is None and not csv_ms:
         return None
     our_ms = load_our_ms(stem, csv_ms)
@@ -217,14 +226,15 @@ def _row_from_metric(stem: str,
 
 
 def collect_rows(metrics_csvs: list[Path],
-                 only_metric_rows: bool = False) -> list[dict[str, object]]:
+                 only_metric_rows: bool = False,
+                 report_suffix: str = "") -> list[dict[str, object]]:
     metrics = load_metrics(metrics_csvs)
     rows: list[dict[str, object]] = []
     if not OUT_DIR.exists():
         return rows
     if only_metric_rows:
         for stem, metric in metrics.items():
-            row = _row_from_metric(stem, metric)
+            row = _row_from_metric(stem, metric, report_suffix)
             if row is not None:
                 rows.append(row)
         rows.sort(key=lambda row: str(row.get("pattern") or ""))
@@ -326,6 +336,8 @@ def main() -> None:
                     help="label for the primary MDLA7 timing column")
     ap.add_argument("--ratio-label", default="f/mdla6_cx",
                     help="label for the mdla7/mdla6_cx ratio column")
+    ap.add_argument("--report-suffix", default="",
+                    help="prefer per-model reports named <pattern>.<suffix>.html")
     args = ap.parse_args()
 
     metrics_csvs = [Path(p) for p in args.metrics_csv]
@@ -336,7 +348,7 @@ def main() -> None:
     if not html_out.is_absolute():
         html_out = HERE / html_out
 
-    rows = collect_rows(metrics_csvs, args.only_metrics_rows)
+    rows = collect_rows(metrics_csvs, args.only_metrics_rows, args.report_suffix)
     _rewrite_row_links(rows, html_out)
     rows_json = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     title = args.title

@@ -309,7 +309,7 @@ inline std::ostream& operator<<(std::ostream& os, const Payload& p) {
 constexpr uint32_t L1MESH_BASE  = 0x0000'0000;
 constexpr uint32_t L1MESH_END   = 0x002F'FFFF;          // 3 MB (spec §3A.10)
 constexpr uint32_t L1MESH_BYTES = L1MESH_END + 1;
-constexpr uint32_t DRAM_BASE    = 0x1000'0000;
+constexpr uint32_t DRAM_BASE    = 0x0030'0000;
 constexpr uint32_t DRAM_END     = 0xFFFF'FFFF;          // 4 GB high half
 
 inline bool addr_in_l1mesh(uint32_t a) { return a <= L1MESH_END; }

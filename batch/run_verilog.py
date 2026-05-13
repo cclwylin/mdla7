@@ -24,11 +24,83 @@ FILTER_ALIASES = {
     "ethz_v6": "ETHZ_v6",
     "ethz-v6": "ETHZ_v6",
     "hotspot": "Hotspot",
+    "bmm": "BMM",
     "unit": "UnitTest",
     "unittest": "UnitTest",
     "unit_test": "UnitTest",
     "unit_tflite": "UnitTest",
 }
+
+
+AUTO_COMPILE_CORPORA = {"BMM", "ETHZ_v6"}
+COMPILE_FAILURES: list[str] = []
+
+
+def record_compile_failure(model: Path, out_bin: Path, reason: str, output: str = "") -> None:
+    msg = f"{model.name} -> {out_bin}: {reason}"
+    COMPILE_FAILURES.append(msg)
+    print(
+        f"[run_verilog] ERROR: compile_model failed for {model.name}; "
+        f"refusing stale {out_bin}",
+        file=sys.stderr,
+    )
+    if output.strip():
+        print(output.strip(), file=sys.stderr)
+
+
+def compile_corpus_bins(repo_root: Path, rtl_dir: Path, corpus: str,
+                        only_stems: set[str] | None = None) -> bool:
+    """Keep corpus Verilog bins reproducible when compile_model.py changed."""
+    if corpus not in AUTO_COMPILE_CORPORA:
+        return True
+    model_dir = repo_root / "model" / corpus
+    out_dir = rtl_dir / "bin" / corpus
+    compile_py = repo_root / "systemc" / "scripts" / "compile_model.py"
+    venv_py = Path(os.environ.get("MDLA7_VENV", Path.home() / ".venvs/mdla7")).expanduser() / "bin" / "python"
+    py = venv_py if venv_py.exists() else Path(sys.executable)
+    if not model_dir.is_dir() or not compile_py.exists():
+        return True
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ok = True
+    for model in sorted(model_dir.glob("*.tflite")):
+        if model.name.startswith("._"):
+            continue
+        if only_stems is not None and model.stem not in only_stems:
+            continue
+        out_bin = out_dir / f"{model.stem}.bin"
+        try:
+            newest_input = max(model.stat().st_mtime_ns,
+                               compile_py.stat().st_mtime_ns)
+            if out_bin.exists() and out_bin.stat().st_mtime_ns >= newest_input:
+                continue
+            proc = subprocess.run(
+                [str(py), str(compile_py), str(model), str(out_bin)],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as exc:
+            ok = False
+            record_compile_failure(model, out_bin, f"could not start compiler: {exc}")
+            continue
+        if proc.returncode != 0:
+            ok = False
+            record_compile_failure(model, out_bin, f"rc={proc.returncode}", proc.stdout)
+    return ok
+
+
+def refresh_known_corpus_bin(repo_root: Path, rtl_dir: Path, candidate: Path) -> bool:
+    try:
+        rel = candidate.resolve().relative_to((rtl_dir / "bin").resolve())
+    except ValueError:
+        return True
+    if len(rel.parts) != 2:
+        return True
+    corpus, filename = rel.parts
+    if corpus not in AUTO_COMPILE_CORPORA or not filename.endswith(".bin"):
+        return True
+    return compile_corpus_bins(repo_root, rtl_dir, corpus, {Path(filename).stem})
 PASS_RE = re.compile(
     r"PASS: verilog host-driven .* issued=([0-9]+) done=([0-9]+)"
     r"(?:\s+(?:verilog_cycles|vf_cycles)=([0-9]+))?"
@@ -56,6 +128,7 @@ CACHE_VERSION = 14
 WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 MDL7_MAGIC = 0x374C444D
+SMF_FINAL_TILE = 0x10
 PROGRAM_COL_WIDTH = 34
 RATIO_COL_WIDTH = 14
 SYNTH_CLOCK_HZ = 1_900_000_000.0
@@ -77,6 +150,7 @@ class BinInfo:
     layers: int
     tensor_bytes: int
     ref_bytes: int
+    final_ref_bytes: int
     pattern_class: str
     timeout_s: float
 
@@ -117,6 +191,8 @@ def collect_bins(filters: list[str], rtl_dir: Path, repo_root: Path, cwd: Path) 
         alias = FILTER_ALIASES.get(pattern.lower())
         candidates: list[Path] = []
         if alias is not None:
+            if alias in AUTO_COMPILE_CORPORA:
+                compile_corpus_bins(repo_root, rtl_dir, alias)
             candidates.extend((bin_root / alias).rglob("*.bin"))
         else:
             p = Path(pattern)
@@ -142,8 +218,10 @@ def collect_bins(filters: list[str], rtl_dir: Path, repo_root: Path, cwd: Path) 
 
         for candidate in candidates:
             resolved = candidate.resolve()
+            refresh_ok = refresh_known_corpus_bin(repo_root, rtl_dir, resolved)
             if resolved.is_file() and resolved.suffix == ".bin" and not resolved.name.startswith("._"):
-                found[resolved] = resolved
+                if refresh_ok:
+                    found[resolved] = resolved
 
     return sorted(found.values(), key=lambda x: str(x))
 
@@ -169,6 +247,7 @@ def classify_bin(program: Path) -> BinInfo:
     layers = 0
     tensor_bytes = 0
     ref_bytes = 0
+    final_ref_bytes = 0
     try:
         with program.open("rb") as f:
             header = f.read(16)
@@ -184,6 +263,7 @@ def classify_bin(program: Path) -> BinInfo:
                     layer_ref_bytes = rd32(table, off + 40)
                     tensor_bytes += layer_ref_bytes
                     ref_bytes += layer_ref_bytes
+                    final_ref_bytes = layer_ref_bytes
     except OSError:
         pass
 
@@ -200,7 +280,8 @@ def classify_bin(program: Path) -> BinInfo:
     else:
         pattern_class = "small"
         timeout_s = 300.0
-    return BinInfo(size_bytes, layers, tensor_bytes, ref_bytes, pattern_class, timeout_s)
+    return BinInfo(size_bytes, layers, tensor_bytes, ref_bytes,
+                   final_ref_bytes, pattern_class, timeout_s)
 
 
 def fmt_timeout(value: float) -> str:
@@ -288,7 +369,7 @@ def coverage_label(cycle_mode: bool, info: BinInfo, refcrc: int, sramcrc: int, f
         return "cycle"
     if (refcrc + sramcrc + finalbytes) == 0:
         return "sample"
-    if info.ref_bytes > 0 and finalbytes >= info.ref_bytes:
+    if info.final_ref_bytes > 0 and finalbytes >= info.final_ref_bytes:
         return "full"
     return "partial"
 
@@ -297,12 +378,28 @@ def is_unit_test_bin(program: Path) -> bool:
     return "UnitTest" in program.parts
 
 
+def is_bmm_bin(program: Path) -> bool:
+    return "BMM" in program.parts
+
+
+def is_ethz_bin(program: Path) -> bool:
+    return "ETHZ_v6" in program.parts or "ETHZ_v6_slice" in program.parts
+
+
+def should_check_materialized_layers(program: Path) -> bool:
+    return is_bmm_bin(program) or is_ethz_bin(program)
+
+
+def requires_full_output_coverage(cycle_mode: bool, program: Path) -> bool:
+    return not cycle_mode and is_bmm_bin(program)
+
+
 def is_perf_comparable(cycle_mode: bool, program: Path, info: BinInfo, finalbytes: int) -> bool:
     if cycle_mode:
         return True
     if is_unit_test_bin(program):
         return True
-    return info.ref_bytes > 0 and finalbytes >= info.ref_bytes
+    return info.final_ref_bytes > 0 and finalbytes >= info.final_ref_bytes
 
 
 def fmt_perf_ratio(cycle_mode: bool, program: Path, info: BinInfo, finalbytes: int,
@@ -310,6 +407,13 @@ def fmt_perf_ratio(cycle_mode: bool, program: Path, info: BinInfo, finalbytes: i
     if not is_perf_comparable(cycle_mode, program, info, finalbytes):
         return ""
     return fmt_ratio(verilog_cycles, synth_cycles)
+
+
+def partial_coverage_reason(info: BinInfo, finalbytes: int) -> str:
+    need = info.final_ref_bytes or info.ref_bytes
+    if need > 0:
+        return f"partial BMM coverage finalB={finalbytes}/{need}; full Verilog traversal not implemented"
+    return f"partial BMM coverage finalB={finalbytes}; full Verilog traversal not implemented"
 
 
 def profile_dir_for(program: Path) -> Path:
@@ -431,7 +535,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     repo_root, rtl_dir = repo_paths()
     ap = argparse.ArgumentParser()
     ap.add_argument("--filter", action="append", default=[],
-                    help="bin filter, glob, path, or alias: unittest, slice, ethz, hotspot")
+                    help="bin filter, glob, path, or alias: unittest, slice, ethz, hotspot, bmm")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=None,
                     help="Manual per-program timeout. Default: auto by bin size/layer class.")
@@ -461,6 +565,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Pass through full INT8 CONV output coverage.")
     ap.add_argument("--check-all-layers", action="store_true",
                     help="Pass through per-layer closed-loop checks. Default checks final layer only.")
+    ap.add_argument("--check-materialized-layers", action="store_true",
+                    help="Pass through compact checks for materialized fallback layers.")
     ap.add_argument("--rerun-all", action="store_true",
                     help="Ignore cached PASS/SKIP results and rerun every matched .bin.")
     ap.add_argument("--cache-file", type=Path,
@@ -524,6 +630,10 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
     srambytes = 0
     finalcrc = 0
     finalbytes = 0
+
+    def has_final_crc_flag(desc_off: int) -> bool:
+        return ((words[desc_off + 3] >> 24) & SMF_FINAL_TILE) != 0
+
     for off in range(0, len(words), WORDS_PER_COMMAND):
         op = words[off] & 0xF
         if op == 0:
@@ -534,7 +644,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 6:
@@ -542,14 +652,14 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 7:
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 1:
@@ -560,7 +670,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 2:
@@ -568,7 +678,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 3:
@@ -576,7 +686,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
         elif op == 4:
@@ -587,7 +697,7 @@ def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, i
             if words[off + 3] & (1 << 10):
                 sramcrc += 1
                 srambytes += words[off + 29]
-                if words[off + 3] & (1 << 12):
+                if has_final_crc_flag(off):
                     finalcrc += 1
                     finalbytes += words[off + 29]
     return count, conv, pool, requant, ewe, tnps, udma, refcrc, sramcrc, refbytes, srambytes, finalcrc, finalbytes
@@ -606,6 +716,15 @@ def main(argv: list[str]) -> int:
     args.profile_root = args.profile_root.resolve()
 
     bins = collect_bins(args.filter, rtl_dir, repo_root, cwd)
+    if COMPILE_FAILURES:
+        print(
+            f"[run_verilog] ERROR: refusing to run with {len(COMPILE_FAILURES)} "
+            "compile failure(s); stale .bin PASS is forbidden.",
+            file=sys.stderr,
+        )
+        for failure in COMPILE_FAILURES:
+            print(f"[run_verilog] compile_fail: {failure}", file=sys.stderr)
+        return 1
     if args.limit > 0:
         bins = bins[: args.limit]
     if not bins:
@@ -760,6 +879,10 @@ def main(argv: list[str]) -> int:
             gen_cmd.extend(["--conv-sample-count", str(args.conv_sample_count)])
         if args.full_conv_coverage:
             gen_cmd.append("--full-conv-coverage")
+        if is_bmm_bin(bin_path):
+            gen_cmd.append("--full-final-ref")
+        if args.check_materialized_layers or should_check_materialized_layers(bin_path):
+            gen_cmd.append("--check-materialized-layers")
         if args.check_all_layers:
             gen_cmd.append("--check-all-layers")
         if args.cycle:
@@ -864,9 +987,20 @@ def main(argv: list[str]) -> int:
         if rc == 0 and match:
             issued = int(match.group(1))
             done = int(match.group(2))
+            cov = coverage_label(args.cycle, info, refcrc_count, sramcrc_count, finalcrc_bytes)
+            if requires_full_output_coverage(args.cycle, bin_path) and cov != "full":
+                failed += 1
+                print(
+                    f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                    f"{fmt_timeout(run_timeout):>6} {'FAIL':<6} {cov:<7} "
+                    f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
+                    f"{fmt_cycles(verilog_cycles):>20} "
+                    f"{fmt_perf_ratio(args.cycle, bin_path, info, finalcrc_bytes, verilog_cycles, synth_cycles):>{RATIO_COL_WIDTH}} {wall:>8.2f}"
+                )
+                print(f"     reason: {partial_coverage_reason(info, finalcrc_bytes)}")
+                continue
             passed += 1
             ans = "PASS"
-            cov = coverage_label(args.cycle, info, refcrc_count, sramcrc_count, finalcrc_bytes)
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
                 f"{fmt_timeout(run_timeout):>6} {ans:<6} {cov:<7} "

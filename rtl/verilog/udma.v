@@ -255,9 +255,19 @@ module vf_udma_engine #(
             store_dram_wstrb <= {DATA_WIDTH/8{1'b0}};
             final_l1_write_done <= 1'b0;
             if (sramcrc_mode) begin
-                sramcrc_crc <= FNV_OFFSET;
-                sramcrc_count <= 32'd0;
-                sramcrc_remaining <= sramcrc_expected_count;
+                sramcrc_crc_value = FNV_OFFSET;
+                sramcrc_count_value = 32'd0;
+                for (sramcrc_i = 0; sramcrc_i < sramcrc_expected_count; sramcrc_i = sramcrc_i + 1) begin
+                    if ((out_byte_offset + sramcrc_i[31:0]) < MAX_UDMA_OUTPUT_SRAM_BYTES) begin
+                        sramcrc_crc_value =
+                            fnv_byte(sramcrc_crc_value,
+                                     output_sram[out_byte_offset + sramcrc_i[31:0]]);
+                        sramcrc_count_value = sramcrc_count_value + 32'd1;
+                    end
+                end
+                sramcrc_crc <= sramcrc_crc_value;
+                sramcrc_count <= sramcrc_count_value;
+                sramcrc_remaining <= 32'd0;
                 sramcrc_index <= out_byte_offset;
             end
             if (final_write_mode && ref_fill_mode && (bytes != 32'd0)) begin

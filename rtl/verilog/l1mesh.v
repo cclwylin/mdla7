@@ -6,42 +6,6 @@
 
 /* verilator lint_off DECLFILENAME */
 
-module mdla7_l1mesh4x4_tile #(
-    parameter DATA_WIDTH = 128,
-    parameter TILE_WORDS = 49152
-) (
-    input                         clk,
-    input                         start_fire,
-    input                         req_write,
-    input      [31:0]             tile_word_addr,
-    input      [DATA_WIDTH-1:0]   req_wdata,
-    input      [DATA_WIDTH/8-1:0] req_wstrb,
-    output reg [DATA_WIDTH-1:0]   resp_rdata
-);
-    localparam STRB_WIDTH = DATA_WIDTH / 8;
-
-    reg [DATA_WIDTH-1:0] mem [0:TILE_WORDS-1];
-
-    integer i;
-    always @(posedge clk) begin
-        if (start_fire) begin
-            if (req_write) begin
-                if (tile_word_addr < TILE_WORDS) begin
-                    for (i = 0; i < STRB_WIDTH; i = i + 1) begin
-                        if (req_wstrb[i])
-                            mem[tile_word_addr][i*8 +: 8] <= req_wdata[i*8 +: 8];
-                    end
-                end
-            end else begin
-                resp_rdata <= (tile_word_addr < TILE_WORDS)
-                    ? mem[tile_word_addr]
-                    : {DATA_WIDTH{1'b0}};
-            end
-        end
-    end
-endmodule
-/* verilator lint_on DECLFILENAME */
-
 module mdla7_mesh4x4_router_node #(
     parameter NODE_X = 0,
     parameter NODE_Y = 0
@@ -68,7 +32,8 @@ endmodule
 module mdla7_mesh4x4_edge_fabric (
     input        clk,
     input        rst_n,
-    input        start,
+    input        flit_valid,
+    output       flit_ready,
     input  [1:0] src_x,
     input  [1:0] src_y,
     input  [1:0] dst_x,
@@ -82,10 +47,19 @@ module mdla7_mesh4x4_edge_fabric (
     output       east_link_valid,
     output       local_link_valid
 );
+    localparam FIFO_DEPTH = 4;
+    localparam DIR_N = 0;
+    localparam DIR_S = 1;
+    localparam DIR_W = 2;
+    localparam DIR_E = 3;
+    localparam DIR_LOCAL = 4;
+
     reg [1:0] cur_x;
     reg [1:0] cur_y;
     reg [1:0] target_x;
     reg [1:0] target_y;
+    reg [2:0] current_input_dir;
+    reg [2:0] input_fifo_count [0:15][0:4];
 
     wire [15:0] node_packet_valid;
     wire [15:0] node_north_valid;
@@ -97,6 +71,17 @@ module mdla7_mesh4x4_edge_fabric (
     wire [11:0] hlink_west_valid;
     wire [11:0] vlink_south_valid;
     wire [11:0] vlink_north_valid;
+    wire [3:0] inject_node_id = {src_y, src_x};
+    wire [3:0] cur_node_id = {cur_y, cur_x};
+    reg [3:0] next_node_id;
+    reg [2:0] selected_dir;
+    reg [2:0] next_input_dir;
+    reg downstream_ready;
+    integer fifo_node_i;
+    integer fifo_dir_i;
+
+    assign flit_ready = !busy &&
+                        (input_fifo_count[inject_node_id][DIR_LOCAL] < FIFO_DEPTH);
 
     genvar nx;
     genvar ny;
@@ -157,6 +142,31 @@ module mdla7_mesh4x4_edge_fabric (
     assign east_link_valid = |hlink_east_valid;
     assign local_link_valid = |node_local_valid;
 
+    always @* begin
+        next_node_id = cur_node_id;
+        selected_dir = DIR_LOCAL;
+        next_input_dir = DIR_LOCAL;
+        if (busy && (cur_x < target_x)) begin
+            next_node_id = {cur_y, cur_x + 2'd1};
+            selected_dir = DIR_E;
+            next_input_dir = DIR_W;
+        end else if (busy && (cur_x > target_x)) begin
+            next_node_id = {cur_y, cur_x - 2'd1};
+            selected_dir = DIR_W;
+            next_input_dir = DIR_E;
+        end else if (busy && (cur_y < target_y)) begin
+            next_node_id = {cur_y + 2'd1, cur_x};
+            selected_dir = DIR_S;
+            next_input_dir = DIR_N;
+        end else if (busy && (cur_y > target_y)) begin
+            next_node_id = {cur_y - 2'd1, cur_x};
+            selected_dir = DIR_N;
+            next_input_dir = DIR_S;
+        end
+        downstream_ready = (selected_dir == DIR_LOCAL) ||
+                           (input_fifo_count[next_node_id][next_input_dir] < FIFO_DEPTH);
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             busy <= 1'b0;
@@ -166,31 +176,38 @@ module mdla7_mesh4x4_edge_fabric (
             cur_y <= 2'd0;
             target_x <= 2'd0;
             target_y <= 2'd0;
+            current_input_dir <= DIR_LOCAL;
+            for (fifo_node_i = 0; fifo_node_i < 16; fifo_node_i = fifo_node_i + 1) begin
+                for (fifo_dir_i = 0; fifo_dir_i < 5; fifo_dir_i = fifo_dir_i + 1) begin
+                    input_fifo_count[fifo_node_i][fifo_dir_i] <= 3'd0;
+                end
+            end
         end else begin
             done <= 1'b0;
-            if (start && !busy) begin
+            if (flit_valid && flit_ready) begin
                 busy <= 1'b1;
                 cur_x <= src_x;
                 cur_y <= src_y;
                 target_x <= dst_x;
                 target_y <= dst_y;
+                current_input_dir <= DIR_LOCAL;
+                input_fifo_count[inject_node_id][DIR_LOCAL] <=
+                    input_fifo_count[inject_node_id][DIR_LOCAL] + 3'd1;
                 hops <= 4'd0;
-            end else if (busy) begin
-                if (east_link_valid) begin
-                    cur_x <= cur_x + 2'd1;
-                    hops <= hops + 4'd1;
-                end else if (west_link_valid) begin
-                    cur_x <= cur_x - 2'd1;
-                    hops <= hops + 4'd1;
-                end else if (south_link_valid) begin
-                    cur_y <= cur_y + 2'd1;
-                    hops <= hops + 4'd1;
-                end else if (north_link_valid) begin
-                    cur_y <= cur_y - 2'd1;
-                    hops <= hops + 4'd1;
-                end else if (local_link_valid) begin
+            end else if (busy && downstream_ready) begin
+                if (input_fifo_count[cur_node_id][current_input_dir] != 3'd0)
+                    input_fifo_count[cur_node_id][current_input_dir] <=
+                        input_fifo_count[cur_node_id][current_input_dir] - 3'd1;
+                if (selected_dir == DIR_LOCAL) begin
                     busy <= 1'b0;
                     done <= 1'b1;
+                end else begin
+                    input_fifo_count[next_node_id][next_input_dir] <=
+                        input_fifo_count[next_node_id][next_input_dir] + 3'd1;
+                    cur_x <= next_node_id[1:0];
+                    cur_y <= next_node_id[3:2];
+                    current_input_dir <= next_input_dir;
+                    hops <= hops + 4'd1;
                 end
             end
         end
@@ -232,10 +249,10 @@ module l1mesh #(
 
     output                        resp_valid,
     output                        resp_read,
-    output reg [3:0]              resp_source,
-    output reg [7:0]              resp_tid,
+    output     [3:0]              resp_source,
+    output     [7:0]              resp_tid,
     input                         resp_ready,
-    output reg [DATA_WIDTH-1:0]   resp_rdata,
+    output     [DATA_WIDTH-1:0]   resp_rdata,
     output                        busy,
     output     [3:0]              phase_id,
     output     [31:0]             remaining_cycles
@@ -247,41 +264,104 @@ module l1mesh #(
     localparam [3:0] PH_SRAM_MACRO       = 4'd5;
     localparam [3:0] PH_RESP             = 4'd6;
     localparam STRB_WIDTH = DATA_WIDTH / 8;
-    localparam [31:0] TILE_WORDS = (MEM_WORDS + STORAGE_MESH4X4_COUNT - 1) /
-                                    STORAGE_MESH4X4_COUNT;
     localparam [31:0] SYNTH_L1_PIPE_CYCLES_32 = SYNTH_L1_PIPE_CYCLES;
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
     localparam [31:0] FNV_PRIME = 32'd16777619;
+    localparam SRAM_MACRO_COUNT = STORAGE_MESH4X4_COUNT * 16 * QUAD_SRAM_PORTS;
+    localparam PAYLOAD_LANE_COUNT = 104;
+    localparam LANE_CONV_ACT_R_BASE = 0;
+    localparam LANE_CONV_WGT_R_BASE = 32;
+    localparam LANE_L1MGR_R_BASE = 64;
+    localparam LANE_L1MGR_W_BASE = 80;
+    localparam LANE_REQUANT_W_BASE = 96;
+    localparam LANE_CONV_ACT_R_COUNT = 32;
+    localparam LANE_CONV_WGT_R_COUNT = 32;
+    localparam LANE_L1MGR_R_COUNT = 16;
+    localparam LANE_L1MGR_W_COUNT = 16;
+    localparam LANE_REQUANT_W_COUNT = 8;
+    localparam EXPECTED_MEM_WORDS = STORAGE_MESH4X4_COUNT * 16 *
+                                     QUAD_SRAM_PORTS * SRAM_MACRO_WORDS;
 
-    wire [31:0] word_addr = {10'd0, req_addr} / STRB_WIDTH;
+    initial begin
+        if (MEM_WORDS != EXPECTED_MEM_WORDS)
+            $error("l1mesh MEM_WORDS does not match SRAM macro hierarchy");
+    end
+
+    reg                         q0_valid;
+    reg                         q1_valid;
+    reg                         q0_write;
+    reg                         q1_write;
+    reg [ADDR_WIDTH-1:0]        q0_addr;
+    reg [ADDR_WIDTH-1:0]        q1_addr;
+    reg [31:0]                  q0_bytes;
+    reg [31:0]                  q1_bytes;
+    reg [31:0]                  q0_route_cycles;
+    reg [31:0]                  q1_route_cycles;
+    reg [DATA_WIDTH-1:0]        q0_wdata;
+    reg [DATA_WIDTH-1:0]        q1_wdata;
+    reg [DATA_WIDTH/8-1:0]      q0_wstrb;
+    reg [DATA_WIDTH/8-1:0]      q1_wstrb;
+    reg [3:0]                   q0_source;
+    reg [3:0]                   q1_source;
+    reg [7:0]                   q0_tid;
+    reg [7:0]                   q1_tid;
+    reg [31:0]                  sram_macro_busy [0:SRAM_MACRO_COUNT-1];
+    reg [31:0]                  payload_lane_busy [0:PAYLOAD_LANE_COUNT-1];
+    reg [DATA_WIDTH-1:0]        sram_macro_mem [0:SRAM_MACRO_COUNT-1]
+                                               [0:SRAM_MACRO_WORDS-1];
+    reg                         active_resp_read;
+    reg [3:0]                   active_resp_source;
+    reg [7:0]                   active_resp_tid;
+    reg [DATA_WIDTH-1:0]        active_resp_rdata;
+    reg                         resp0_valid;
+    reg                         resp1_valid;
+    reg                         resp0_read;
+    reg                         resp1_read;
+    reg [3:0]                   resp0_source;
+    reg [3:0]                   resp1_source;
+    reg [7:0]                   resp0_tid;
+    reg [7:0]                   resp1_tid;
+    reg [DATA_WIDTH-1:0]        resp0_rdata;
+    reg [DATA_WIDTH-1:0]        resp1_rdata;
+
+    wire phase_busy;
+    wire phase_start_ready;
+    wire selected_edge_busy;
+    wire selected_sram_busy;
+    wire selected_payload_lane_busy;
+    wire resource_start_ready;
+    wire phase_start_valid = q0_valid && resource_start_ready;
+    wire phase_start_fire = phase_start_valid && phase_start_ready;
+    wire phase_done_ready = !resp1_valid;
+    wire phase_done_push = phase_done && phase_done_ready;
+    wire req_push = req_valid && req_ready;
+    wire resp_pop = resp_valid && resp_ready;
+
+    assign req_ready = !q1_valid || phase_start_fire;
+    assign busy = phase_busy || q0_valid || q1_valid || phase_done ||
+                  resp0_valid || resp1_valid;
+
+    wire [31:0] word_addr = {10'd0, q0_addr} / STRB_WIDTH;
     wire [1:0]  storage_mesh_id = word_addr[1:0];
     wire [3:0]  quad_sram_id = word_addr[5:2];
     wire [1:0]  sram_macro_port = word_addr[7:6];
     wire        edge_mesh_half = word_addr[8];
     wire [2:0]  edge_mesh_id = {edge_mesh_half, storage_mesh_id};
     wire [31:0] sram_macro_word = word_addr >> 8;
-    wire [31:0] storage_tile_word_addr = (((sram_macro_word << 4) +
-                                           {28'd0, quad_sram_id}) << 2) +
-                                           {30'd0, sram_macro_port};
+    wire [7:0]  sram_macro_index = {storage_mesh_id, quad_sram_id, sram_macro_port};
     wire [1:0]  quad_x = quad_sram_id[1:0];
     wire [1:0]  quad_y = quad_sram_id[3:2];
-    wire        start_fire = req_valid && req_ready;
     wire        phase_done;
     reg [ADDR_WIDTH-1:0] debug_crc_scan_addr;
     reg [31:0] debug_crc_remaining;
     reg [31:0] debug_crc_value;
     reg [31:0] debug_crc_count_value;
-    reg resp_read_q;
     reg [1:0] route_src_x;
     reg [1:0] route_src_y;
     integer debug_crc_i;
-
-    /* verilator lint_off UNUSEDSIGNAL */
-    wire [DATA_WIDTH-1:0] tile_rdata0;
-    wire [DATA_WIDTH-1:0] tile_rdata1;
-    wire [DATA_WIDTH-1:0] tile_rdata2;
-    wire [DATA_WIDTH-1:0] tile_rdata3;
-    /* verilator lint_on UNUSEDSIGNAL */
+    integer resource_i;
+    integer lane_i;
+    integer sram_byte_i;
 
     wire [EDGE_MESH4X4_COUNT-1:0] edge_route_busy;
     wire [EDGE_MESH4X4_COUNT-1:0] edge_route_done;
@@ -291,9 +371,21 @@ module l1mesh #(
     wire [EDGE_MESH4X4_COUNT-1:0] edge_route_east;
     wire [EDGE_MESH4X4_COUNT-1:0] edge_route_local;
     wire [EDGE_MESH4X4_COUNT*4-1:0] edge_route_hops;
+    wire [EDGE_MESH4X4_COUNT-1:0] edge_flit_ready;
+    reg [31:0] payload_lane_start;
+    reg [31:0] payload_lane_count;
+    reg [6:0] selected_payload_lane;
+    reg payload_lane_available;
+    integer payload_lane_i;
+
+    assign selected_edge_busy = !edge_flit_ready[edge_mesh_id];
+    assign selected_sram_busy = (sram_macro_busy[sram_macro_index] != 32'd0);
+    assign selected_payload_lane_busy = !payload_lane_available;
+    assign resource_start_ready = !selected_edge_busy && !selected_sram_busy &&
+                                  !selected_payload_lane_busy;
 
     always @* begin
-        case (req_source)
+        case (q0_source)
             4'd1: begin route_src_x = 2'd0; route_src_y = 2'd0; end
             4'd2: begin route_src_x = 2'd1; route_src_y = 2'd0; end
             4'd3: begin route_src_x = 2'd0; route_src_y = 2'd1; end
@@ -302,6 +394,36 @@ module l1mesh #(
             4'd6: begin route_src_x = 2'd1; route_src_y = 2'd0; end
             default: begin route_src_x = 2'd0; route_src_y = 2'd0; end
         endcase
+    end
+
+    always @* begin
+        if (q0_source == 4'd1 && !q0_write) begin
+            payload_lane_start = LANE_CONV_ACT_R_BASE;
+            payload_lane_count = LANE_CONV_ACT_R_COUNT;
+        end else if (q0_source == 4'd7 && !q0_write) begin
+            payload_lane_start = LANE_CONV_WGT_R_BASE;
+            payload_lane_count = LANE_CONV_WGT_R_COUNT;
+        end else if (q0_source == 4'd2 && q0_write) begin
+            payload_lane_start = LANE_REQUANT_W_BASE;
+            payload_lane_count = LANE_REQUANT_W_COUNT;
+        end else if (q0_write) begin
+            payload_lane_start = LANE_L1MGR_W_BASE;
+            payload_lane_count = LANE_L1MGR_W_COUNT;
+        end else begin
+            payload_lane_start = LANE_L1MGR_R_BASE;
+            payload_lane_count = LANE_L1MGR_R_COUNT;
+        end
+        selected_payload_lane = payload_lane_start[6:0];
+        payload_lane_available = 1'b0;
+        for (payload_lane_i = 0; payload_lane_i < PAYLOAD_LANE_COUNT; payload_lane_i = payload_lane_i + 1) begin
+            if (!payload_lane_available &&
+                (payload_lane_i >= payload_lane_start) &&
+                (payload_lane_i < payload_lane_start + payload_lane_count) &&
+                (payload_lane_busy[payload_lane_i] == 32'd0)) begin
+                selected_payload_lane = payload_lane_i[6:0];
+                payload_lane_available = 1'b1;
+            end
+        end
     end
 
     function [31:0] ceil_div;
@@ -327,8 +449,8 @@ module l1mesh #(
         end
     endfunction
 
-    wire [31:0] charged_bytes = (req_bytes == 32'd0) ? STRB_WIDTH : req_bytes;
-    wire [31:0] l1mesh_select_cycles = max1(route_cycles);
+    wire [31:0] charged_bytes = (q0_bytes == 32'd0) ? STRB_WIDTH : q0_bytes;
+    wire [31:0] l1mesh_select_cycles = max1(q0_route_cycles);
     wire [31:0] mesh4x4_route_cycles = max1(SYNTH_L1_PIPE_CYCLES_32 +
                                              manhattan2(quad_x, quad_y));
     wire [31:0] quad_sram_select_cycles = max1({30'd0, sram_macro_port} + 32'd1);
@@ -366,58 +488,6 @@ module l1mesh #(
         PH_ADDR_DECODE
     };
 
-    mdla7_l1mesh4x4_tile #(
-        .DATA_WIDTH(DATA_WIDTH),
-        .TILE_WORDS(TILE_WORDS)
-    ) u_tile0 (
-        .clk(clk),
-        .start_fire(start_fire && (storage_mesh_id == 2'd0)),
-        .req_write(req_write),
-        .tile_word_addr(storage_tile_word_addr),
-        .req_wdata(req_wdata),
-        .req_wstrb(req_wstrb),
-        .resp_rdata(tile_rdata0)
-    );
-
-    mdla7_l1mesh4x4_tile #(
-        .DATA_WIDTH(DATA_WIDTH),
-        .TILE_WORDS(TILE_WORDS)
-    ) u_tile1 (
-        .clk(clk),
-        .start_fire(start_fire && (storage_mesh_id == 2'd1)),
-        .req_write(req_write),
-        .tile_word_addr(storage_tile_word_addr),
-        .req_wdata(req_wdata),
-        .req_wstrb(req_wstrb),
-        .resp_rdata(tile_rdata1)
-    );
-
-    mdla7_l1mesh4x4_tile #(
-        .DATA_WIDTH(DATA_WIDTH),
-        .TILE_WORDS(TILE_WORDS)
-    ) u_tile2 (
-        .clk(clk),
-        .start_fire(start_fire && (storage_mesh_id == 2'd2)),
-        .req_write(req_write),
-        .tile_word_addr(storage_tile_word_addr),
-        .req_wdata(req_wdata),
-        .req_wstrb(req_wstrb),
-        .resp_rdata(tile_rdata2)
-    );
-
-    mdla7_l1mesh4x4_tile #(
-        .DATA_WIDTH(DATA_WIDTH),
-        .TILE_WORDS(TILE_WORDS)
-    ) u_tile3 (
-        .clk(clk),
-        .start_fire(start_fire && (storage_mesh_id == 2'd3)),
-        .req_write(req_write),
-        .tile_word_addr(storage_tile_word_addr),
-        .req_wdata(req_wdata),
-        .req_wstrb(req_wstrb),
-        .resp_rdata(tile_rdata3)
-    );
-
     genvar edge_mesh_gen;
     generate
         for (edge_mesh_gen = 0;
@@ -426,7 +496,8 @@ module l1mesh #(
             mdla7_mesh4x4_edge_fabric u_edge_mesh (
                 .clk(clk),
                 .rst_n(rst_n),
-                .start(start_fire && (edge_mesh_id == edge_mesh_gen[2:0])),
+                .flit_valid(phase_start_fire && (edge_mesh_id == edge_mesh_gen[2:0])),
+                .flit_ready(edge_flit_ready[edge_mesh_gen]),
                 .src_x(route_src_x),
                 .src_y(route_src_y),
                 .dst_x(quad_x),
@@ -443,30 +514,216 @@ module l1mesh #(
         end
     endgenerate
 
+    task load_q0;
+        input write;
+        input [ADDR_WIDTH-1:0] addr;
+        input [31:0] bytes;
+        input [31:0] route;
+        input [DATA_WIDTH-1:0] wdata;
+        input [DATA_WIDTH/8-1:0] wstrb;
+        input [3:0] source;
+        input [7:0] tid;
+        begin
+            q0_write <= write;
+            q0_addr <= addr;
+            q0_bytes <= bytes;
+            q0_route_cycles <= route;
+            q0_wdata <= wdata;
+            q0_wstrb <= wstrb;
+            q0_source <= source;
+            q0_tid <= tid;
+        end
+    endtask
+
+    task load_q1;
+        input write;
+        input [ADDR_WIDTH-1:0] addr;
+        input [31:0] bytes;
+        input [31:0] route;
+        input [DATA_WIDTH-1:0] wdata;
+        input [DATA_WIDTH/8-1:0] wstrb;
+        input [3:0] source;
+        input [7:0] tid;
+        begin
+            q1_write <= write;
+            q1_addr <= addr;
+            q1_bytes <= bytes;
+            q1_route_cycles <= route;
+            q1_wdata <= wdata;
+            q1_wstrb <= wstrb;
+            q1_source <= source;
+            q1_tid <= tid;
+        end
+    endtask
+
+    task move_q1_to_q0;
+        begin
+            q0_write <= q1_write;
+            q0_addr <= q1_addr;
+            q0_bytes <= q1_bytes;
+            q0_route_cycles <= q1_route_cycles;
+            q0_wdata <= q1_wdata;
+            q0_wstrb <= q1_wstrb;
+            q0_source <= q1_source;
+            q0_tid <= q1_tid;
+        end
+    endtask
+
     /* verilator lint_off BLKSEQ */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            resp_rdata <= {DATA_WIDTH{1'b0}};
-            resp_read_q <= 1'b0;
-            resp_source <= 4'd0;
-            resp_tid <= 8'd0;
+            q0_valid <= 1'b0;
+            q1_valid <= 1'b0;
+            q0_write <= 1'b0;
+            q1_write <= 1'b0;
+            q0_addr <= {ADDR_WIDTH{1'b0}};
+            q1_addr <= {ADDR_WIDTH{1'b0}};
+            q0_bytes <= 32'd0;
+            q1_bytes <= 32'd0;
+            q0_route_cycles <= 32'd0;
+            q1_route_cycles <= 32'd0;
+            q0_wdata <= {DATA_WIDTH{1'b0}};
+            q1_wdata <= {DATA_WIDTH{1'b0}};
+            q0_wstrb <= {DATA_WIDTH/8{1'b0}};
+            q1_wstrb <= {DATA_WIDTH/8{1'b0}};
+            q0_source <= 4'd0;
+            q1_source <= 4'd0;
+            q0_tid <= 8'd0;
+            q1_tid <= 8'd0;
+            for (resource_i = 0; resource_i < SRAM_MACRO_COUNT; resource_i = resource_i + 1)
+                sram_macro_busy[resource_i] <= 32'd0;
+            for (lane_i = 0; lane_i < PAYLOAD_LANE_COUNT; lane_i = lane_i + 1)
+                payload_lane_busy[lane_i] <= 32'd0;
+            active_resp_read <= 1'b0;
+            active_resp_source <= 4'd0;
+            active_resp_tid <= 8'd0;
+            active_resp_rdata <= {DATA_WIDTH{1'b0}};
+            resp0_valid <= 1'b0;
+            resp1_valid <= 1'b0;
+            resp0_read <= 1'b0;
+            resp1_read <= 1'b0;
+            resp0_source <= 4'd0;
+            resp1_source <= 4'd0;
+            resp0_tid <= 8'd0;
+            resp1_tid <= 8'd0;
+            resp0_rdata <= {DATA_WIDTH{1'b0}};
+            resp1_rdata <= {DATA_WIDTH{1'b0}};
             debug_crc_busy <= 1'b0;
             debug_crc_done <= 1'b0;
             debug_crc <= FNV_OFFSET;
             debug_crc_byte_count <= 32'd0;
             debug_crc_scan_addr <= {ADDR_WIDTH{1'b0}};
             debug_crc_remaining <= 32'd0;
-        end else if (start_fire) begin
-            resp_read_q <= !req_write;
-            resp_source <= req_source;
-            resp_tid <= req_tid;
-            if (!req_write)
-                resp_rdata <= debug_read_word(req_addr);
         end else begin
-            if (resp_valid && resp_ready) begin
-                resp_read_q <= 1'b0;
-                resp_source <= 4'd0;
-                resp_tid <= 8'd0;
+            for (resource_i = 0; resource_i < SRAM_MACRO_COUNT; resource_i = resource_i + 1) begin
+                if (sram_macro_busy[resource_i] != 32'd0)
+                    sram_macro_busy[resource_i] <= sram_macro_busy[resource_i] - 32'd1;
+            end
+            for (lane_i = 0; lane_i < PAYLOAD_LANE_COUNT; lane_i = lane_i + 1) begin
+                if (payload_lane_busy[lane_i] != 32'd0)
+                    payload_lane_busy[lane_i] <= payload_lane_busy[lane_i] - 32'd1;
+            end
+
+            if (phase_start_fire) begin
+                sram_macro_busy[sram_macro_index] <= sram_macro_cycles;
+                payload_lane_busy[selected_payload_lane] <=
+                    max1(ceil_div(charged_bytes, STRB_WIDTH));
+                active_resp_read <= !q0_write;
+                active_resp_source <= q0_source;
+                active_resp_tid <= q0_tid;
+                if (q0_write) begin
+                    active_resp_rdata <= {DATA_WIDTH{1'b0}};
+                    if (sram_macro_word < SRAM_MACRO_WORDS) begin
+                        for (sram_byte_i = 0; sram_byte_i < STRB_WIDTH; sram_byte_i = sram_byte_i + 1) begin
+                            if (q0_wstrb[sram_byte_i])
+                                sram_macro_mem[sram_macro_index][sram_macro_word][sram_byte_i*8 +: 8]
+                                    <= q0_wdata[sram_byte_i*8 +: 8];
+                        end
+                    end
+                end else begin
+                    active_resp_rdata <= sram_read_word(q0_addr);
+                end
+            end
+
+            if (phase_start_fire && req_push) begin
+                if (q1_valid) begin
+                    move_q1_to_q0();
+                    load_q1(req_write, req_addr, req_bytes, route_cycles,
+                            req_wdata, req_wstrb, req_source, req_tid);
+                    q0_valid <= 1'b1;
+                    q1_valid <= 1'b1;
+                end else begin
+                    load_q0(req_write, req_addr, req_bytes, route_cycles,
+                            req_wdata, req_wstrb, req_source, req_tid);
+                    q0_valid <= 1'b1;
+                    q1_valid <= 1'b0;
+                end
+            end else if (phase_start_fire) begin
+                if (q1_valid) begin
+                    move_q1_to_q0();
+                    q0_valid <= 1'b1;
+                    q1_valid <= 1'b0;
+                end else begin
+                    q0_valid <= 1'b0;
+                    q1_valid <= 1'b0;
+                end
+            end else if (req_push) begin
+                if (!q0_valid) begin
+                    load_q0(req_write, req_addr, req_bytes, route_cycles,
+                            req_wdata, req_wstrb, req_source, req_tid);
+                    q0_valid <= 1'b1;
+                end else begin
+                    load_q1(req_write, req_addr, req_bytes, route_cycles,
+                            req_wdata, req_wstrb, req_source, req_tid);
+                    q1_valid <= 1'b1;
+                end
+            end
+
+            if (phase_done_push && resp_pop) begin
+                if (resp1_valid) begin
+                    resp0_valid <= 1'b1;
+                    resp0_read <= resp1_read;
+                    resp0_source <= resp1_source;
+                    resp0_tid <= resp1_tid;
+                    resp0_rdata <= resp1_rdata;
+                    resp1_valid <= 1'b1;
+                    resp1_read <= active_resp_read;
+                    resp1_source <= active_resp_source;
+                    resp1_tid <= active_resp_tid;
+                    resp1_rdata <= active_resp_rdata;
+                end else begin
+                    resp0_valid <= 1'b1;
+                    resp0_read <= active_resp_read;
+                    resp0_source <= active_resp_source;
+                    resp0_tid <= active_resp_tid;
+                    resp0_rdata <= active_resp_rdata;
+                    resp1_valid <= 1'b0;
+                end
+            end else if (phase_done_push) begin
+                if (!resp0_valid) begin
+                    resp0_valid <= 1'b1;
+                    resp0_read <= active_resp_read;
+                    resp0_source <= active_resp_source;
+                    resp0_tid <= active_resp_tid;
+                    resp0_rdata <= active_resp_rdata;
+                end else begin
+                    resp1_valid <= 1'b1;
+                    resp1_read <= active_resp_read;
+                    resp1_source <= active_resp_source;
+                    resp1_tid <= active_resp_tid;
+                    resp1_rdata <= active_resp_rdata;
+                end
+            end else if (resp_pop) begin
+                if (resp1_valid) begin
+                    resp0_valid <= 1'b1;
+                    resp0_read <= resp1_read;
+                    resp0_source <= resp1_source;
+                    resp0_tid <= resp1_tid;
+                    resp0_rdata <= resp1_rdata;
+                    resp1_valid <= 1'b0;
+                end else begin
+                    resp0_valid <= 1'b0;
+                end
             end
             debug_crc_done <= 1'b0;
             if (debug_crc_start && !debug_crc_busy) begin
@@ -511,72 +768,41 @@ module l1mesh #(
         end
     endfunction
 
+    function [DATA_WIDTH-1:0] sram_read_word;
+        input [ADDR_WIDTH-1:0] byte_addr;
+        reg [31:0] dbg_word_addr;
+        reg [7:0] dbg_sram_macro_index;
+        reg [31:0] dbg_sram_macro_word;
+        begin
+            dbg_word_addr = {10'd0, byte_addr} / STRB_WIDTH;
+            dbg_sram_macro_index = {dbg_word_addr[1:0],
+                                    dbg_word_addr[5:2],
+                                    dbg_word_addr[7:6]};
+            dbg_sram_macro_word = dbg_word_addr >> 8;
+            if (dbg_sram_macro_word >= SRAM_MACRO_WORDS) begin
+                sram_read_word = {DATA_WIDTH{1'b0}};
+            end else begin
+                sram_read_word = sram_macro_mem[dbg_sram_macro_index][dbg_sram_macro_word];
+            end
+        end
+    endfunction
+
     function [7:0] debug_read_byte;
         input [ADDR_WIDTH-1:0] byte_addr;
-        reg [31:0] dbg_word_addr;
-        reg [1:0] dbg_storage_mesh_id;
-        reg [3:0] dbg_quad_sram_id;
-        reg [1:0] dbg_sram_macro_port;
-        reg [31:0] dbg_sram_macro_word;
-        reg [31:0] dbg_tile_word_addr;
+        reg [DATA_WIDTH-1:0] dbg_word_data;
         reg [3:0] dbg_lane;
         begin
-            dbg_word_addr = {10'd0, byte_addr} / STRB_WIDTH;
-            dbg_storage_mesh_id = dbg_word_addr[1:0];
-            dbg_quad_sram_id = dbg_word_addr[5:2];
-            dbg_sram_macro_port = dbg_word_addr[7:6];
-            dbg_sram_macro_word = dbg_word_addr >> 8;
-            dbg_tile_word_addr = (((dbg_sram_macro_word << 4) +
-                                   {28'd0, dbg_quad_sram_id}) << 2) +
-                                   {30'd0, dbg_sram_macro_port};
+            dbg_word_data = sram_read_word(byte_addr);
             dbg_lane = byte_addr[3:0];
-            if (dbg_tile_word_addr >= TILE_WORDS) begin
-                debug_read_byte = 8'd0;
-            end else begin
-                case (dbg_storage_mesh_id)
-                    2'd0: debug_read_byte = u_tile0.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
-                    2'd1: debug_read_byte = u_tile1.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
-                    2'd2: debug_read_byte = u_tile2.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
-                    2'd3: debug_read_byte = u_tile3.mem[dbg_tile_word_addr][dbg_lane*8 +: 8];
-                    default: debug_read_byte = 8'd0;
-                endcase
-            end
+            debug_read_byte = dbg_word_data[dbg_lane*8 +: 8];
         end
     endfunction
 
-    function [DATA_WIDTH-1:0] debug_read_word;
-        input [ADDR_WIDTH-1:0] byte_addr;
-        reg [31:0] dbg_word_addr;
-        reg [1:0] dbg_storage_mesh_id;
-        reg [3:0] dbg_quad_sram_id;
-        reg [1:0] dbg_sram_macro_port;
-        reg [31:0] dbg_sram_macro_word;
-        reg [31:0] dbg_tile_word_addr;
-        begin
-            dbg_word_addr = {10'd0, byte_addr} / STRB_WIDTH;
-            dbg_storage_mesh_id = dbg_word_addr[1:0];
-            dbg_quad_sram_id = dbg_word_addr[5:2];
-            dbg_sram_macro_port = dbg_word_addr[7:6];
-            dbg_sram_macro_word = dbg_word_addr >> 8;
-            dbg_tile_word_addr = (((dbg_sram_macro_word << 4) +
-                                   {28'd0, dbg_quad_sram_id}) << 2) +
-                                   {30'd0, dbg_sram_macro_port};
-            if (dbg_tile_word_addr >= TILE_WORDS) begin
-                debug_read_word = {DATA_WIDTH{1'b0}};
-            end else begin
-                case (dbg_storage_mesh_id)
-                    2'd0: debug_read_word = u_tile0.mem[dbg_tile_word_addr];
-                    2'd1: debug_read_word = u_tile1.mem[dbg_tile_word_addr];
-                    2'd2: debug_read_word = u_tile2.mem[dbg_tile_word_addr];
-                    2'd3: debug_read_word = u_tile3.mem[dbg_tile_word_addr];
-                    default: debug_read_word = {DATA_WIDTH{1'b0}};
-                endcase
-            end
-        end
-    endfunction
-
-    assign resp_valid = phase_done && !start_fire;
-    assign resp_read = resp_read_q;
+    assign resp_valid = resp0_valid;
+    assign resp_read = resp0_read;
+    assign resp_source = resp0_source;
+    assign resp_tid = resp0_tid;
+    assign resp_rdata = resp0_rdata;
 
     mdla7_synth_phase_engine #(
         .NUM_PHASES(6),
@@ -584,14 +810,14 @@ module l1mesh #(
     ) u_phase (
         .clk(clk),
         .rst_n(rst_n),
-        .start_valid(req_valid),
-        .start_ready(req_ready),
+        .start_valid(phase_start_valid),
+        .start_ready(phase_start_ready),
         .phase_cycles(phase_cycles),
         .phase_ids(phase_ids),
         .phase_stall(1'b0),
-        .busy(busy),
+        .busy(phase_busy),
         .done_valid(phase_done),
-        .done_ready(resp_ready),
+        .done_ready(phase_done_ready),
         .phase_id(phase_id),
         .remaining_cycles(remaining_cycles)
     );

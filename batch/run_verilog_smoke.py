@@ -226,16 +226,68 @@ def find_cxx_stdlib_include() -> Path | None:
 
 
 def run(cmd: list[str], cwd: Path, quiet: bool) -> tuple[int, str]:
-    proc = subprocess.run(
-        cmd,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if proc.stdout and not quiet:
-        print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
-    return proc.returncode, proc.stdout or ""
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        output = proc.stdout or ""
+        rc = proc.returncode
+    except OSError as exc:
+        output = f"ERROR: could not execute {cmd[0]}: {exc}\n"
+        rc = 126
+    if output and not quiet:
+        print(output, end="" if output.endswith("\n") else "\n")
+    return rc, output
+
+
+def host_tag() -> str:
+    return f"{platform.system()}-{platform.machine()}"
+
+
+def machine_matches_file_output(machine: str, file_output: str) -> bool:
+    text = file_output.lower()
+    machine = machine.lower()
+    if machine in ("x86_64", "amd64"):
+        return "x86_64" in text or "x86-64" in text
+    if machine in ("arm64", "aarch64"):
+        return "arm64" in text or "aarch64" in text
+    return machine in text
+
+
+def file_output(path: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["file", str(path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return proc.stdout or ""
+
+
+def stale_obj_dir_reason(obj_dir: Path, exe: Path) -> str | None:
+    expected = f".host-{host_tag()}"
+    stamps = [p.name for p in obj_dir.glob(".host-*")]
+    if stamps and expected not in stamps:
+        return f"host stamp is {','.join(stamps)}, expected {expected}"
+    if not stamps and exe.exists():
+        output = file_output(exe)
+        if output and not machine_matches_file_output(platform.machine(), output):
+            return output.strip()
+    return None
+
+
+def write_host_stamp(obj_dir: Path) -> None:
+    for stamp in obj_dir.glob(".host-*"):
+        stamp.unlink(missing_ok=True)
+    (obj_dir / f".host-{host_tag()}").touch()
 
 
 def find_default_verilator(rtl_dir: Path) -> Path:
@@ -305,6 +357,11 @@ def main(argv: list[str]) -> int:
         obj_dir = obj_root / name
         exe = obj_dir / f"V{top}"
         if not args.no_build:
+            stale_reason = stale_obj_dir_reason(obj_dir, exe)
+            if stale_reason is not None:
+                if args.verbose:
+                    print(f"[verilog_smoke] clearing stale {obj_dir}: {stale_reason}")
+                shutil.rmtree(obj_dir, ignore_errors=True)
             cmd = [
                 str(verilator),
                 "--binary",
@@ -335,6 +392,10 @@ def main(argv: list[str]) -> int:
                 print(output, end="" if output.endswith("\n") else "\n")
                 failures.append(f"{name}: build failed")
                 continue
+            write_host_stamp(obj_dir)
+        elif stale_obj_dir_reason(obj_dir, exe) is not None:
+            failures.append(f"{name}: executable was built for a different host; rerun without --no-build")
+            continue
         sim_cmd = [str(exe)]
         program = args.program
         ref_program = args.ref_program

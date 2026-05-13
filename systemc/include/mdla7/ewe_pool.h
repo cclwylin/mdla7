@@ -29,6 +29,9 @@
 
 namespace mdla7 {
 
+static constexpr uint32_t FP_BINARY_BCAST_MAGIC = 0x46424357u;
+static constexpr uint32_t FP_BINARY_BCAST_SCALAR = 1u;
+
 static constexpr uint64_t EWE_INT8_LANES  = 64;
 static constexpr uint64_t EWE_INT16_LANES = 32;
 static constexpr uint64_t EWE_FP_LANES    = 32;
@@ -296,9 +299,17 @@ SC_MODULE(EweEngine) {
     void run_binary_fp(const EweBody& e, uint64_t elems, uint8_t op) {
         std::vector<uint16_t> a16(elems), b16(elems), out16(elems);
         l1mgr.read(e.in_a_addr, a16.data(), elems * sizeof(uint16_t));
-        l1mgr.read(e.in_b_addr, b16.data(), elems * sizeof(uint16_t));
         float clip[2];
         l1mgr.read(e.lut_addr, clip, sizeof(clip));
+        uint32_t bcast[3] = {0, 0, 0};
+        l1mgr.read(e.lut_addr + 8, bcast, sizeof(bcast));
+        if (bcast[0] == FP_BINARY_BCAST_MAGIC && bcast[1] == FP_BINARY_BCAST_SCALAR) {
+            uint16_t scalar = 0;
+            l1mgr.read(e.in_b_addr, &scalar, sizeof(scalar));
+            std::fill(b16.begin(), b16.end(), scalar);
+        } else {
+            l1mgr.read(e.in_b_addr, b16.data(), elems * sizeof(uint16_t));
+        }
         const float act_min = clip[0], act_max = clip[1];
         for (uint64_t i = 0; i < elems; ++i) {
             const float a = fp16_to_fp32(a16[i]);

@@ -784,8 +784,7 @@ module host #(
                         desc_valid <= 1'b0;
                         issued_count <= issued_count + 32'd1;
                         if (cycle_stream_descriptor_mode) begin
-                            if (!probe_descriptor_mode)
-                                measured_cycle_count <= measured_cycle_count + 32'd1;
+                            measured_cycle_count <= measured_cycle_count + 32'd1;
                             if (descriptor_has_stream_flags) begin
                                 if ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0)
                                     expected_microblock_load_count <= expected_microblock_load_count + 32'd1;
@@ -805,8 +804,7 @@ module host #(
                 end
                 ST_WAIT: begin
                     watchdog <= watchdog + 32'd1;
-                    if (!probe_descriptor_mode)
-                        measured_cycle_count <= measured_cycle_count + 32'd1;
+                    measured_cycle_count <= measured_cycle_count + 32'd1;
                     if (watchdog == 32'd5000000) begin
                         $display("HOST_VERILOG_FAIL: timeout cmd=%0d op=%0d active=%0d phase=%0d remaining=%0d top_busy=%0d block_busy=%09b block_done=%09b",
                                  command_index, desc_op_class, active_op_class,

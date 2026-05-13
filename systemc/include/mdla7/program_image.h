@@ -7,7 +7,7 @@ namespace mdla7 {
 #pragma pack(push, 1)
 struct ProgHeader {
     uint32_t magic;          // 'MDL7'
-    uint32_t version;        // 2 or 3
+    uint32_t version;        // 2/3 use LayerMetaDiskV3, 4 uses LayerMetaDiskV4
     uint32_t num_layers;
     uint32_t data_offset;
 };
@@ -17,7 +17,31 @@ struct LayerMeta {
     uint8_t  k_h, k_w, s_h, s_w, p_t, p_b, p_l, p_r;
     uint32_t dram_in, dram_wgt, dram_out;
     uint32_t in_size, wgt_size, ref_size;
+    uint64_t in_off, wgt_off, ref_off;
+    uint16_t group;
+    uint16_t op_kind;
+    uint16_t dtype;
+    int16_t  zp_in_eff;
+};
+
+struct LayerMetaDiskV3 {
+    uint16_t in_h, in_w, in_c, out_h, out_w, out_c;
+    uint8_t  k_h, k_w, s_h, s_w, p_t, p_b, p_l, p_r;
+    uint32_t dram_in, dram_wgt, dram_out;
+    uint32_t in_size, wgt_size, ref_size;
     uint32_t in_off, wgt_off, ref_off;
+    uint16_t group;
+    uint16_t op_kind;
+    uint16_t dtype;
+    int16_t  zp_in_eff;
+};
+
+struct LayerMetaDiskV4 {
+    uint16_t in_h, in_w, in_c, out_h, out_w, out_c;
+    uint8_t  k_h, k_w, s_h, s_w, p_t, p_b, p_l, p_r;
+    uint32_t dram_in, dram_wgt, dram_out;
+    uint32_t in_size, wgt_size, ref_size;
+    uint64_t in_off, wgt_off, ref_off;
     uint16_t group;
     uint16_t op_kind;
     uint16_t dtype;
@@ -98,7 +122,8 @@ inline const char* op_name(uint16_t k) {
 #pragma pack(pop)
 
 static_assert(sizeof(ProgHeader) == 16);
-static_assert(sizeof(LayerMeta)  == 64);
+static_assert(sizeof(LayerMetaDiskV3) == 64);
+static_assert(sizeof(LayerMetaDiskV4) == 76);
 static_assert(sizeof(GraphMeta)  == 32);
 
 } // namespace mdla7
