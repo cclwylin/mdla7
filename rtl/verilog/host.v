@@ -13,6 +13,7 @@ module host #(
     output reg [15:0]  desc_microblock_id,
     output reg [7:0]   desc_stream_slot,
     output reg [7:0]   desc_stream_meta_flags,
+    output reg         desc_cycle_only_mode,
     output reg [31:0]  bytes,
     output reg [31:0]  udma_dram_read_bytes,
     output reg [31:0]  udma_codec_cycles,
@@ -237,6 +238,7 @@ module host #(
     localparam [2:0] ST_WAIT  = 3'd2;
     localparam [2:0] ST_NEXT  = 3'd3;
     localparam [2:0] ST_DONE  = 3'd4;
+    localparam [2:0] ST_DRAIN = 3'd5;
 
     localparam WORDS_PER_COMMAND = 32;
 
@@ -283,7 +285,10 @@ module host #(
     wire descriptor_has_stream_flags =
         (desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) != 8'd0;
     wire probe_descriptor_mode = cmd_mem[base + 3][15];
-    wire cycle_only_descriptor_mode = cmd_mem[base + 3][14];
+    wire cycle_only_descriptor_mode = cmd_mem[base + 3][14] ||
+        ((next_op == OP_UDMA) && cmd_mem[base + 3][12]);
+    wire cycle_stream_descriptor_mode = cycle_only_descriptor_mode && microblock_descriptor_mode &&
+        descriptor_has_stream_flags;
 
     assign top_done_ready = 1'b1;
 
@@ -313,6 +318,7 @@ module host #(
             desc_microblock_id <= {4'd0, cmd_mem[base][31:20]};
             desc_stream_slot <= cmd_mem[base + 3][23:16];
             desc_stream_meta_flags <= cmd_mem[base + 3][31:24];
+            desc_cycle_only_mode <= cycle_only_descriptor_mode;
             bytes <= cmd_mem[base + 1];
             l1mesh_addr <= cmd_mem[base + 2][21:0];
             udma_direction_write <= cmd_mem[base + 3][0];
@@ -618,6 +624,7 @@ module host #(
             command_index <= 32'd0;
             watchdog <= 32'd0;
             desc_valid <= 1'b0;
+            desc_cycle_only_mode <= 1'b0;
             desc_op_class <= 4'd0;
             desc_layer_id <= 16'd0;
             desc_microblock_id <= 16'd0;
@@ -756,9 +763,15 @@ module host #(
                 ST_LOAD: begin
                     desc_valid <= 1'b0;
                     watchdog <= 32'd0;
+                    if (top_done_valid)
+                        done_count <= done_count + 32'd1;
                     if (next_op == OP_DONE) begin
-                        test_done <= 1'b1;
-                        state <= ST_DONE;
+                        if (done_count == issued_count) begin
+                            test_done <= 1'b1;
+                            state <= ST_DONE;
+                        end else begin
+                            state <= ST_DRAIN;
+                        end
                     end else begin
                         load_command();
                         state <= ST_ISSUE;
@@ -770,7 +783,24 @@ module host #(
                     if (desc_valid && desc_ready) begin
                         desc_valid <= 1'b0;
                         issued_count <= issued_count + 32'd1;
-                        state <= ST_WAIT;
+                        if (cycle_stream_descriptor_mode) begin
+                            if (!probe_descriptor_mode)
+                                measured_cycle_count <= measured_cycle_count + 32'd1;
+                            if (descriptor_has_stream_flags) begin
+                                if ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0)
+                                    expected_microblock_load_count <= expected_microblock_load_count + 32'd1;
+                                if ((desc_stream_meta_flags & SMF_COMPUTE) != 8'd0)
+                                    expected_microblock_compute_count <= expected_microblock_compute_count + 32'd1;
+                                if ((desc_stream_meta_flags & SMF_STORE) != 8'd0)
+                                    expected_microblock_store_count <= expected_microblock_store_count + 32'd1;
+                                if ((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0)
+                                    expected_microblock_final_count <= expected_microblock_final_count + 32'd1;
+                            end
+                            command_index <= command_index + 32'd1;
+                            state <= ST_LOAD;
+                        end else begin
+                            state <= ST_WAIT;
+                        end
                     end
                 end
                 ST_WAIT: begin
@@ -1204,6 +1234,22 @@ module host #(
                 ST_NEXT: begin
                     command_index <= command_index + 32'd1;
                     state <= ST_LOAD;
+                end
+                ST_DRAIN: begin
+                    watchdog <= watchdog + 32'd1;
+                    measured_cycle_count <= measured_cycle_count + 32'd1;
+                    if (top_done_valid)
+                        done_count <= done_count + 32'd1;
+                    if (watchdog == 32'd5000000) begin
+                        $display("HOST_VERILOG_FAIL: stream drain timeout issued=%0d done=%0d top_busy=%0d block_busy=%09b",
+                                 issued_count, done_count, top_busy, block_busy);
+                        test_fail <= 1'b1;
+                        test_done <= 1'b1;
+                        state <= ST_DONE;
+                    end else if ((done_count + (top_done_valid ? 32'd1 : 32'd0)) >= issued_count) begin
+                        test_done <= 1'b1;
+                        state <= ST_DONE;
+                    end
                 end
                 ST_DONE: begin
                     desc_valid <= 1'b0;

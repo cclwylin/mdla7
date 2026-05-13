@@ -82,6 +82,7 @@ MAX_FINAL_OUTPUT_SRAM_BYTES = 16 * 1024 * 1024
 PROBE_DESCRIPTOR_FLAG = 1 << 15
 READ_FROM_L1_FLAG = 1 << 11
 MICROBLOCK_FLAG = 1 << 13
+CYCLE_STREAM_FLAG = 1 << 12
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
@@ -1631,7 +1632,7 @@ def cycle_udma_descriptor(
     words[0] = OP_UDMA
     words[1] = payload_bytes & 0xFFFF_FFFF
     words[2] = addr & 0x003F_FFFF
-    words[3] = (1 if not direction_write else (1 << 6)) | MICROBLOCK_FLAG
+    words[3] = (1 if not direction_write else (1 << 6)) | MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
     words[4] = payload_bytes & 0xFFFF_FFFF
     words[5] = 1 + (payload_bytes // 4096)
     words[19] = layer.index
@@ -1664,7 +1665,7 @@ def cycle_layer_descriptors(layer: Layer, ordinal: int, enable_meta_tnps: bool) 
         compute = udma_ref_fill_descriptor(layer, ordinal + len(descs))
     if compute is not None:
         if (compute[0] & 0xF) != OP_UDMA:
-            compute[3] |= (1 << 14) | MICROBLOCK_FLAG
+            compute[3] |= (1 << 14) | MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
         if (compute[0] & 0xF) == OP_CONV:
             output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
             output_groups = ceil_div(output_elems, 16) if layer.op_kind == 6 else output_elems
@@ -1693,6 +1694,15 @@ def cycle_layer_descriptors(layer: Layer, ordinal: int, enable_meta_tnps: bool) 
             )
             descs.append(compute)
         else:
+            compute[3] |= MICROBLOCK_FLAG | CYCLE_STREAM_FLAG
+            if ((compute[3] >> 24) & 0xFF) == 0:
+                stamp_synth_microblock_metadata(
+                    compute,
+                    layer.index,
+                    ordinal + len(descs),
+                    ordinal + len(descs),
+                    SMF_COMPUTE,
+                )
             descs.append(compute)
 
     store = cycle_udma_descriptor(

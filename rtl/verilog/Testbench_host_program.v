@@ -95,6 +95,7 @@ module Testbench_host_program;
     wire [15:0] desc_microblock_id;
     wire [7:0] desc_stream_slot;
     wire [7:0] desc_stream_meta_flags;
+    wire desc_cycle_only_mode;
     wire [31:0] bytes;
     wire [31:0] udma_dram_read_bytes;
     wire [31:0] udma_codec_cycles;
@@ -329,6 +330,7 @@ module Testbench_host_program;
         .desc_microblock_id(desc_microblock_id),
         .desc_stream_slot(desc_stream_slot),
         .desc_stream_meta_flags(desc_stream_meta_flags),
+        .desc_cycle_only_mode(desc_cycle_only_mode),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),
@@ -542,6 +544,7 @@ module Testbench_host_program;
         .desc_microblock_id(desc_microblock_id),
         .desc_stream_slot(desc_stream_slot),
         .desc_stream_meta_flags(desc_stream_meta_flags),
+        .desc_cycle_only_mode(desc_cycle_only_mode),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),

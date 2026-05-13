@@ -175,6 +175,7 @@ module Testbench_top_byte_movers;
         .desc_microblock_id(desc_microblock_id),
         .desc_stream_slot(desc_stream_slot),
         .desc_stream_meta_flags(desc_stream_meta_flags),
+        .desc_cycle_only_mode(1'b0),
         .bytes(bytes),
         .udma_dram_read_bytes(udma_dram_read_bytes),
         .udma_codec_cycles(udma_codec_cycles),

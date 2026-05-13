@@ -62,6 +62,497 @@ module vf_microblock_control (
     end
 endmodule
 
+module vf_mb_stream_scheduler #(
+    parameter QUEUE_DEPTH = 32
+) (
+    input             clk,
+    input             rst_n,
+    input             desc_valid,
+    output            desc_ready,
+    input      [3:0]  desc_op_class,
+    input      [15:0] desc_layer_id,
+    input      [15:0] desc_microblock_id,
+    input      [7:0]  desc_stream_slot,
+    input      [7:0]  desc_stream_meta_flags,
+    input      [31:0] bytes,
+    input      [31:0] conv_workload_bytes,
+    input      [31:0] conv_workload_outputs,
+    input      [31:0] pool_workload_bytes,
+    input      [31:0] tnps_bytes,
+    output reg        done_valid,
+    input             done_ready,
+    output            busy,
+    output reg [3:0]  active_op_class,
+    output reg [15:0] active_layer_id,
+    output reg [15:0] active_microblock_id,
+    output reg [7:0]  active_stream_slot,
+    output reg [7:0]  active_stream_meta_flags,
+    output reg [3:0]  active_phase_id,
+    output reg [31:0] active_remaining_cycles,
+    output reg [31:0] load_count,
+    output reg [31:0] compute_count,
+    output reg [31:0] store_count,
+    output reg [31:0] final_count
+);
+    localparam [3:0] OP_CONV = 4'd1;
+    localparam [3:0] OP_REQUANT = 4'd2;
+    localparam [3:0] OP_EWE = 4'd3;
+    localparam [3:0] OP_POOL = 4'd4;
+    localparam [3:0] OP_TNPS = 4'd5;
+    localparam [3:0] OP_UDMA = 4'd6;
+    localparam [7:0] SMF_LOAD_A = 8'h01;
+    localparam [7:0] SMF_LOAD_B = 8'h02;
+    localparam [7:0] SMF_COMPUTE = 8'h04;
+    localparam [7:0] SMF_STORE = 8'h08;
+    localparam [7:0] SMF_FINAL_TILE = 8'h10;
+    localparam [3:0] PH_LOAD = 4'd2;
+    localparam [3:0] PH_COMPUTE = 4'd4;
+    localparam [3:0] PH_REQUANT = 4'd6;
+    localparam [3:0] PH_STORE = 4'd7;
+    localparam [5:0] QUEUE_DEPTH_W = QUEUE_DEPTH[5:0];
+
+    reg [31:0] load_latency_q [0:QUEUE_DEPTH-1];
+    reg [15:0] load_layer_q [0:QUEUE_DEPTH-1];
+    reg [15:0] load_mb_q [0:QUEUE_DEPTH-1];
+    reg [7:0] load_slot_q [0:QUEUE_DEPTH-1];
+    reg [7:0] load_flags_q [0:QUEUE_DEPTH-1];
+    reg [3:0] load_op_q [0:QUEUE_DEPTH-1];
+    reg [5:0] load_head;
+    reg [5:0] load_tail;
+    reg [5:0] load_level;
+
+    reg [31:0] compute_latency_q [0:QUEUE_DEPTH-1];
+    reg [7:0] compute_dep_q [0:QUEUE_DEPTH-1];
+    reg [15:0] compute_layer_q [0:QUEUE_DEPTH-1];
+    reg [15:0] compute_mb_q [0:QUEUE_DEPTH-1];
+    reg [7:0] compute_slot_q [0:QUEUE_DEPTH-1];
+    reg [7:0] compute_flags_q [0:QUEUE_DEPTH-1];
+    reg [3:0] compute_op_q [0:QUEUE_DEPTH-1];
+    reg [15:0] compute_dep_load_q [0:QUEUE_DEPTH-1];
+    reg [15:0] compute_dep_final_q [0:QUEUE_DEPTH-1];
+    reg [5:0] compute_head;
+    reg [5:0] compute_tail;
+    reg [5:0] compute_level;
+
+    reg [31:0] requant_latency_q [0:QUEUE_DEPTH-1];
+    reg [15:0] requant_dep_compute_q [0:QUEUE_DEPTH-1];
+    reg [15:0] requant_layer_q [0:QUEUE_DEPTH-1];
+    reg [15:0] requant_mb_q [0:QUEUE_DEPTH-1];
+    reg [7:0] requant_slot_q [0:QUEUE_DEPTH-1];
+    reg [7:0] requant_flags_q [0:QUEUE_DEPTH-1];
+    reg [3:0] requant_op_q [0:QUEUE_DEPTH-1];
+    reg [5:0] requant_head;
+    reg [5:0] requant_tail;
+    reg [5:0] requant_level;
+
+    reg [31:0] store_latency_q [0:QUEUE_DEPTH-1];
+    reg [7:0] store_dep_q [0:QUEUE_DEPTH-1];
+    reg [15:0] store_dep_compute_q [0:QUEUE_DEPTH-1];
+    reg [15:0] store_dep_requant_q [0:QUEUE_DEPTH-1];
+    reg [15:0] store_dep_final_q [0:QUEUE_DEPTH-1];
+    reg [15:0] store_layer_q [0:QUEUE_DEPTH-1];
+    reg [15:0] store_mb_q [0:QUEUE_DEPTH-1];
+    reg [7:0] store_slot_q [0:QUEUE_DEPTH-1];
+    reg [7:0] store_flags_q [0:QUEUE_DEPTH-1];
+    reg [3:0] store_op_q [0:QUEUE_DEPTH-1];
+    reg [5:0] store_head;
+    reg [5:0] store_tail;
+    reg [5:0] store_level;
+
+    reg load_busy;
+    reg compute_busy;
+    reg requant_busy;
+    reg store_busy;
+    reg [31:0] load_remaining;
+    reg [31:0] compute_remaining;
+    reg [31:0] requant_remaining;
+    reg [31:0] store_remaining;
+    reg [3:0] load_op;
+    reg [3:0] compute_op;
+    reg [3:0] requant_op;
+    reg [3:0] store_op;
+    reg [15:0] load_layer;
+    reg [15:0] compute_layer;
+    reg [15:0] requant_layer;
+    reg [15:0] store_layer;
+    reg [15:0] load_mb;
+    reg [15:0] compute_mb;
+    reg [15:0] requant_mb;
+    reg [15:0] store_mb;
+    reg [31:0] compute_requant_latency;
+    reg [7:0] load_slot;
+    reg [7:0] compute_slot;
+    reg [7:0] requant_slot;
+    reg [7:0] store_slot;
+    reg [7:0] load_flags;
+    reg [7:0] compute_flags;
+    reg [7:0] requant_flags;
+    reg [7:0] store_flags;
+    reg [15:0] accepted_loads;
+    reg [15:0] retired_loads;
+    reg [15:0] accepted_computes;
+    reg [15:0] retired_computes;
+    reg [15:0] accepted_requants;
+    reg [15:0] retired_requants;
+    reg [15:0] accepted_finals;
+    reg [15:0] retired_finals;
+    reg [15:0] conv_pending_requant;
+    reg current_layer_valid;
+    reg [15:0] current_layer;
+
+    wire is_load_desc = (desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B)) != 8'd0;
+    wire is_compute_desc = (desc_stream_meta_flags & SMF_COMPUTE) != 8'd0;
+    wire is_store_desc = (desc_stream_meta_flags & SMF_STORE) != 8'd0;
+    wire is_final_desc = (desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0;
+    wire is_conv_compute_desc = is_compute_desc && (desc_op_class == OP_CONV);
+    wire accept = desc_valid && desc_ready;
+    wire load_done = load_busy && (load_remaining <= 32'd1);
+    wire compute_done = compute_busy && (compute_remaining <= 32'd1);
+    wire requant_done = requant_busy && (requant_remaining <= 32'd1);
+    wire store_done = store_busy && (store_remaining <= 32'd1);
+    wire done_slot_ready = !done_valid || done_ready;
+    wire [15:0] layer_boundary_dep =
+        (current_layer_valid && (desc_layer_id != current_layer)) ? accepted_finals : retired_finals;
+    wire [15:0] next_compute_dep =
+        accepted_computes + (accept && is_compute_desc ? 16'd1 : 16'd0);
+    wire [15:0] next_requant_dep =
+        accepted_requants + conv_pending_requant +
+        (accept && is_conv_compute_desc ? 16'd1 : 16'd0);
+
+    assign desc_ready = (!done_valid || done_ready) &&
+        !load_done && !compute_done && !requant_done && !store_done &&
+        (!is_load_desc || (load_level < QUEUE_DEPTH_W)) &&
+        (!is_compute_desc || ((compute_level < QUEUE_DEPTH_W) &&
+                              (!is_conv_compute_desc ||
+                               ((requant_level + conv_pending_requant) < QUEUE_DEPTH_W)))) &&
+        (!is_store_desc || (store_level < QUEUE_DEPTH_W));
+    assign busy = load_busy || compute_busy || requant_busy || store_busy ||
+        (load_level != 6'd0) || (compute_level != 6'd0) ||
+        (requant_level != 6'd0) || (store_level != 6'd0) ||
+        done_valid;
+
+    function [5:0] bump;
+        input [5:0] idx;
+        begin
+            bump = (idx == (QUEUE_DEPTH - 1)) ? 6'd0 : (idx + 6'd1);
+        end
+    endfunction
+
+    function [31:0] ceil_div;
+        input [31:0] value;
+        input [31:0] denom;
+        begin
+            ceil_div = (denom == 32'd0) ? 32'd0 : ((value + denom - 32'd1) / denom);
+        end
+    endfunction
+
+    function [31:0] load_store_cycles;
+        input [31:0] byte_count;
+        begin
+            load_store_cycles = ceil_div((byte_count == 32'd0) ? 32'd1 : byte_count, 32'd256) +
+                ceil_div((byte_count == 32'd0) ? 32'd1 : byte_count, 32'd64) + 32'd12;
+        end
+    endfunction
+
+    function [31:0] compute_cycles;
+        input [3:0] op;
+        input [31:0] byte_count;
+        input [31:0] conv_bytes;
+        input [31:0] conv_outputs;
+        input [31:0] pool_bytes;
+        input [31:0] tbytes;
+        reg [31:0] safe_outputs;
+        reg [31:0] safe_bytes;
+        begin
+            safe_outputs = (conv_outputs == 32'd0) ? 32'd1 : conv_outputs;
+            safe_bytes = (conv_bytes == 32'd0) ? ((byte_count == 32'd0) ? 32'd1 : byte_count) : conv_bytes;
+            case (op)
+                OP_CONV: compute_cycles = ceil_div(safe_bytes * safe_outputs, 32'd16) + 32'd8;
+                OP_POOL: compute_cycles = ceil_div((pool_bytes == 32'd0) ? byte_count : pool_bytes, 32'd128) + 32'd6;
+                OP_TNPS: compute_cycles = ceil_div((tbytes == 32'd0) ? byte_count : tbytes, 32'd128) + 32'd6;
+                OP_REQUANT: compute_cycles = ceil_div((byte_count == 32'd0) ? 32'd1 : byte_count, 32'd64) + 32'd5;
+                OP_EWE: compute_cycles = ceil_div((byte_count == 32'd0) ? 32'd1 : byte_count, 32'd128) + 32'd5;
+                default: compute_cycles = 32'd4;
+            endcase
+        end
+    endfunction
+
+    function [31:0] requant_cycles;
+        input [31:0] conv_outputs;
+        begin
+            requant_cycles = ceil_div((conv_outputs == 32'd0) ? 32'd1 : conv_outputs, 32'd32) + 32'd5;
+        end
+    endfunction
+
+    integer i;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            done_valid <= 1'b0;
+            load_head <= 6'd0;
+            load_tail <= 6'd0;
+            load_level <= 6'd0;
+            compute_head <= 6'd0;
+            compute_tail <= 6'd0;
+            compute_level <= 6'd0;
+            requant_head <= 6'd0;
+            requant_tail <= 6'd0;
+            requant_level <= 6'd0;
+            store_head <= 6'd0;
+            store_tail <= 6'd0;
+            store_level <= 6'd0;
+            load_busy <= 1'b0;
+            compute_busy <= 1'b0;
+            requant_busy <= 1'b0;
+            store_busy <= 1'b0;
+            load_remaining <= 32'd0;
+            compute_remaining <= 32'd0;
+            requant_remaining <= 32'd0;
+            store_remaining <= 32'd0;
+            accepted_loads <= 16'd0;
+            retired_loads <= 16'd0;
+            accepted_computes <= 16'd0;
+            retired_computes <= 16'd0;
+            accepted_requants <= 16'd0;
+            retired_requants <= 16'd0;
+            accepted_finals <= 16'd0;
+            retired_finals <= 16'd0;
+            conv_pending_requant <= 16'd0;
+            current_layer_valid <= 1'b0;
+            current_layer <= 16'd0;
+            compute_requant_latency <= 32'd0;
+            active_op_class <= 4'd0;
+            active_layer_id <= 16'd0;
+            active_microblock_id <= 16'd0;
+            active_stream_slot <= 8'd0;
+            active_stream_meta_flags <= 8'd0;
+            active_phase_id <= 4'd0;
+            active_remaining_cycles <= 32'd0;
+            load_count <= 32'd0;
+            compute_count <= 32'd0;
+            store_count <= 32'd0;
+            final_count <= 32'd0;
+            for (i = 0; i < QUEUE_DEPTH; i = i + 1) begin
+                compute_dep_q[i] <= 8'd0;
+                compute_dep_load_q[i] <= 16'd0;
+                compute_dep_final_q[i] <= 16'd0;
+                store_dep_q[i] <= 8'd0;
+                store_dep_compute_q[i] <= 16'd0;
+                store_dep_requant_q[i] <= 16'd0;
+                store_dep_final_q[i] <= 16'd0;
+                requant_dep_compute_q[i] <= 16'd0;
+            end
+        end else begin
+            if (done_valid && done_ready)
+                done_valid <= 1'b0;
+
+            if (accept) begin
+                current_layer_valid <= 1'b1;
+                current_layer <= desc_layer_id;
+            end
+            if (accept && is_load_desc) begin
+                load_latency_q[load_tail] <= load_store_cycles(bytes);
+                load_layer_q[load_tail] <= desc_layer_id;
+                load_mb_q[load_tail] <= desc_microblock_id;
+                load_slot_q[load_tail] <= desc_stream_slot;
+                load_flags_q[load_tail] <= desc_stream_meta_flags;
+                load_op_q[load_tail] <= desc_op_class;
+                load_tail <= bump(load_tail);
+                load_level <= load_level + 6'd1;
+                load_count <= load_count + 32'd1;
+                accepted_loads <= accepted_loads + 16'd1;
+            end
+            if (accept && is_compute_desc) begin
+                compute_latency_q[compute_tail] <= compute_cycles(
+                    desc_op_class, bytes, conv_workload_bytes, conv_workload_outputs,
+                    pool_workload_bytes, tnps_bytes);
+                compute_dep_q[compute_tail] <= {2'd0, load_level} + {7'd0, load_busy};
+                compute_dep_load_q[compute_tail] <= accepted_loads;
+                compute_dep_final_q[compute_tail] <= layer_boundary_dep;
+                compute_layer_q[compute_tail] <= desc_layer_id;
+                compute_mb_q[compute_tail] <= desc_microblock_id;
+                compute_slot_q[compute_tail] <= desc_stream_slot;
+                compute_flags_q[compute_tail] <= desc_stream_meta_flags;
+                compute_op_q[compute_tail] <= desc_op_class;
+                compute_tail <= bump(compute_tail);
+                compute_level <= compute_level + 6'd1;
+                compute_count <= compute_count + 32'd1;
+                accepted_computes <= accepted_computes + 16'd1;
+                if (is_conv_compute_desc)
+                    conv_pending_requant <= conv_pending_requant + 16'd1;
+            end
+            if (accept && is_store_desc) begin
+                store_latency_q[store_tail] <= load_store_cycles(bytes);
+                store_dep_q[store_tail] <= {2'd0, compute_level} + {7'd0, compute_busy};
+                store_dep_compute_q[store_tail] <= next_compute_dep;
+                store_dep_requant_q[store_tail] <= next_requant_dep;
+                store_dep_final_q[store_tail] <= layer_boundary_dep;
+                store_layer_q[store_tail] <= desc_layer_id;
+                store_mb_q[store_tail] <= desc_microblock_id;
+                store_slot_q[store_tail] <= desc_stream_slot;
+                store_flags_q[store_tail] <= desc_stream_meta_flags;
+                store_op_q[store_tail] <= desc_op_class;
+                store_tail <= bump(store_tail);
+                store_level <= store_level + 6'd1;
+                store_count <= store_count + 32'd1;
+                if ((desc_stream_meta_flags & SMF_FINAL_TILE) != 8'd0)
+                    final_count <= final_count + 32'd1;
+                if (is_final_desc)
+                    accepted_finals <= accepted_finals + 16'd1;
+            end
+
+            if (!accept && !load_busy && (load_level != 6'd0)) begin
+                load_busy <= 1'b1;
+                load_remaining <= load_latency_q[load_head];
+                load_op <= load_op_q[load_head];
+                load_layer <= load_layer_q[load_head];
+                load_mb <= load_mb_q[load_head];
+                load_slot <= load_slot_q[load_head];
+                load_flags <= load_flags_q[load_head];
+                load_head <= bump(load_head);
+                load_level <= load_level - 6'd1;
+            end else if (load_busy) begin
+                if (load_done && done_slot_ready) begin
+                    load_busy <= 1'b0;
+                    done_valid <= 1'b1;
+                    active_op_class <= load_op;
+                    active_layer_id <= load_layer;
+                    active_microblock_id <= load_mb;
+                    active_stream_slot <= load_slot;
+                    active_stream_meta_flags <= load_flags;
+                    active_phase_id <= PH_LOAD;
+                    active_remaining_cycles <= 32'd0;
+                    retired_loads <= retired_loads + 16'd1;
+                    for (i = 0; i < QUEUE_DEPTH; i = i + 1)
+                        if (compute_dep_q[i] != 8'd0)
+                            compute_dep_q[i] <= compute_dep_q[i] - 8'd1;
+                end else begin
+                    load_remaining <= load_remaining - 32'd1;
+                end
+            end
+
+            if (!accept && !compute_busy && (compute_level != 6'd0) &&
+                (compute_dep_q[compute_head] == 8'd0) &&
+                (retired_loads >= compute_dep_load_q[compute_head]) &&
+                (retired_finals >= compute_dep_final_q[compute_head])) begin
+                compute_busy <= 1'b1;
+                compute_remaining <= compute_latency_q[compute_head];
+                compute_requant_latency <= requant_cycles(compute_latency_q[compute_head]);
+                compute_op <= compute_op_q[compute_head];
+                compute_layer <= compute_layer_q[compute_head];
+                compute_mb <= compute_mb_q[compute_head];
+                compute_slot <= compute_slot_q[compute_head];
+                compute_flags <= compute_flags_q[compute_head];
+                compute_head <= bump(compute_head);
+                compute_level <= compute_level - 6'd1;
+            end else if (compute_busy) begin
+                if (compute_done && done_slot_ready && !load_done) begin
+                    compute_busy <= 1'b0;
+                    done_valid <= 1'b1;
+                    active_op_class <= compute_op;
+                    active_layer_id <= compute_layer;
+                    active_microblock_id <= compute_mb;
+                    active_stream_slot <= compute_slot;
+                    active_stream_meta_flags <= compute_flags;
+                    active_phase_id <= PH_COMPUTE;
+                    active_remaining_cycles <= 32'd0;
+                    retired_computes <= retired_computes + 16'd1;
+                    if (compute_op == OP_CONV) begin
+                        requant_latency_q[requant_tail] <= compute_requant_latency;
+                        requant_dep_compute_q[requant_tail] <= retired_computes + 16'd1;
+                        requant_layer_q[requant_tail] <= compute_layer;
+                        requant_mb_q[requant_tail] <= compute_mb;
+                        requant_slot_q[requant_tail] <= compute_slot;
+                        requant_flags_q[requant_tail] <= SMF_COMPUTE;
+                        requant_op_q[requant_tail] <= OP_REQUANT;
+                        requant_tail <= bump(requant_tail);
+                        requant_level <= requant_level + 6'd1;
+                        accepted_requants <= accepted_requants + 16'd1;
+                        conv_pending_requant <= conv_pending_requant - 16'd1;
+                    end
+                    for (i = 0; i < QUEUE_DEPTH; i = i + 1)
+                        if (store_dep_q[i] != 8'd0)
+                            store_dep_q[i] <= store_dep_q[i] - 8'd1;
+                end else begin
+                    compute_remaining <= compute_remaining - 32'd1;
+                end
+            end
+
+            if (!accept && !compute_done && !requant_busy && (requant_level != 6'd0) &&
+                (retired_computes >= requant_dep_compute_q[requant_head])) begin
+                requant_busy <= 1'b1;
+                requant_remaining <= requant_latency_q[requant_head];
+                requant_op <= requant_op_q[requant_head];
+                requant_layer <= requant_layer_q[requant_head];
+                requant_mb <= requant_mb_q[requant_head];
+                requant_slot <= requant_slot_q[requant_head];
+                requant_flags <= requant_flags_q[requant_head];
+                requant_head <= bump(requant_head);
+                requant_level <= requant_level - 6'd1;
+            end else if (requant_busy) begin
+                if (requant_done && done_slot_ready && !load_done && !compute_done) begin
+                    requant_busy <= 1'b0;
+                    done_valid <= 1'b1;
+                    active_op_class <= requant_op;
+                    active_layer_id <= requant_layer;
+                    active_microblock_id <= requant_mb;
+                    active_stream_slot <= requant_slot;
+                    active_stream_meta_flags <= requant_flags;
+                    active_phase_id <= PH_REQUANT;
+                    active_remaining_cycles <= 32'd0;
+                    retired_requants <= retired_requants + 16'd1;
+                end else begin
+                    requant_remaining <= requant_remaining - 32'd1;
+                end
+            end
+
+            if (!accept && !store_busy && (store_level != 6'd0) && (store_dep_q[store_head] == 8'd0) &&
+                (retired_computes >= store_dep_compute_q[store_head]) &&
+                (retired_requants >= store_dep_requant_q[store_head]) &&
+                (retired_finals >= store_dep_final_q[store_head])) begin
+                store_busy <= 1'b1;
+                store_remaining <= store_latency_q[store_head];
+                store_op <= store_op_q[store_head];
+                store_layer <= store_layer_q[store_head];
+                store_mb <= store_mb_q[store_head];
+                store_slot <= store_slot_q[store_head];
+                store_flags <= store_flags_q[store_head];
+                store_head <= bump(store_head);
+                store_level <= store_level - 6'd1;
+            end else if (store_busy) begin
+                if (store_done && done_slot_ready && !load_done && !compute_done && !requant_done) begin
+                    store_busy <= 1'b0;
+                    done_valid <= 1'b1;
+                    active_op_class <= store_op;
+                    active_layer_id <= store_layer;
+                    active_microblock_id <= store_mb;
+                    active_stream_slot <= store_slot;
+                    active_stream_meta_flags <= store_flags;
+                    active_phase_id <= PH_STORE;
+                    active_remaining_cycles <= 32'd0;
+                    if ((store_flags & SMF_FINAL_TILE) != 8'd0)
+                        retired_finals <= retired_finals + 16'd1;
+                end else begin
+                    store_remaining <= store_remaining - 32'd1;
+                end
+            end
+
+            if (compute_busy) begin
+                active_phase_id <= PH_COMPUTE;
+                active_remaining_cycles <= compute_remaining;
+            end else if (requant_busy) begin
+                active_phase_id <= PH_REQUANT;
+                active_remaining_cycles <= requant_remaining;
+            end else if (load_busy) begin
+                active_phase_id <= PH_LOAD;
+                active_remaining_cycles <= load_remaining;
+            end else if (store_busy) begin
+                active_phase_id <= PH_STORE;
+                active_remaining_cycles <= store_remaining;
+            end
+        end
+    end
+endmodule
+
 module mdla7_top #(
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
@@ -76,6 +567,7 @@ module mdla7_top #(
     input      [15:0]           desc_microblock_id,
     input      [7:0]            desc_stream_slot,
     input      [7:0]            desc_stream_meta_flags,
+    input                       desc_cycle_only_mode,
     input      [31:0]           bytes,
     input      [31:0]           udma_dram_read_bytes,
     input      [31:0]           udma_codec_cycles,
@@ -284,6 +776,11 @@ module mdla7_top #(
     localparam [3:0] OP_TNPS = 4'd5;
     localparam [3:0] OP_UDMA = 4'd6;
     localparam [3:0] OP_L1CRC = 4'd7;
+    localparam [7:0] SMF_LOAD_A = 8'h01;
+    localparam [7:0] SMF_LOAD_B = 8'h02;
+    localparam [7:0] SMF_COMPUTE = 8'h04;
+    localparam [7:0] SMF_STORE = 8'h08;
+    localparam [7:0] SMF_FINAL_TILE = 8'h10;
 
     localparam [2:0] ST_IDLE = 3'd0;
     localparam [2:0] ST_RUN  = 3'd1;
@@ -539,8 +1036,28 @@ module mdla7_top #(
     wire [15:0] microblock_active_microblock_id;
     wire [7:0] microblock_active_stream_slot;
     wire [7:0] microblock_active_stream_meta_flags;
-    wire microblock_accept = desc_valid && desc_ready;
+    wire [31:0] legacy_microblock_load_count;
+    wire [31:0] legacy_microblock_compute_count;
+    wire [31:0] legacy_microblock_store_count;
+    wire [31:0] legacy_microblock_final_count;
+    wire stream_desc_mode = desc_cycle_only_mode &&
+        ((desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) != 8'd0);
+    wire microblock_accept = desc_valid && desc_ready && !stream_desc_mode;
     wire microblock_complete = done_valid_q && done_ready;
+    wire mb_desc_ready;
+    wire mb_done_valid;
+    wire mb_busy;
+    wire [3:0] mb_active_op_class;
+    wire [15:0] mb_active_layer_id;
+    wire [15:0] mb_active_microblock_id;
+    wire [7:0] mb_active_stream_slot;
+    wire [7:0] mb_active_stream_meta_flags;
+    wire [3:0] mb_active_phase_id;
+    wire [31:0] mb_active_remaining_cycles;
+    wire [31:0] mb_microblock_load_count;
+    wire [31:0] mb_microblock_compute_count;
+    wire [31:0] mb_microblock_store_count;
+    wire [31:0] mb_microblock_final_count;
     /* verilator lint_off UNUSEDSIGNAL */
     wire [155:0] final_debug_unused = {
         l1mesh_rdata,
@@ -607,20 +1124,31 @@ module mdla7_top #(
     wire tnps_start = start_pending && run_tnps;
     wire l1mesh_crc_start = start_pending && run_l1crc && !l1mesh_crc_busy;
 
-    assign desc_ready = (state == ST_IDLE);
-    assign done_valid = done_valid_q;
-    assign busy = (state != ST_IDLE);
-    assign active_op_class = microblock_active_valid ? microblock_active_op_class : op_class_q;
-    assign active_layer_id = microblock_active_valid ? microblock_active_layer_id : layer_id_q;
-    assign active_microblock_id = microblock_active_valid ? microblock_active_microblock_id : microblock_id_q;
-    assign active_stream_slot = microblock_active_valid ? microblock_active_stream_slot : stream_slot_q;
-    assign active_stream_meta_flags = microblock_active_valid ? microblock_active_stream_meta_flags : stream_meta_flags_q;
-    assign active_phase_id = selected_busy ? selected_phase :
+    assign desc_ready = stream_desc_mode ? mb_desc_ready : (state == ST_IDLE);
+    assign done_valid = mb_busy ? mb_done_valid : done_valid_q;
+    assign busy = (state != ST_IDLE) || mb_busy;
+    assign active_op_class = mb_busy ? mb_active_op_class :
+                             microblock_active_valid ? microblock_active_op_class : op_class_q;
+    assign active_layer_id = mb_busy ? mb_active_layer_id :
+                             microblock_active_valid ? microblock_active_layer_id : layer_id_q;
+    assign active_microblock_id = mb_busy ? mb_active_microblock_id :
+                                  microblock_active_valid ? microblock_active_microblock_id : microblock_id_q;
+    assign active_stream_slot = mb_busy ? mb_active_stream_slot :
+                                microblock_active_valid ? microblock_active_stream_slot : stream_slot_q;
+    assign active_stream_meta_flags = mb_busy ? mb_active_stream_meta_flags :
+                                      microblock_active_valid ? microblock_active_stream_meta_flags : stream_meta_flags_q;
+    assign active_phase_id = mb_busy ? mb_active_phase_id :
+                             selected_busy ? selected_phase :
                              l1mgr_busy ? l1mgr_phase_id :
                              l1mesh_busy ? l1mesh_phase_id : 4'd0;
-    assign active_remaining_cycles = selected_busy ? selected_remaining :
+    assign active_remaining_cycles = mb_busy ? mb_active_remaining_cycles :
+                                     selected_busy ? selected_remaining :
                                      l1mgr_busy ? l1mgr_remaining_cycles :
                                      l1mesh_busy ? l1mesh_remaining_cycles : 32'd0;
+    assign microblock_load_count = mb_microblock_load_count + legacy_microblock_load_count;
+    assign microblock_compute_count = mb_microblock_compute_count + legacy_microblock_compute_count;
+    assign microblock_store_count = mb_microblock_store_count + legacy_microblock_store_count;
+    assign microblock_final_count = mb_microblock_final_count + legacy_microblock_final_count;
     assign l1mgr_resp_ready = l1mesh_req_ready;
     assign conv_l1_req_ready = legacy_req_ready;
     assign block_busy = {l1mesh_busy, l1mgr_busy, udma_busy, tnps_busy, pool_busy, ewe_busy, requant_busy, conv_busy, 1'b0};
@@ -654,10 +1182,41 @@ module mdla7_top #(
         .active_microblock_id(microblock_active_microblock_id),
         .active_stream_slot(microblock_active_stream_slot),
         .active_stream_meta_flags(microblock_active_stream_meta_flags),
-        .load_count(microblock_load_count),
-        .compute_count(microblock_compute_count),
-        .store_count(microblock_store_count),
-        .final_count(microblock_final_count)
+        .load_count(legacy_microblock_load_count),
+        .compute_count(legacy_microblock_compute_count),
+        .store_count(legacy_microblock_store_count),
+        .final_count(legacy_microblock_final_count)
+    );
+
+    vf_mb_stream_scheduler u_mb_stream_scheduler (
+        .clk(clk),
+        .rst_n(rst_n),
+        .desc_valid(desc_valid && stream_desc_mode),
+        .desc_ready(mb_desc_ready),
+        .desc_op_class(desc_op_class),
+        .desc_layer_id(desc_layer_id),
+        .desc_microblock_id(desc_microblock_id),
+        .desc_stream_slot(desc_stream_slot),
+        .desc_stream_meta_flags(desc_stream_meta_flags),
+        .bytes(bytes),
+        .conv_workload_bytes(conv_workload_bytes),
+        .conv_workload_outputs(conv_workload_outputs),
+        .pool_workload_bytes(pool_workload_bytes),
+        .tnps_bytes(bytes),
+        .done_valid(mb_done_valid),
+        .done_ready(done_ready),
+        .busy(mb_busy),
+        .active_op_class(mb_active_op_class),
+        .active_layer_id(mb_active_layer_id),
+        .active_microblock_id(mb_active_microblock_id),
+        .active_stream_slot(mb_active_stream_slot),
+        .active_stream_meta_flags(mb_active_stream_meta_flags),
+        .active_phase_id(mb_active_phase_id),
+        .active_remaining_cycles(mb_active_remaining_cycles),
+        .load_count(mb_microblock_load_count),
+        .compute_count(mb_microblock_compute_count),
+        .store_count(mb_microblock_store_count),
+        .final_count(mb_microblock_final_count)
     );
 
     vf_conv_sample_engine u_conv (
@@ -1236,7 +1795,7 @@ module mdla7_top #(
             case (state)
                 ST_IDLE: begin
                     done_valid_q <= 1'b0;
-                    if (desc_valid && desc_ready) begin
+                    if (desc_valid && desc_ready && !stream_desc_mode) begin
                         op_class_q <= desc_op_class;
                         layer_id_q <= desc_layer_id;
                         microblock_id_q <= desc_microblock_id;
