@@ -683,7 +683,8 @@ int sc_main(int argc, char* argv[]) {
                                  /*dir*/ 0, signal_tag, wait_a, wait_b);
         const uint64_t off = uint64_t(dram_addr - L.dram_wgt);
         const uint32_t b_payload = (L.wgt_size >= 48) ? (L.wgt_size - 48) : L.wgt_size;
-        if (dram_addr >= L.dram_wgt && off + raw_bytes <= b_payload) {
+        if (engine_model != EngineModel::Fast &&
+            dram_addr >= L.dram_wgt && off + raw_bytes <= b_payload) {
             const uint8_t* p = file.data() + L.wgt_off + off;
             auto c = comp_for_file_blob(p, raw_bytes, L.dtype);
             if (c.metadata || c.compressed < raw_bytes) {

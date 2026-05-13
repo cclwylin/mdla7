@@ -2005,11 +2005,13 @@ def _normalise_l1(l1_timing: str) -> str:
 def _mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
     l1_timing = _normalise_l1(l1_timing)
     engine_model = _normalise_engine(engine_model)
-    if l1_timing == "cx" and engine_model == "cx":
-        return "cx"
+    if l1_timing == "fast" and engine_model == "fast":
+        return ""
+    if l1_timing == engine_model:
+        return l1_timing
     suffixes: list[str] = []
     if l1_timing != "fast":
-        suffixes.append(f"L1-{l1_timing}")
+        suffixes.append("cx-l1" if l1_timing == "cx" else f"L1-{l1_timing}")
     if engine_model != "fast":
         suffixes.append(engine_model)
     return ".".join(suffixes)
@@ -2017,6 +2019,18 @@ def _mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
 
 def _profile_mode_suffix(l1_timing: str = "fast", engine_model: str = "fast") -> str:
     return _mode_suffix(l1_timing, engine_model)
+
+
+def _mode_display(l1_timing: str = "fast", engine_model: str = "fast") -> str:
+    l1_timing = _normalise_l1(l1_timing)
+    engine_model = _normalise_engine(engine_model)
+    if l1_timing == engine_model:
+        return l1_timing
+    if l1_timing == "fast":
+        return engine_model
+    if engine_model == "fast":
+        return f"{l1_timing}-l1"
+    return f"{l1_timing}/{engine_model}"
 
 
 def _arg_was_set(*names: str) -> bool:
@@ -2237,10 +2251,7 @@ def run_one(pattern: str, model_dir: Path, progress=None,
 
     # ---- simulate: fast report path ----
     if progress:
-        if l1_timing == "fast" and engine_model == "fast":
-            progress("simulate fast")
-        else:
-            progress(f"simulate L1-{l1_timing}/{engine_model}")
+        progress(f"simulate {_mode_display(l1_timing, engine_model)}")
     ms, status, fast_stdout = _simulate_one(bin_path, l1_timing, engine_model=engine_model)
 
     fast_html = OUT_DIR / f"{canonical}.fast.html" if not suffix else paths["html"]
@@ -3352,7 +3363,7 @@ def run_corpus(*,
         rel_model_dir = model_dir
     model_label = ""
     if args.l1_timing != "fast" or args.engine_model != "fast":
-        model_label = f", L1={args.l1_timing}, engine={args.engine_model}"
+        model_label = f", mode={_mode_display(args.l1_timing, args.engine_model)}"
     print(f"==== MDLA7 {corpus_name} regression: {len(patterns)} models "
           f"(from {rel_model_dir}{model_label}) ====", flush=True)
 

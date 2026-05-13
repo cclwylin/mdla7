@@ -312,8 +312,7 @@ sim time: 3443920 cycles @ 1.9 GHz (= 1.813 ms)
 > 下一章 → [第 1 章 — Source tree 與 build / run 基礎](01_build_and_run.md)
 
 
-
-ewpage
+\newpage
 
 # 第 1 章 — Source tree 與 build / run 基礎
 
@@ -860,8 +859,7 @@ head -5 batch/output/inception_v3_quant.profile.csv
 > 下一章 → [第 2 章 — HW Spec Top Architecture](02_hw_spec.md)
 
 
-
-ewpage
+\newpage
 
 # 第 2 章 — HW Spec Top Architecture
 
@@ -1400,8 +1398,7 @@ sim time: 4,394,946 cycles @ 1.9 GHz
 > 下一章 → [第 3 章 — Descriptor ISA 與 Dependency Tag](03_descriptor_tag.md)
 
 
-
-ewpage
+\newpage
 
 # 第 3 章 — Descriptor ISA 與 Dependency Tag
 
@@ -2474,8 +2471,7 @@ Descriptor 是 MDLA7 最核心的控制介面。它把 compiler、scheduler、Sy
 > 下一章 → [第 4 章 — Memory Hierarchy：DRAM、UDMA、L1Mesh](04_memory_hierarchy.md)
 
 
-
-ewpage
+\newpage
 
 # 第 4 章 — Memory Hierarchy：DRAM、UDMA、L1Mesh
 
@@ -4096,8 +4092,7 @@ tiling 決定 L1 是否裝得下與能否 overlap
 > 下一章 → [第 5 章 — Compute Engines Overview](05_compute_engines.md)
 
 
-
-ewpage
+\newpage
 
 # 第 5 章 — Compute Engines Overview
 
@@ -5452,8 +5447,7 @@ UDMA       data movement and layout transform
 > 下一章 → [第 6 章 — TFLite Flatbuffer 與 Op Extraction](06_tflite_flatbuffer.md)
 
 
-
-ewpage
+\newpage
 
 # 第 6 章 — TFLite Flatbuffer 與 Op Extraction
 
@@ -6001,8 +5995,7 @@ FlatBuffer model
 > 下一章 → [第 7 章 — Quantization / FP / INT16 Compile Path](07_quantization_fp_int16.md)
 
 
-
-ewpage
+\newpage
 
 # 第 7 章 — Quantization / FP / INT16 Compile Path
 
@@ -6394,8 +6387,7 @@ Debug quant mismatch 時，請先確認：
 > 下一章 → [第 8 章 — program.bin 格式與 Reference Generation](08_program_bin_reference.md)
 
 
-
-ewpage
+\newpage
 
 # 第 8 章 — program.bin 格式與 Reference Generation
 
@@ -6762,8 +6754,7 @@ Data section carries inputs, weights, references
 > 下一章 → [第 9 章 — Mdla7System Top Wiring](09_system_top_wiring.md)
 
 
-
-ewpage
+\newpage
 
 # 第 9 章 — Mdla7System Top Wiring
 
@@ -7036,8 +7027,7 @@ engines -> L1Manager -> L1Mesh / DRAM
 > 下一章 → [第 10 章 — Host 與 Command Engine Module Design](10_host_command_engine.md)
 
 
-
-ewpage
+\newpage
 
 # 第 10 章 — Host 與 Command Engine Module Design
 
@@ -7372,8 +7362,7 @@ Command Engine 不知道 tensor math，但它決定 tensor math 何時能安全�
 > 下一章 → [第 11 章 — CONV / Requant Data Path](11_conv_requant_datapath.md)
 
 
-
-ewpage
+\newpage
 
 # 第 11 章 — CONV / Requant Data Path
 
@@ -7777,8 +7766,7 @@ Functional mismatch 時，先確認：
 > 下一章 → [第 12 章 — UDMA、DRAM Model、L1Manager Module Design](12_udma_dram_l1manager.md)
 
 
-
-ewpage
+\newpage
 
 # 第 12 章 — UDMA、DRAM Model、L1Manager Module Design
 
@@ -8116,8 +8104,7 @@ Debug memory 問題時，把它拆成：
 > 下一章 → [第 13 章 — EWE / POOL / SOFTMAX / D2SPACE](13_ewe_pool_softmax_d2space.md)
 
 
-
-ewpage
+\newpage
 
 # 第 13 章 — EWE / POOL / SOFTMAX / D2SPACE
 
@@ -8423,8 +8410,7 @@ Debug 時先判斷 op 是 compute 還是 layout，再追 input producer、params
 > 下一章 → [第 14 章 — Tiling、Fusion、Pending Store、L1-Resident Handoff](14_tiling_fusion_handoff.md)
 
 
-
-ewpage
+\newpage
 
 # 第 14 章 — Tiling、Fusion、Pending Store、L1-Resident Handoff
 
@@ -8746,8 +8732,7 @@ Debug 時要同時看：
 > 下一章 → [第 15 章 — TileCommand / Microblock Wavefront Scheduler](15_tilecommand_microblock.md)
 
 
-
-ewpage
+\newpage
 
 # 第 15 章 — TileCommand / Microblock Wavefront Scheduler
 
@@ -9332,8 +9317,7 @@ TileCommand -> Microblocks -> stream descriptors -> Command Engine scheduling
 > 下一章 → [第 16 章 — Cycle Model 與 Cycle Accuracy](16_cycle_accuracy.md)
 
 
-
-ewpage
+\newpage
 
 # 第 16 章 — Cycle Model 與 Cycle Accuracy
 
@@ -9652,8 +9636,7 @@ Cycle debug 不要只看一個數字。要從 model summary 下鑽到 layer，�
 > 下一章 → [第 17 章 — Functional Verification 與 SystemC Function Coverage](17_verification_coverage.md)
 
 
-
-ewpage
+\newpage
 
 # 第 17 章 — Functional Verification 與 SystemC Function Coverage
 
@@ -9894,8 +9877,7 @@ regression status trend
 > 下一章 → [第 18 章 — Regression Scripts 與 Profile HTML](18_regression_profile_html.md)
 
 
-
-ewpage
+\newpage
 
 # 第 18 章 — Regression Scripts 與 Profile HTML
 
@@ -10081,7 +10063,7 @@ model 的 `.mesh.html` 時，`max service` 代表單一 scheduling chunk 的服�
 
 `profile_bmm.html` / `profile_bmm.cx.html` 是 BMM corpus index。CX 版本的
 標題固定為 `MDLA7 BMM Profiles (CX)`，檔名統一用 `.cx.html`，不要再產生
-`L1-cx.cx` 這類雙重 mode 名稱。
+舊式雙重 mode 名稱。
 
 ---
 
@@ -10333,8 +10315,7 @@ status -> first failing layer -> profile timeline -> source root cause
 > 下一章 → [第 19 章 — Debug Playbook：從 N-FAIL 到 Root Cause](19_debug_playbook.md)
 
 
-
-ewpage
+\newpage
 
 # 第 19 章 — Debug Playbook：從 N-FAIL 到 Root Cause
 
@@ -10551,8 +10532,7 @@ classify -> first fail -> writer -> input/params/dependency -> source fix -> reg
 > 下一章 → [第 20 章 — Junior Exercises 與 Roadmap](20_junior_exercises_roadmap.md)
 
 
-
-ewpage
+\newpage
 
 # 第 20 章 — Junior Exercises 與 Roadmap
 
@@ -10810,8 +10790,7 @@ TFLite graph
 > 下一章 → [第 21 章 — Performance Bug：如何看 Profile 與 Fix DRAM Write](21_performance_bug_playbook.md)
 
 
-
-ewpage
+\newpage
 
 # 第 21 章 — Performance Bug：如何看 Profile 與 Fix DRAM Write
 
@@ -11505,8 +11484,7 @@ ACT compression 省 DRAM activation read bandwidth。
 > 下一步：把本章流程用在 `pynet_v2_*`、`sam_float`、`sd_*`，逐一分類剩下的 `reshape / softmax / gelu / h_swish` 中間 write。
 
 
-
-ewpage
+\newpage
 
 # 第 22 章 — RTL Bring-up：verilog
 
@@ -11646,5 +11624,4 @@ Do not add new RTL under `rtl/synth`, and do not recreate `verilog_ctrl` or
 `run_verilog.py` and `run_verilog_smoke.py`.
 
 
-
-ewpage
+\newpage

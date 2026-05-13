@@ -298,6 +298,7 @@ FORCED_MATERIALIZED_NATIVE = {
     ("dped_float", 1): "fp space-to-depth mismatch in fast/cx",
     ("efficientnet_b4_float", 473): "fp avgpool mismatch in fast/cx",
     ("efficientnet_b4_float", 474): "fp fc mismatch in fast/cx",
+    ("yolo_v8_quant", 207): "int conv branch input mismatch in fast",
 }
 
 
