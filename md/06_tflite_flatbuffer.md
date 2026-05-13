@@ -128,20 +128,25 @@ SUPPORTED_OPS = (
 在 `main()` 裡：
 
 ```python
-ops = []
+all_ops = []
+unsupported_ops = []
 for i in range(sg.OperatorsLength()):
     op = sg.Operators(i)
     name = _opcode_name(fb, model, op)
-    if name not in SUPPORTED_OPS:
-        continue
-    ops.append((i, name, op))
+    if name in SUPPORTED_OPS:
+        all_ops.append((i, name, op))
+    else:
+        unsupported_ops.append((i, name, op))
 ```
 
-這代表 unsupported op 會被 compiler 略過。這不是一般 compiler 的最終行為，但對這個 simulator 有明確目的：
+unsupported op 不能再安靜消失。compiler 會把 unsupported rows 印進 compile
+log，regression wrapper 會把 `compile-skipped:N` 視為 failure。若要讓 corpus
+clean，該 op 必須補成 native lowering，或補成明確的 `matrlz`
+supported-but-not-native fallback。
 
 ```text
-讓已支援的 op 可以繼續被 regression，
-同時清楚紀錄哪些 op 還不在 SystemC model 範圍內。
+unsupported=0 代表沒有原始 TFLite op 被跳過。
+matrlz>0 代表有 supported-but-not-native coverage boundary。
 ```
 
 ---
@@ -482,7 +487,7 @@ skipped (shape exceeds descriptor's ushort dim limit)
 
 junior debug compile-fail 時，先找第一個 skipped / SystemExit，而不是先看 C++。
 
-現在 Hotspot path 也有 `matrlz` fallback：
+Hotspot、BMM、ETHZ path 都可能有 `matrlz` fallback：
 
 ```text
 layer  4  matrlz  in=1x1x77  k=1x1  s=1x1  g=1  out=1x1x77  (77 INT8)  ready
@@ -493,8 +498,9 @@ reference tensor 預先 materialize，simulator 再用分塊 UDMA
 `DRAM -> L1 -> DRAM` copy 來保留 profile/verification coverage。常見來源：
 
 - non-spatial `MEAN` axes。
+- `BATCH_MATMUL` / attention score fallback。
 - runtime-matmul `FULLY_CONNECTED`。
-- INT `GELU` / `HARD_SWISH` fallback。
+- INT `GELU` / `HARD_SWISH` / `LOGISTIC` fallback。
 - attention reshape shape-prop mismatch。
 - descriptor `uint16_t` dim overflow。
 
@@ -505,12 +511,13 @@ reference tensor 預先 materialize，simulator 再用分塊 UDMA
 | 誤解 | 正確理解 |
 |---|---|
 | TFLite Interpreter 是 compiler 唯一入口 | MDLA7 compiler 主要用 FlatBuffer 讀 graph metadata |
-| unsupported op 會變成 no-op descriptor | 目前多數 unsupported op 直接不進 compiled layer list |
+| unsupported op 會變成 no-op descriptor | unsupported row 會出現在 compile log；ETHZ/BMM regression 會 fail |
+| `matrlz` 等於 native engine | `matrlz` 是 supported-but-not-native correctness boundary |
 | HWC 一定等於原始 TFLite rank | HWC 是 simulator canonical form，高 rank 會簡化 |
 | SAME padding 是固定 pad 1 | padding 依 input/output/kernel/stride 計算 |
 | stride 任意值都支援 | descriptor 目前只支援 1/2/4/8 |
 | chain mode 等於真實 TFLite full inference | 它是 self-consistent reference chain，不是完整 runtime fidelity |
-| skip op 後還能安全沿用前一層 output | skip 會 break chain，避免 downstream 假資料 |
+| skip op 後還能安全沿用前一層 output | skip 會 break chain；clean corpus 不應有 skipped original op |
 
 ---
 

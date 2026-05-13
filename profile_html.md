@@ -12,6 +12,8 @@ There are two HTML report shapes:
 | `batch/profile_hotspot.html` | `batch/gen_model_profile.py` via `batch/run_hotspot.py` | Hotspot-slice index without CX columns; sorted for L1 timing debug. |
 | `batch/profile_ethz_v5.html` | `batch/gen_model_profile.py` via `batch/run_ethz_v5.py` | ETHZ_v5 corpus index without CX columns. |
 | `batch/profile_ethz_v6.html` | `batch/gen_model_profile.py` via `batch/run_ethz_v6.py` | ETHZ_v6 corpus index without CX columns. |
+| `batch/profile_bmm.html` | `batch/gen_model_profile.py` via `batch/run_systemc.py --filter bmm` | BMM corpus fast index. |
+| `batch/profile_bmm.cx.html` | `batch/gen_model_profile.py` via `batch/run_systemc.py --filter bmm --cx` | BMM corpus CX-mode index; title is `MDLA7 BMM Profiles (CX)`. |
 | `batch/profile_mlperf.html` | `batch/gen_model_profile.py` via `batch/run_mlperf.py` | MLPerf Tiny corpus index without CX columns. |
 
 All HTML files are self-contained snapshots with inline CSS/JS. They can be
@@ -279,6 +281,11 @@ Header:
 Compile log (<ready layer count> layers, <skipped layer count> skipped)
 ```
 
+For ETHZ/BMM regressions, skipped compile rows are failures. A clean PASS/ok
+requires the original TFLite graph to be covered by supported layers; unsupported
+ops must either lower natively or appear as explicit `matrlz`
+supported-but-not-native fallback rows.
+
 Columns:
 
 | Column | Meaning |
@@ -295,11 +302,12 @@ Columns:
 | `status` | `ready` or skipped reason. |
 
 `matrlz` is a ready layer. It means `compile_model.py` pre-materialized the
-reference tensor and `test_model.cpp` modeled a chunked `DRAM -> L1 -> DRAM`
-UDMA copy. It is used for coverage fallbacks such as non-spatial MEAN axes,
-runtime-matmul FC, INT GELU/HARD_SWISH, reshape shape-prop mismatches, and
+reference tensor and the runner models an explicit movement/check boundary.
+It is used for coverage fallbacks such as BATCH_MATMUL, non-spatial MEAN axes,
+runtime-matmul FC, INT GELU/HARD_SWISH/LOGISTIC, layout/reshape mismatches, and
 descriptor-dim overflow tensors. Treat it as "graph node covered by
-materialized movement", not as a real arithmetic engine implementation.
+materialized movement", not as a real arithmetic engine implementation. Native
+only audits should use `systemc/scripts/audit_unsupported_ops.py --strict-native`.
 
 ### Table Sorting And Filtering
 

@@ -116,6 +116,9 @@ By default, `verilog_cycles` counts only cycles spent by the generated
 load/compute/store/reload/check descriptors. It does not pad the run to match a
 synth profile. `--closed-loop-perf-target` is available only as an explicit
 calibration/debug mode.
+Probe descriptors are counted too. BMM full final coverage uses final/check
+probe descriptors, so excluding probes makes a real run falsely report
+`verilog_cycles=0`.
 TNPS closed-loop probes use the largest contiguous payload prefix that fits in
 one 16-byte L1 beat; the TNPS datapath compacts unaligned L1 read responses
 before writing the result back to L1.
@@ -125,6 +128,16 @@ carry bit13 plus stream metadata flags.
 POOL closed-loop probes use per-byte UDMA scatter loads when the real pooling
 window is not contiguous in DRAM, then present the sampled bytes as a contiguous
 L1 vector to the POOL datapath.
+
+BMM regression is wired through the same closed-loop path:
+
+```sh
+./batch/run_verilog.py --filter bmm --rerun-all --timeout 180
+```
+
+For BMM, sampled or partial final coverage is a failure. The runner requires
+full final output coverage and materialized-boundary SRAM/L1 CRC checks before
+reporting PASS.
 
 To spend more commands on oversized INT8 CONV output SRAM windows:
 

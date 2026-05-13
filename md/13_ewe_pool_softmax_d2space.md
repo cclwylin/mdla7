@@ -236,6 +236,7 @@ CONV -> DEPTH_TO_SPACE -> ADD
 | RESHAPE | byte passthrough or DRAM copy |
 | CONCAT | materialized concat / TNPS concat / barrier |
 | GATHER | numpy materialized reference + UDMA copy |
+| BATCH_MATMUL | `matrlz` fallback for BMM/SAM attention until native datapath exists |
 | MATRLZ | compiler pre-materialized reference + chunked `DRAM -> L1 -> DRAM` UDMA copy |
 | TRANSPOSE / PACK / UNPACK / SPLIT | TNPS/materialized layout；若 GraphMeta 確認是 intermediate handoff，可 suppress DRAM checkpoint |
 
@@ -246,9 +247,11 @@ CONV -> DEPTH_TO_SPACE -> ADD
 有些 op 是 compiler materialize + UDMA passthrough。
 ```
 
-`matrlz` 是目前用來取代 Hotspot skipped rows 的明確 fallback。它保留
+`matrlz` 是目前用來取代 skipped rows 的明確 fallback。它保留
 graph node、timing movement、PASS/FAIL verification，但不表示 EWE/POOL/CONV
 已經支援該 arithmetic。後續如果補上真 lowering，應該讓 `matrlz` 數量下降。
+對 ETHZ/BMM 來說，`matrlz` 可以讓 unsupported audit 清零；但
+`--strict-native` audit 仍會把這些 supported-but-not-native rows 視為未完成。
 
 ---
 

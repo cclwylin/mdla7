@@ -140,6 +140,21 @@ simulation completed，但有 N 個 layer mismatch。
 
 這比 compile-fail 好，因為你有 profile、logs、fail layer 可以 debug。
 
+ETHZ/BMM 目前還有一條更硬的規則：
+
+```text
+compile-skipped:N 不能算 clean PASS。
+```
+
+如果原始 TFLite op 沒有被 compiler 支援，它必須變成明確的 lowered layer，
+或明確的 `matrlz` supported-but-not-native fallback。`matrlz` 會保留 layer /
+final reference check，但不能被解讀成 native arithmetic datapath 已完成。
+native-only coverage 要用：
+
+```bash
+systemc/scripts/audit_unsupported_ops.py --strict-native model/BMM model/ETHZ_v6
+```
+
 ---
 
 ## 17.7 SystemC function coverage
@@ -170,6 +185,7 @@ simulation completed，但有 N 個 layer mismatch。
 | INT16x8 | unet_int16 | unet_int16 | covered |
 | FP CONV | mobilenet_v3_float | fp models | covered |
 | FP SOFTMAX | inception_v3_float | inception | covered |
+| BATCH_MATMUL fallback | BMM synthetic / SAM slice | model/BMM | materialized |
 | CONCAT | inception_v3_quant | inception | covered |
 | GATHER | llama2_quant | transformer | covered |
 | D2S | vsr / xlsr | VSR-like | covered |

@@ -180,6 +180,10 @@ chunk，以及 Payload R/W lane latency table。看單一
 model 的 `.mesh.html` 時，`max service` 代表單一 scheduling chunk 的服務時間；
 `max latency` 則包含 queue wait。
 
+`profile_bmm.html` / `profile_bmm.cx.html` 是 BMM corpus index。CX 版本的
+標題固定為 `MDLA7 BMM Profiles (CX)`，檔名統一用 `.cx.html`，不要再產生
+`L1-cx.cx` 這類雙重 mode 名稱。
+
 ---
 
 ## 18.8 run_mdla6_pattern.py
@@ -260,6 +264,15 @@ matrlz fallback rows: 73
 MEAN、runtime FC、INT GELU、shape-prop mismatch reshape、descriptor dim
 overflow。它是可驗證/可 profile 的 coverage layer，不是 dedicated arithmetic
 engine。
+
+ETHZ/BMM regression 對 skipped compile row 的規則更嚴格：`compile-skipped:N`
+不是 warning，而是 regression failure。`unsupported=0` 只代表沒有原始 TFLite
+op 被跳過；若 audit 顯示 `matrlz`，那是 supported-but-not-native coverage，
+需要 native-only signoff 時要跑：
+
+```bash
+systemc/scripts/audit_unsupported_ops.py --strict-native model/BMM model/ETHZ_v6
+```
 
 ---
 
