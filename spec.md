@@ -257,9 +257,24 @@ Role:
   `4 * 16 * 4 * 768 * 16B`.
 - Total SRAM Macro count is 256:
   `4 Storage Mesh4x4 * 16 Quad SRAM * 4 SRAM Macro`.
-- Verilog now instantiates explicit edge Mesh4x4 router/link skeletons with
-  N/S/W/E/local route outputs for the 8 edge fabrics. Storage data is still
-  held as 128-bit beats inside four storage blocks.
+- L1Mesh ingress has a two-entry request FIFO. `req_ready` deasserts when the
+  second entry is occupied, and queued requests feed the phase sequencer from
+  the oldest entry.
+- Phase dispatch is gated by selected edge-fabric availability and the selected
+  SRAM macro port. RTL tracks 256 SRAM macro busy counters matching
+  `4 Storage Mesh4x4 * 16 Quad SRAM * 4 SRAM Macro`.
+- Edge injection is lane-level in RTL for the target groups:
+  CONV ACT `32R`, CONV WGT `32R`, L1Manager `16R + 16W`, and Requant `8W`.
+  A request selects an available lane in its source group; if all lanes are
+  busy, injection backpressures the queued request.
+- Edge Mesh4x4 fabrics use flit-level `valid/ready`. Each router node has
+  4-deep input FIFOs for N/S/W/E/local directions, and downstream FIFO fullness
+  stalls upstream flit movement.
+- Storage data is held in the same 256 SRAM macro hierarchy, not in a compact
+  four-tile shadow store. Response return has a two-entry FIFO so external
+  `resp_ready` backpressure does not directly collapse the internal phase pipe.
+- Verilog instantiates explicit edge Mesh4x4 router/link fabrics with
+  N/S/W/E/local route outputs for the 8 edge fabrics.
 
 Parameters:
 
@@ -303,26 +318,19 @@ Debug CRC:
 - `debug_crc_start` scans `debug_crc_count` bytes from `debug_crc_addr`.
 - The scanner consumes up to 16 bytes per cycle and computes FNV-1a style CRC.
 
-## `l1mesh.v` / `mdla7_l1mesh4x4_tile`
-
-Role:
-
-- Per-tile SRAM storage primitive used by `l1mesh`.
-- Writes selected byte lanes on `start_fire`.
-- Reads a full 128-bit word on `start_fire`.
-
 ## `l1mesh.v` / `mdla7_mesh4x4_edge_fabric`
 
 Role:
 
 - Verilog edge Mesh4x4 structure for L1 route tokens.
 - Instantiates 16 `mdla7_mesh4x4_router_node` nodes.
-- Each node exposes N/S/W/E/local route outputs.
+- Each node exposes N/S/W/E/local route outputs and has 4-deep input FIFO
+  accounting for all five directions.
 - Connects adjacent nodes through explicit horizontal E/W link buses and
   vertical S/N link buses.
+- Uses flit `valid/ready`; full downstream input FIFO backpressures upstream
+  route movement.
 - Uses XY routing toward the selected Quad SRAM node.
-- Current storage read/write data path remains attached to the compact storage
-  blocks; this fabric makes the edge route structure explicit for RTL growth.
 
 ## `route.v` / `vf_l1mesh_route_estimator`
 
@@ -685,6 +693,7 @@ Interface:
 | `Testbench_tnps_datapath.v` | TNPS address mapping checks |
 | `Testbench_route_timing.v` | Route estimator checks |
 | `Testbench_l1mesh_contention.v` | L1Manager queue/backpressure contention |
+| `Testbench_l1mesh_storage.v` | L1Mesh SRAM macro hierarchy storage/readback and response backpressure |
 | `Testbench_top_byte_movers.v` | Top-level dummy DRAM integration smoke |
 | `Testbench_host_program.v` | Host program, DRAM model, closed-loop system test |
 
