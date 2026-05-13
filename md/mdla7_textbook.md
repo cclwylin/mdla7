@@ -11446,3 +11446,327 @@ ACT compression 省 DRAM activation read bandwidth。
 
 
 \newpage
+
+# 第 22 章 — RTL Bring-up：verilog_ctrl 與 verilog_final
+
+本章你會學到什麼：
+
+- 為什麼 MDLA7 repo 除了 SystemC，還需要 Verilator / Verilog path。
+- `verilog_ctrl` 和 `verilog_final` 的分工。
+- `.bin` 如何被 host-driven Verilog testbench 讀進來。
+- 目前哪些 datapath 已經有 true Verilog sample path。
+- RTL regression 的 PASS、SKIP、TIMEOUT 要怎麼解讀。
+
+---
+
+## 22.1 為什麼要有 RTL path
+
+SystemC 是架構探索和 regression 的主力。它適合快速測 compiler lowering、descriptor scheduling、L1 handoff、microblock、DRAM traffic，以及 cycle model 的大方向。
+
+但 SystemC 不是 RTL signoff。當我們開始問「真正硬體 control path 會不會卡住」、「FIFO full 是否真的回壓 engine」、「sample MAC / pool / EWE lane 在 Verilog 裡算出來是否和 expected 一致」時，就需要 Verilator path。
+
+目前 repo 把 Verilog 分成兩條路：
+
+| path | 目標 | 主要目錄 |
+|---|---|---|
+| `verilog_ctrl` | control / timing shell，datapath correctness 仍用 DPI-C CRC | [`rtl/synth`](../rtl/synth) |
+| `verilog_final` | full Verilog datapath bring-up，逐步替換 DPI-C | [`rtl/verilog_final`](../rtl/verilog_final) |
+
+這兩條路不是互相取代。`verilog_ctrl` 先保證完整 model 可以用 RTL-style control path 跑起來；`verilog_final` 則逐步把真正 arithmetic datapath 接進 top。
+
+---
+
+## 22.2 verilog_ctrl：先驗 control path
+
+`verilog_ctrl` 的檔案在 [`rtl/synth`](../rtl/synth)：
+
+| 檔案 | 角色 |
+|---|---|
+| `Testbench.v` | top testbench，instance host / mdla7_top / dram |
+| `host.v` | 讀 `+PROGRAM=<.bin>`，展開 layer / microblock descriptor |
+| `mdla7_top.v` | instance command、engines、L1Manager、L1Mesh |
+| `conv.v`、`ewe.v`、`pool.v` 等 | timing shell + phase / handshake 模型 |
+| `mdla7_dpi.cpp` | 呼叫 fast-model datapath CRC，做 golden compare |
+| `filelist_system_tb.f` | Verilator filelist |
+
+典型命令：
+
+```bash
+./rtl/batch/run_verilog_ctrl.py --filter hotspot
+./rtl/batch/run_verilog_ctrl.py --filter ethz --rerun-all
+./rtl/batch/run_verilog_ctrl.py --filter mobilebert_quant.bin --build --rerun-all
+```
+
+`verilog_ctrl` 的 PASS 意思是：
+
+```text
+Verilog control/timing path completed
+and DPI-C datapath CRC matched expected reference
+```
+
+也就是說，這裡的 CONV / EWE / POOL arithmetic 還不是由 Verilog 真正算完整 tensor。Verilog 負責 host 讀 `.bin`、展開 microblock、descriptor handshake、engine phase、L1Manager FIFO / arbitration、L1Mesh timing、top busy / done 判斷；datapath correctness 由 DPI-C golden CRC 確認。
+
+---
+
+## 22.3 verilog_ctrl 的 L1Manager / L1Mesh 行為
+
+`verilog_ctrl` 已經不是完全空 shell。它有幾個重要 hardware behavior：
+
+- `udma/requant/ewe/pool/tnps` 會發 payload token 到 L1Manager。
+- L1Manager 每個 source 有 2-deep input FIFO。
+- FIFO full 會回壓 engine，engine phase 會 stall。
+- CONV direct connect L1Mesh，不經 L1Manager。
+- L1Mesh 是 `4 x Mesh4x4` 架構，address decode 到 tile / bank / node。
+
+這讓 `verilog_ctrl` 可以測 contention 和 backpressure。例如 engine microblock 正在跑時，如果 L1Manager input FIFO 滿了，engine 不應該繼續無限前進。它應該停在 payload phase，等 L1 path drain。這種行為是未來接近 silicon timing 的必要基礎。
+
+---
+
+## 22.4 verilog_ctrl 的 timing sidecar
+
+`run_verilog_ctrl.py` 在 compare mode 會讀 SystemC profile，產生 per-layer timing sidecar：
+
+```text
+rtl/obj_dir/timing/<program>.timing.hex
+```
+
+Verilog host 用 `$readmemh(timing_path, timing_cycles)` 把每層 timing 帶進 control/timing shell。這樣 `verilog_ctrl_ms` 可以和 `synth_ms` 有可比性。
+
+一個實際 debug 例子是 `mobilebert_quant`：
+
+```text
+mobilebert_quant.bin layer count = 0x734 = 1844
+```
+
+舊版 `host.v` 的 `MAX_LAYERS=1024`，所以 timing sidecar 讀到 line 1024 會爆：
+
+```text
+$readmem file address beyond bounds of array
+```
+
+修法是把 host capacity 放大到：
+
+```verilog
+MAX_PROGRAM_BYTES = 262144
+MAX_LAYERS = 4096
+```
+
+重建 `rtl/obj_dir/VTestbench` 後，bounds error 消失。若再用很短 timeout，會變成正常長跑 timeout；huge pattern 應該用 runner 的 auto-timeout，例如 3600 秒，而不是 120 秒。
+
+---
+
+## 22.5 verilog_final：逐步接上真 datapath
+
+`verilog_final` 的檔案在 [`rtl/verilog_final`](../rtl/verilog_final)。它的目標是：不要再靠 DPI-C CRC 當 datapath，而是讓 Verilog module 自己做可檢查的 sample datapath。
+
+目前它不是 full tensor RTL。它是一個 bring-up path：
+
+```text
+.bin
+  -> gen_verilog_final_program.py
+  -> 20-word final descriptor stream
+  -> host_final.v
+  -> mdla7_top_final.v
+  -> real Verilog sample datapath
+  -> expected sample compare
+```
+
+這種做法的好處是漸進式：先讓 host / top / L1 path 跑起來，每個 op 先接一個小 sample datapath，sample descriptor 從真實 `.bin` payload 抽 bytes，host 在 Verilog 裡比對 expected，再逐步把 sample path 擴成 tile streaming / full tensor。
+
+---
+
+## 22.6 final descriptor 格式
+
+`verilog_final` 用簡單的 20-word descriptor。產生器是：
+
+```bash
+./rtl/batch/gen_verilog_final_program.py rtl/bin/ETHZ_v6_slice/dped_int16_L3_6.bin \
+  -o rtl/obj/verilog_final/programs/dped_int16_L3_6.final.hex
+```
+
+常見欄位：
+
+| word | 意義 |
+|---:|---|
+| 0 | op class：`1=CONV`、`2=REQUANT`、`3=EWE`、`4=POOL`、`5=TNPS`、`6=UDMA`、`0=stop` |
+| 1 | payload bytes |
+| 2 | L1Mesh address |
+| 4..7 | CONV / POOL / EWE-A sample bytes |
+| 8..11 | CONV weight sample bytes 或 EWE-B sample bytes |
+| 12 | mode flags + element count |
+| 16..17 | FP expected double result bits |
+| 18 | INT expected sample result |
+| 19 | source layer index |
+
+mode flags：
+
+| op | word 12 flags |
+|---|---|
+| CONV | bit8 `fp_mode`，bit11 `int16_mode` |
+| POOL | bit8 `avg_mode`，bit9 `fp_mode`，bit11 `int16_mode` |
+| EWE | bits9:8 `op_mode`，bit10 `fp_mode`，bit11 `int16_mode` |
+
+這不是正式 ISA，只是 `verilog_final` bring-up descriptor。正式 SystemC descriptor 仍是第 3 章講的 64-byte descriptor。
+
+---
+
+## 22.7 目前已接上的 sample datapath
+
+目前 `verilog_final` coverage：
+
+| Block | 已有 sample datapath |
+|---|---|
+| CONV | INT8 MAC + bias + MBQM + clamp；FP16 real-valued sample MAC；INT16 signed sample MAC |
+| REQUANT | MBQM + zero-point + activation clamp |
+| POOL | INT8 max/avg；FP16 real-valued max/avg；INT16 signed max/avg |
+| EWE | INT8 ADD/MUL/SUB；FP16 ADD/MUL/SUB/LOGISTIC；INT16 ADD/MUL/SUB |
+| TNPS | SPACE_TO_DEPTH / DEPTH_TO_SPACE sample address mapping |
+| UDMA | byte-moving timing token path |
+| L1Manager / L1Mesh | multi-source contention、2-deep FIFO backpressure、route timing |
+
+幾個有代表性的 targeted run：
+
+```bash
+./rtl/batch/run_verilog_final.py --filter dped_int16_L3_6.bin --rerun-all
+./rtl/batch/run_verilog_final.py --filter microisp_int16_L5_20.bin --rerun-all
+```
+
+結果：
+
+```text
+dped_int16_L3_6        PASS cmds=4 conv=2 pool=0 requant=0 ewe=2 tnps=0 udma=0 done=4
+microisp_int16_L5_20   PASS cmds=9 conv=6 pool=1 requant=0 ewe=1 tnps=0 udma=1 done=9
+```
+
+這表示 `dped_int16_L3_6` 的 INT16 CONV / EWE sample descriptor 已被 generator 產出，且 Verilog sample path PASS；`microisp_int16_L5_20` 的 INT16 AVG_POOL 已接進 `mdla7_top_final`，且 host 比對 PASS。
+
+---
+
+## 22.8 怎麼跑 smoke test
+
+最基本：
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py
+```
+
+只跑某幾個：
+
+```bash
+./rtl/batch/run_verilog_final_smoke.py --test pool --test top --test host
+./rtl/batch/run_verilog_final_smoke.py --test ewe --test top --test host
+```
+
+常見 PASS：
+
+```text
+[verilog_final_smoke] PASS
+```
+
+smoke coverage 包含 standalone datapath test、route timing test、L1Manager / L1Mesh contention test、top integration test、host-driven descriptor program test。
+
+如果 standalone PASS 但 top FAIL，通常是 top port / mode flag / descriptor latch 問題。如果 top PASS 但 host FAIL，通常是 descriptor decode 或 expected compare 問題。
+
+---
+
+## 22.9 PASS、SKIP、FAIL 怎麼看
+
+`run_verilog_final.py` 表格會像：
+
+```text
+idx  program                ans   cmds  conv  pool requant  ewe  tnps  udma  done  wall_s
+------------------------------------------------------------------------------------------
+  1  microisp_int16_L5_20   PASS     9     6     1       0    1     0     1    0.29
+```
+
+欄位意思：
+
+| 欄位 | 意義 |
+|---|---|
+| `ans` | PASS / FAIL / SKIP |
+| `cmds` | final descriptor command count |
+| `conv/pool/requant/ewe/tnps/udma` | 各 op class command count |
+| `done` | host 觀察到 top done 的 command count |
+| `wall_s` | Verilator wall time，不是 simulated hardware ms |
+
+`SKIP reason: no final command` 不一定是壞事。它表示 generator 目前還不知道如何把這個 `.bin` 裡的 layers 轉成 final descriptor。下一步通常是看 op_kind / dtype 分布，補最高頻 SKIP，再補 generator、Verilog sample datapath、host compare 和 smoke。
+
+---
+
+## 22.10 verilog_ctrl vs verilog_final 的 debug 口訣
+
+先問你在 debug 哪一條路：
+
+| 問題 | 優先看 |
+|---|---|
+| 完整 ETHZ model control path fail | `verilog_ctrl` |
+| profile timing sidecar / timeout / layer count | `run_verilog_ctrl.py` + `rtl/synth/host.v` |
+| 某個 op 還是 SKIP | `gen_verilog_final_program.py` |
+| sample datapath 算錯 | `rtl/verilog_final/final_datapath.v` |
+| standalone smoke PASS、top FAIL | `mdla7_top_final.v` port / latch |
+| top PASS、host FAIL | `host_final.v` descriptor decode / expected compare |
+| L1 backpressure / contention | L1Manager / L1Mesh tests |
+
+一個好的修法通常會同時改三層：
+
+```text
+generator emits descriptor
+Verilog engine computes/checks sample
+smoke test covers the mode
+```
+
+只改 generator 很容易讓 host 拿到 descriptor 但 top 不懂 flag。只改 Verilog engine 也不夠，因為 regression 不會自然產生該 op。只改 host compare 則可能讓錯誤被遮掉。
+
+---
+
+## 22.11 從 sample path 到真正 RTL datapath
+
+目前 `verilog_final` 還是 sample path。下一個大階段是 full tensor / tile streaming：
+
+| 階段 | 內容 |
+|---|---|
+| sample path | 從 `.bin` 抽少量 bytes，Verilog 算 expected sample |
+| tile path | Verilog 走 activation / weight tile address，跑一小片 output |
+| streaming path | UDMA / L1Mesh / engine pipeline 有真正 overlap |
+| full tensor path | 每層 output 可做 CRC / full compare |
+| silicon-like timing | FIFO、bank、route、pipeline latency 全部收斂 |
+
+CONV 是最大工程：activation tile walk、weight tile walk、padding / stride / dilation、psum accumulate、Requant chain、output writeback、full tensor CRC 都要逐步接上。
+
+POOL / EWE / TNPS 相對小，但也需要從 sample vector 推進到 full H/W/C traversal 和 writeback buffering。
+
+---
+
+## 22.12 常見誤解
+
+| 誤解 | 正確理解 |
+|---|---|
+| `verilog_ctrl` PASS 代表 arithmetic RTL 完整 | 不代表；datapath correctness 仍靠 DPI-C CRC |
+| `verilog_final` PASS 代表 full tensor RTL 完整 | 目前多數是 sample datapath PASS |
+| `SKIP` 是 regression fail | 不一定；表示 generator 還沒有 final descriptor |
+| wall time 可以拿來當硬體 ms | 不行；wall time 是 Verilator 執行時間 |
+| INT16 descriptor 只改 generator 就好 | 還要 top/host/engine/smoke 都懂 bit11 |
+| FP sample path 是可綜合 FP pipeline | 目前是 Verilator real-valued bring-up primitive |
+
+---
+
+## 22.13 本章小結
+
+RTL bring-up 目前分成兩條路：`verilog_ctrl` 保完整 control/timing regression，`verilog_final` 逐步接真 Verilog datapath。開發時不要把兩者混在一起：ctrl 主要看完整模型是否能以 RTL-style control path 跑通，final 主要看某個 op/dtype 是否已能由 Verilog sample datapath 自己算出可比對結果。
+
+最重要的工程節奏是：
+
+```text
+看 SKIP/FAIL
+  -> 補 descriptor
+  -> 補 Verilog sample engine
+  -> 接 top/host
+  -> 補 smoke
+  -> 跑 targeted pattern
+  -> 再跑 slice regression
+```
+
+這樣每一步都有小 PASS 可以站穩，最後才往 full tensor RTL datapath 推進。
+
+
+\newpage

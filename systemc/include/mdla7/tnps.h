@@ -25,7 +25,7 @@ SC_MODULE(TnpsEngine) {
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
     sc_core::sc_time task_begin{sc_core::SC_ZERO_TIME};
 
     SC_HAS_PROCESS(TnpsEngine);
@@ -73,7 +73,10 @@ SC_MODULE(TnpsEngine) {
             wait(double(model_cycles), sc_core::SC_NS);
             return;
         }
-        rtl_run_copy_transaction(bytes);
+        if (is_synth_style(engine_model))
+            synth_run_copy_transaction(bytes);
+        else
+            rtl_run_copy_transaction(bytes);
     }
 
     static uint64_t ceil_div_u64(uint64_t a, uint64_t b) {
@@ -104,6 +107,20 @@ SC_MODULE(TnpsEngine) {
             bytes, PayloadPortCount::TNPS_W * PAYLOAD_BYTES),
             0, bytes, "payload_write");
         rtl_wait_phase("done", 4);
+    }
+
+    void synth_run_copy_transaction(uint64_t bytes) {
+        last_rtl_phases.clear();
+        rtl_wait_phase("cfg_decode", 2, 0, 0, "synth_cfg");
+        rtl_wait_phase("payload_read", ceil_div_u64(
+            bytes, PayloadPortCount::TNPS_R * PAYLOAD_BYTES) + 1,
+            bytes, 0, "synth_payload_read");
+        rtl_wait_phase("permute_pipe", ceil_div_u64(bytes, 128) + 2,
+                       0, 0, "synth_tensor_permute");
+        rtl_wait_phase("payload_write", ceil_div_u64(
+            bytes, PayloadPortCount::TNPS_W * PAYLOAD_BYTES) + 1,
+            0, bytes, "synth_payload_write");
+        rtl_wait_phase("retire", 1, 0, 0, "synth_done");
     }
 
     void do_linear(const TnpsBody& t) {

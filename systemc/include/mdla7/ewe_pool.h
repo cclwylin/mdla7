@@ -61,7 +61,7 @@ SC_MODULE(EweEngine) {
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(EweEngine);
     EweEngine(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -132,6 +132,38 @@ SC_MODULE(EweEngine) {
         rtl_run_ewe_transaction(bytes + 8,
                                 op_passes * ceil_div_u64(elems, lanes),
                                 bytes, elems, lanes, "unary_lane");
+    }
+
+    void synth_run_ewe_transaction(uint64_t read_bytes,
+                                   uint64_t compute_cycles,
+                                   uint64_t write_bytes,
+                                   uint64_t elems,
+                                   uint64_t lanes,
+                                   const char* compute_kind) {
+        last_rtl_phases.clear();
+        rtl_wait_phase("cfg_decode", 2, 0, 0, 0, 0, "synth_cfg");
+        rtl_wait_phase("payload_read", rtl_read_cycles(read_bytes) + 1,
+                       read_bytes, 0, elems, lanes, "synth_payload_read");
+        rtl_wait_phase("lane_pipe", compute_cycles + 2,
+                       0, 0, elems, lanes, compute_kind);
+        rtl_wait_phase("pack", 1, 0, 0, elems, lanes, "synth_pack");
+        rtl_wait_phase("payload_write", rtl_write_cycles(write_bytes) + 1,
+                       0, write_bytes, elems, lanes, "synth_payload_write");
+        rtl_wait_phase("retire", 1, 0, 0, 0, 0, "synth_done");
+    }
+
+    void synth_run_binary(uint64_t elems, uint64_t lanes) {
+        const uint64_t bytes = elems * elem_bytes();
+        synth_run_ewe_transaction(2 * bytes + 48,
+                                  ceil_div_u64(elems, lanes),
+                                  bytes, elems, lanes, "synth_binary_pipe");
+    }
+
+    void synth_run_unary(uint64_t elems, uint64_t lanes, uint64_t op_passes) {
+        const uint64_t bytes = elems * elem_bytes();
+        synth_run_ewe_transaction(bytes + 8,
+                                  op_passes * ceil_div_u64(elems, lanes),
+                                  bytes, elems, lanes, "synth_unary_pipe");
     }
 
     // v6: TFLite int8 ADD reference. Params blob layout at e.lut_addr:
@@ -470,7 +502,9 @@ SC_MODULE(EweEngine) {
                         else                          run_add(e, elems);
                     }
                 }
-                if (is_rtl_style(engine_model))
+                if (is_synth_style(engine_model))
+                    synth_run_binary(elems, lanes);
+                else if (is_rtl_style(engine_model))
                     rtl_run_binary(elems, lanes);
                 else
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
@@ -489,7 +523,10 @@ SC_MODULE(EweEngine) {
                     const uint64_t passes = (e.subtype == ES_GELU) ? 6
                                           : (e.subtype == ES_LOGISTIC) ? 4
                                           : 1;
-                    rtl_run_unary(elems, lanes, passes);
+                    if (is_synth_style(engine_model))
+                        synth_run_unary(elems, lanes, passes);
+                    else
+                        rtl_run_unary(elems, lanes, passes);
                 } else {
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
                 }
@@ -547,7 +584,9 @@ SC_MODULE(EweEngine) {
                 const uint64_t softmax_vec = e.c;
                 const uint64_t per_pass = (softmax_vec + softmax_lanes - 1) / softmax_lanes;
                 const uint64_t compute_cyc = softmax_rows * 3 * per_pass;
-                if (is_rtl_style(engine_model))
+                if (is_synth_style(engine_model))
+                    synth_run_unary(elems, softmax_lanes, 3);
+                else if (is_rtl_style(engine_model))
                     rtl_run_unary(elems, softmax_lanes, 3);
                 else
                     wait(compute_cyc, sc_core::SC_NS);
@@ -582,7 +621,7 @@ SC_MODULE(PoolEngine) {
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;            // v8.17: latched by CmdEng per dispatch
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(PoolEngine);
     PoolEngine(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -632,6 +671,25 @@ SC_MODULE(PoolEngine) {
             bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES),
             0, bytes_out, out_elems, lanes, "payload_write");
         rtl_wait_phase("done", 3);
+    }
+
+    void synth_run_pool_transaction(uint64_t in_elems, uint64_t out_elems,
+                                    uint64_t lanes, uint32_t window) {
+        const uint64_t bytes_in = in_elems * elem_bytes();
+        const uint64_t bytes_out = out_elems * elem_bytes();
+        const uint64_t compute =
+            ceil_div_u64(out_elems, lanes) * std::max<uint32_t>(window, 1);
+        last_rtl_phases.clear();
+        rtl_wait_phase("cfg_decode", 2, 0, 0, 0, 0, "synth_cfg");
+        rtl_wait_phase("window_fetch", ceil_div_u64(
+            bytes_in, PayloadPortCount::POOL_R * PAYLOAD_BYTES) + 1,
+            bytes_in, 0, in_elems, lanes, "synth_window_read");
+        rtl_wait_phase("reduce_pipe", compute + 2,
+                       0, 0, out_elems, lanes, "synth_window_reduce");
+        rtl_wait_phase("payload_write", ceil_div_u64(
+            bytes_out, PayloadPortCount::POOL_W * PAYLOAD_BYTES) + 1,
+            0, bytes_out, out_elems, lanes, "synth_payload_write");
+        rtl_wait_phase("retire", 1, 0, 0, 0, 0, "synth_done");
     }
 
     // v8.17: FP avg/max pool. Storage FP16 in L1; compute FP32 internally.
@@ -780,7 +838,10 @@ SC_MODULE(PoolEngine) {
                 const uint64_t in_elems = uint64_t(p.in_h) * p.in_w * p.in_c;
                 const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
                 const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
-                if (is_rtl_style(engine_model))
+                if (is_synth_style(engine_model))
+                    synth_run_pool_transaction(in_elems, out_elems, lanes,
+                                               std::max<uint32_t>(k_h * k_w, 1));
+                else if (is_rtl_style(engine_model))
                     rtl_run_pool_transaction(in_elems, out_elems, lanes,
                                              std::max<uint32_t>(k_h * k_w, 1));
                 else
@@ -803,7 +864,10 @@ SC_MODULE(PoolEngine) {
             const uint64_t in_elems = uint64_t(p.in_h) * p.in_w * p.in_c;
             const uint64_t out_elems = uint64_t(p.out_h) * p.out_w * p.out_c;
             const uint64_t per_lane  = (out_elems + lanes - 1) / lanes;
-            if (is_rtl_style(engine_model))
+            if (is_synth_style(engine_model))
+                synth_run_pool_transaction(in_elems, out_elems, lanes,
+                                           std::max<uint32_t>(k_h * k_w, 1));
+            else if (is_rtl_style(engine_model))
                 rtl_run_pool_transaction(in_elems, out_elems, lanes,
                                          std::max<uint32_t>(k_h * k_w, 1));
             else

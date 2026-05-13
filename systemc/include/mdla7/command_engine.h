@@ -56,7 +56,7 @@ SC_MODULE(CommandEngine) {
     sc_core::sc_time busy_time{sc_core::SC_ZERO_TIME};
     std::vector<std::pair<uint64_t, uint64_t>> tasks;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(CommandEngine);
     CommandEngine(sc_core::sc_module_name nm) : sc_module(nm) {
@@ -231,7 +231,21 @@ SC_MODULE(CommandEngine) {
         const uint64_t t_begin_ns = uint64_t(t_begin.to_seconds() * 1e9);
         busy_time += t_end - t_begin;
         tasks.emplace_back(t_begin_ns, t_begin_ns + display_cycles);
-        if (is_rtl_style(engine_model)) {
+        if (is_synth_style(engine_model)) {
+            RtlPhaseTrace decode;
+            decode.name = "decode";
+            decode.cycles = 1;
+            decode.elems = d.hdr.wait_count;
+            decode.lanes = d.hdr.op_class();
+            decode.stall = "synth_desc_decode";
+            RtlPhaseTrace cfg;
+            cfg.name = "cfg_write";
+            cfg.cycles = display_cycles;
+            cfg.elems = d.hdr.wait_count;
+            cfg.lanes = d.hdr.op_class();
+            cfg.stall = "synth_cfg_fifo_write";
+            rtl_phase_tasks.push_back({decode, cfg});
+        } else if (is_rtl_style(engine_model)) {
             RtlPhaseTrace phase;
             phase.name = "dispatch";
             phase.cycles = display_cycles;

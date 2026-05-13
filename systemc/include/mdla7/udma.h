@@ -51,7 +51,7 @@ SC_MODULE(Udma) {
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks_read;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks_write;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
     static constexpr uint32_t UDMA_READ_OUTSTANDING = 2;
     static constexpr bool ACT_COMP_WRITE_ENABLE = false;
 
@@ -86,7 +86,9 @@ SC_MODULE(Udma) {
             const sc_core::sc_time t_end = sc_core::sc_time_stamp();
             const auto t_begin_ns = uint64_t(t_begin.to_seconds() * 1e9);
             const auto t_end_ns   = uint64_t(t_end  .to_seconds() * 1e9);
-            if (is_rtl_style(engine_model))
+            if (is_synth_style(engine_model))
+                synth_record_udma_transaction(u, t_end_ns - t_begin_ns);
+            else if (is_rtl_style(engine_model))
                 rtl_record_udma_transaction(u, t_end_ns - t_begin_ns);
             busy_time += t_end - t_begin;
             tasks.emplace_back(t_begin_ns, t_end_ns);          // legacy combined
@@ -182,6 +184,32 @@ SC_MODULE(Udma) {
                           0, bytes, "l1_payload_write");
         }
         rtl_add_phase("done", observed_cycles ? 1 : 0);
+    }
+
+    void synth_record_udma_transaction(const UdmaBody& u, uint64_t observed_cycles) {
+        const uint64_t bytes = payload_bytes_for(u);
+        const uint64_t codec = codec_cycles_for(u);
+        last_rtl_phases.clear();
+        rtl_add_phase("cfg_decode", 2, 0, 0, "synth_cfg");
+        if (u.direction == 1) {
+            rtl_add_phase("l1_payload_read", ceil_div_u64(bytes, 256) + 1,
+                          bytes, 0, "synth_l1_read");
+            if (codec)
+                rtl_add_phase("codec_pipe", codec + 1, 0, 0, "synth_act_codec");
+            rtl_add_phase("dram_cmd", 8, 0, 0, "synth_dram_aw");
+            rtl_add_phase("dram_write_data", ceil_div_u64(bytes, 48) + 50,
+                          0, bytes, "synth_dram_write");
+        } else {
+            const uint64_t dram_bytes = effective_read_bytes(uint32_t(bytes));
+            rtl_add_phase("dram_cmd", 8, 0, 0, "synth_dram_ar");
+            rtl_add_phase("dram_read_data", ceil_div_u64(dram_bytes, 48) + 50,
+                          dram_bytes, 0, "synth_dram_read");
+            if (codec)
+                rtl_add_phase("codec_pipe", codec + 1, 0, 0, "synth_act_codec");
+            rtl_add_phase("l1_payload_write", ceil_div_u64(bytes, 256) + 1,
+                          0, bytes, "synth_l1_write");
+        }
+        rtl_add_phase("retire", observed_cycles ? 1 : 0, 0, 0, "synth_done");
     }
 
     // v2.1: bandwidth is now modeled inside L1Mesh / Dram (each call to

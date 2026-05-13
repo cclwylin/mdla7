@@ -41,7 +41,7 @@ SC_MODULE(RequantEngine) {
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
     uint8_t last_dtype = DT_INT8x8;     // v4.1: latched by CmdEng each layer
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     // v8.38: Requant is modeled as the shared CONV/EWE quantize-pack resource.
     // The CONV->Requant input chain is 128 INT32/cyc = 4096 bit/cyc, while the
@@ -108,6 +108,35 @@ SC_MODULE(RequantEngine) {
                              "payload_write");
         }
         rtl_record_phase("done", 3);
+    }
+
+    void synth_record_requant_transaction(uint64_t total, uint32_t oc,
+                                          uint32_t oc_layer, bool fp,
+                                          bool have_corr, bool skip_l1_write,
+                                          uint64_t write_bytes) {
+        const uint64_t param_bytes = fp
+            ? (8 + uint64_t(oc) * sizeof(float))
+            : (12 + uint64_t(oc) * (sizeof(int32_t) + sizeof(int8_t) + sizeof(int32_t)));
+        const uint64_t corr_bytes = have_corr ? total * sizeof(int32_t) : 0;
+        const uint64_t read_bytes = param_bytes + corr_bytes;
+        last_rtl_phases.clear();
+        rtl_record_phase("cfg_decode", 2, 0, 0, 0, 0, "synth_cfg");
+        rtl_record_phase("param_fetch",
+                         ceil_div_u64(read_bytes, PayloadPortCount::REQUANT_R * PAYLOAD_BYTES) + 1,
+                         read_bytes, 0, oc_layer, PayloadPortCount::REQUANT_R,
+                         have_corr ? "synth_params_corr" : "synth_params");
+        rtl_record_phase("chain_sync", ceil_div_u64(total, CHAIN_LANES) + 1,
+                         0, 0, total, CHAIN_LANES, "synth_conv_chain");
+        rtl_record_phase("quant_pipe", ceil_div_u64(total, PACK_LANES) + 2,
+                         0, 0, total, PACK_LANES,
+                         fp ? "synth_fp_clip_pack" : "synth_mbqm_pack");
+        if (!skip_l1_write) {
+            rtl_record_phase("payload_write",
+                             ceil_div_u64(write_bytes, PayloadPortCount::REQUANT_W * PAYLOAD_BYTES) + 1,
+                             0, write_bytes, total, PayloadPortCount::REQUANT_W,
+                             "synth_payload_write");
+        }
+        rtl_record_phase("retire", 1, 0, 0, 0, 0, "synth_done");
     }
 
     void run() {
@@ -189,7 +218,11 @@ SC_MODULE(RequantEngine) {
                     const sc_core::sc_time elapsed = sc_core::sc_time_stamp() - t_begin;
                     const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
                     const uint64_t pipe = (total + PACK_LANES - 1) / PACK_LANES;
-                    if (is_rtl_style(engine_model))
+                    if (is_synth_style(engine_model))
+                        synth_record_requant_transaction(total, OC, OC_layer, true,
+                                                         false, false,
+                                                         out_h16.size() * sizeof(uint16_t));
+                    else if (is_rtl_style(engine_model))
                         rtl_record_requant_transaction(total, OC, OC_layer, true,
                                                        false, false,
                                                        out_h16.size() * sizeof(uint16_t));
@@ -333,7 +366,10 @@ SC_MODULE(RequantEngine) {
             const uint64_t elapsed_cyc = uint64_t(elapsed.to_seconds() * 1e9);
             const uint64_t pipe = (total + PACK_LANES - 1) / PACK_LANES;
             const uint64_t write_bytes = skip_l1_write ? 0 : dst_total * out_elem_bytes();
-            if (is_rtl_style(engine_model))
+            if (is_synth_style(engine_model))
+                synth_record_requant_transaction(total, OC, OC_layer, false,
+                                                 have_corr, skip_l1_write, write_bytes);
+            else if (is_rtl_style(engine_model))
                 rtl_record_requant_transaction(total, OC, OC_layer, false,
                                                have_corr, skip_l1_write, write_bytes);
             if (pipe > elapsed_cyc) wait(pipe - elapsed_cyc, sc_core::SC_NS);

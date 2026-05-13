@@ -69,7 +69,7 @@ SC_MODULE(ConvEngine) {
     std::vector<std::pair<uint64_t, uint64_t>> tasks;     // (start_ns, end_ns)
     std::vector<RtlPhaseTrace> last_rtl_phases;
     std::vector<std::vector<RtlPhaseTrace>> rtl_phase_tasks;
-    EngineModel engine_model = EngineModel::Analytical;
+    EngineModel engine_model = EngineModel::Rtl;
 
     SC_HAS_PROCESS(ConvEngine);
     ConvEngine(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -159,6 +159,33 @@ SC_MODULE(ConvEngine) {
         rtl_record_phase("done", target_cycles ? std::min<uint64_t>(2, target_cycles) : 2);
     }
 
+    void synth_record_conv_transaction(const ConvBody& c, DType dtype,
+                                       uint64_t out_count, uint64_t target_cycles) {
+        const uint32_t group = c.group ? c.group : 1;
+        const uint32_t in_per_group = c.in_c / group;
+        const uint64_t in_elems = uint64_t(c.in_h) * c.in_w * c.in_c;
+        const uint64_t wgt_elems = uint64_t(c.out_c) * c.k_h * c.k_w * in_per_group;
+        const uint64_t act_bytes = in_elems * dtype_bytes(dtype, false);
+        const uint64_t wgt_bytes = wgt_elems * dtype_bytes(dtype, true);
+        const uint64_t act_read = ceil_div_u64(act_bytes, PayloadPortCount::CONV_ACT_R * PAYLOAD_BYTES);
+        const uint64_t wgt_read = ceil_div_u64(wgt_bytes, PayloadPortCount::CONV_WGT_R * PAYLOAD_BYTES);
+        const uint64_t mac = conv_mac_cycles(c, dtype, out_count);
+        const uint64_t chain = ceil_div_u64(out_count, CONV_REQUANT_CHAIN_LANES);
+        const uint64_t fill = (c._r0 == CONV_DF_WS) ? 48 : 64;
+        last_rtl_phases.clear();
+        rtl_record_phase("cfg_decode", 2, 0, 0, 0, 0, "synth_cfg");
+        rtl_record_phase("act_stream", act_read + 1, act_bytes, 0, in_elems,
+                         PayloadPortCount::CONV_ACT_R, "synth_act_payload");
+        rtl_record_phase("wgt_stream", wgt_read + 1, wgt_bytes, 0, wgt_elems,
+                         PayloadPortCount::CONV_WGT_R, "synth_wgt_payload");
+        rtl_record_phase("cluster_fill", fill, 0, 0, 0, 0, "synth_tile_fill");
+        rtl_record_phase("mac_pipe", mac, 0, 0, out_count, 0, "synth_cluster_mac");
+        rtl_record_phase("psum_chain", chain + 1, 0, out_count * sizeof(int32_t),
+                         out_count, CONV_REQUANT_CHAIN_LANES, "synth_requant_chain");
+        rtl_record_phase("retire", target_cycles ? std::min<uint64_t>(1, target_cycles) : 1,
+                         0, 0, 0, 0, "synth_done");
+    }
+
     void run() {
         while (true) {
             DescriptorBody body = cfg_in.read();
@@ -203,7 +230,9 @@ SC_MODULE(ConvEngine) {
 
             uint64_t out_count = uint64_t(out_h) * out_w * c.out_c;
             uint64_t cyc = conv_cycles(c, dt, out_count);
-            if (is_rtl_style(engine_model))
+            if (is_synth_style(engine_model))
+                synth_record_conv_transaction(c, dt, out_count, cyc);
+            else if (is_rtl_style(engine_model))
                 rtl_record_conv_transaction(c, dt, out_count, cyc);
             std::cout << "[CONV] estimated " << cyc << " cycles\n";
             // v8.6: don't double-count L1 input/weight reads on top of the
