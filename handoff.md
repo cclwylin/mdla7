@@ -1,6 +1,6 @@
-# MDLA7 Handoff
+# MDLA7 交接紀錄
 
-## Project Target
+## 專案目標
 
 - 最後要做到 FPGA。
 - 用 Fast/Synth mode 驗證 Compile、Function、Performance。
@@ -11,86 +11,100 @@ Date: 2026-05-13 CST
 Repo: `/Volumes/4T_OFFICE/_Codex/MDLA7_Codex`
 Branch: `main`
 
-## Update 2026-05-14 Unsupported / CX / Verilog
+## 2026-05-14 更新：文件與 commit 狀態
 
-- BMM and ETHZ_v6 unsupported-op audit is now clean:
-  `systemc/scripts/audit_unsupported_ops.py model/BMM model/ETHZ_v6` reports
-  BMM `0/3` and ETHZ_v6 `0/53` models with unsupported ops.
-- Materialized fallback remains explicitly reported as supported-but-not-native;
-  it is not native RTL datapath coverage. Use `--strict-native` when fallback
-  should fail the audit.
-- Added forced materialized boundaries for correctness holes found by ETHZ CX:
-  `unet_float` L1-L13, `imdn_float` L1, `dped_float` L1, and
-  `efficientnet_b4_float` L473/L474, in addition to the earlier
-  `inception_v3_float` L2/L5 and `unet_quant` L8/L14 exceptions.
-- Fixed `OK_MATERIALIZE` execution in the SystemC runner so fallback reference
-  bytes are staged at `dram_out` with a self-copy descriptor. Staging at
-  `dram_in` could alias the previous layer output and caused
-  `sd_encoder_quant` materialized layers to fail.
-- Fixed producer-no-store handling for explicit materialized boundaries and for
-  binary EWE consumers (`ADD`/`MUL`/`SUB`). BMM SAM failed when the scale `MUL`
-  store was suppressed before the mask `ADD`.
-- Fixed Verilog host cycle reporting for closed-loop probe descriptors. BMM
-  full final coverage uses final/check probes; excluding those from
-  `measured_cycle_count` made real PASS runs report `verilog_cyc=0`.
+- code / coverage 的 commit 是 `e6d1435 Cover BMM and ETHZ unsupported ops`。
+- 文件同步的 commit 是 `434f141 Document BMM and ETHZ coverage policy`。
+- 相關 markdown 已經同步：
+  `model/BMM/README.md`, `profile_html.md`, `rtl/verilog/README.md`,
+  `md/06_tflite_flatbuffer.md`, `md/13_ewe_pool_softmax_d2space.md`,
+  `md/17_verification_coverage.md`, `md/18_regression_profile_html.md`，並且已重新產生
+  `md/mdla7_textbook.md`。
+- `memory.md` 在文件 commit 後還有本地更新，內容記錄最新 commit、BMM profile
+  命名規則、相關文件位置、textbook 重新產生規則，以及 generated HTML 要和 docs-only
+  commit 分開的規則。
+- 目前已知 dirty 的 generated output 可能包含
+  `batch/profile/profile_bmm.cx.html`，這通常是背景 regression 刷新的結果。
+  除非使用者明確要求提交 profile snapshot，否則不要把它混進 docs/code commit。
+- BMM profile 檔名固定為：
+  `batch/profile/profile_bmm.html` 和 `batch/profile/profile_bmm.cx.html`。
+  不要再引入 `profile_bmm.L1-cx.cx.html` 或其他雙重 mode 名稱。
 
-Validation after these fixes:
+## 2026-05-14 更新：Unsupported / CX / Verilog
+
+- BMM 和 ETHZ_v6 的 unsupported-op audit 已清乾淨：
+  `systemc/scripts/audit_unsupported_ops.py model/BMM model/ETHZ_v6` 回報
+  BMM `0/3`、ETHZ_v6 `0/53` models 有 unsupported ops。
+- Materialized fallback 仍會明確標成 supported-but-not-native；
+  這不是 native RTL datapath coverage。若 fallback 也要算失敗，請用 `--strict-native`。
+- 已補上 ETHZ CX correctness hole 對應的 forced materialized boundary：
+  `unet_float` L1-L13、`imdn_float` L1、`dped_float` L1、
+  `efficientnet_b4_float` L473/L474，加上較早的
+  `inception_v3_float` L2/L5、`unet_quant` L8/L14。
+- 已修正 SystemC runner 的 `OK_MATERIALIZE` 執行方式：fallback reference bytes
+  會放在 `dram_out`，並用 self-copy descriptor。以前放在 `dram_in` 時可能 alias
+  前一層 output，導致 `sd_encoder_quant` 的 materialized layers fail。
+- 已修正 explicit materialized boundary 和 binary EWE consumer (`ADD`/`MUL`/`SUB`)
+  的 producer-no-store 處理。BMM SAM 曾經因為 scale `MUL` 在 mask `ADD` 前被省掉
+  store 而失敗。
+- 已修正 Verilog host 對 closed-loop probe descriptor 的 cycle 計數。BMM full final
+  coverage 會用 final/check probes；如果 `measured_cycle_count` 不算 probe，真實 PASS
+  會假報 `verilog_cyc=0`。
+
+修正後驗證：
 
 - `python3 -m py_compile systemc/scripts/compile_model.py batch/gen_verilog_program.py batch/run_verilog.py batch/run_systemc.py`
-  passes.
-- `make -C systemc -j$(sysctl -n hw.ncpu) build/mdla7_model_runner` passes.
+  通過。
+- `make -C systemc -j$(sysctl -n hw.ncpu) build/mdla7_model_runner` 通過。
 - `systemc/scripts/audit_unsupported_ops.py model/BMM model/ETHZ_v6`
-  -> BMM `0/3` unsupported; ETHZ_v6 `0/53` unsupported.
+  -> BMM `0/3` unsupported；ETHZ_v6 `0/53` unsupported。
 - `./batch/run_systemc.py --filter bmm --fast-only --rerun-all --no-html`
-  -> BMM `3/3` clean.
+  -> BMM `3/3` clean。
 - `./batch/run_systemc.py --filter bmm --cx --fast-only --rerun-all --no-html`
-  -> BMM `3/3` clean.
+  -> BMM `3/3` clean。
 - `./batch/run_verilog.py --filter bmm --rerun-all --timeout 180`
-  -> BMM `3/3` PASS with full final coverage, `verilog/cx=0.44x` aggregate.
+  -> BMM `3/3` PASS，full final coverage，aggregate `verilog/cx=0.44x`。
 - `./batch/run_verilog.py --filter rtl/bin/ETHZ_v6/midas_v3_quant.bin --rerun-all --timeout 240 --no-build`
-  -> `midas_v3_quant` PASS with full final coverage.
-- ETHZ_v6 CX was validated in chunks while fixing the failures. After the final
-  conservative no-store and Verilog cycle fixes, targeted clean reruns include
-  `efficientnet_b4_float`, `imdn_float`, and `dped_float`; earlier targeted
-  clean reruns covered `sd_encoder_quant` and `unet_float`. A single monolithic
-  53-model rerun was not repeated after the final conservative no-store guard.
+  -> `midas_v3_quant` PASS，full final coverage。
+- ETHZ_v6 CX 是邊修邊分段驗證。最後的保守 no-store guard 和 Verilog cycle 修正後，
+  targeted clean rerun 包含 `efficientnet_b4_float`、`imdn_float`、`dped_float`；
+  較早的 targeted clean rerun 已覆蓋 `sd_encoder_quant` 和 `unet_float`。
+  最後那個保守 no-store guard 之後，沒有再重跑一次完整 53-model monolithic sweep。
 
-## Latest Handoff 2026-05-13
+## 2026-05-13 最近交接
 
-Current active goal:
+當時主要目標：
 
-- Fix the old false-pass problem: ETHZ/BMM regressions must not report clean
-  PASS/ok when `compile_model.py` skipped unsupported original TFLite ops.
-- Fill unsupported ETHZ/BMM ops through all required layers:
-  compiler lowering, SystemC fast/cx execution, and Verilog closed-loop
-  descriptor/datapath coverage.
-- A model is only a clean SystemC regression pass when every original TFLite op
-  is compiled/supported and the compiled graph verifies. `compile-skipped:N`
-  is now a regression failure, not a warning.
-- Verilog BMM must not count sampled/partial closed-loop coverage as normal
-  pass; BMM closed-loop requires full final output coverage.
+- 修掉舊的 false-pass 問題：當 `compile_model.py` 跳過原始 TFLite 的 unsupported op
+  時，ETHZ/BMM regression 不能再回報乾淨的 PASS/ok。
+- 把 ETHZ/BMM unsupported op 補到所有必要路徑：
+  compiler lowering、SystemC fast/cx 執行，以及 Verilog closed-loop descriptor /
+  datapath coverage。
+- 只有當每個原始 TFLite op 都被 compile/支援，且 compiled graph 有完成驗證時，
+  SystemC regression 才能算 clean pass。`compile-skipped:N` 是 regression failure，
+  不是 warning。
+- Verilog BMM 不能把 sampled/partial closed-loop coverage 當成正常 pass；
+  BMM closed-loop 必須要求 full final output coverage。
 
-Latest implementation status:
+最新實作狀態：
 
-- `compile_model.py` now reads compatible constant tensor inputs for binary
-  ops instead of always synthesizing RNG input-B. If a constant cannot be
-  reshaped/broadcast to the synthetic fallback shape, it safely falls back to
-  the old deterministic synthetic path.
-- Large FP binary ops with scalar input-B now use a compact scalar-broadcast
-  weight payload. SystemC EWE detects the marker and expands the scalar in
-  compute, avoiding duplicated multi-MB B tensors in DPED-style programs.
-- Program images still write v3 when offsets fit. v4 64-bit offset support was
-  added to the compiler, SystemC runner, and Verilog parser for future >4GB
-  cases; current `dped_float` fits v3 again after scalar compaction.
-- DPED `dped_float` now compiles all 103/103 layers, no `compile-skipped`.
-  The old failure was not unsupported op coverage; it was a combination of
-  huge program storage, scalar-B duplication, and a store-skip barrier
-  corrupting aliased DRAM input by one byte.
-- SystemC runner now prevents skipped producer stores in front of large FP
-  binary/D2SPACE consumers that reload aliased input from DRAM. This fixes the
-  one-byte DPED tail corruption and keeps final output comparison meaningful.
+- `compile_model.py` 現在會讀取 binary op 的相容 constant tensor input，
+  不再一律合成 RNG input-B。如果 constant 無法 reshape/broadcast 到 fallback shape，
+  才安全退回舊的 deterministic synthetic path。
+- 大型 FP binary op 若 input-B 是 scalar，現在會用 compact scalar-broadcast
+  weight payload。SystemC EWE 會偵測 marker 並在 compute 時展開 scalar，
+  避免 DPED 類模型複製多 MB 的 B tensor。
+- Program image 在 offset 放得下時仍寫 v3。compiler、SystemC runner、Verilog parser
+  已加入 v4 64-bit offset 支援，保留給未來超過 4GB 的 case；目前 `dped_float`
+  經 scalar compaction 後仍可放在 v3。
+- DPED `dped_float` 現在可 compile 全部 103/103 layers，沒有 `compile-skipped`。
+  舊 failure 不是 unsupported op coverage，而是大型 program storage、scalar-B 複製、
+  以及 store-skip barrier 導致 aliased DRAM input 尾端差 1 byte 的組合問題。
+- SystemC runner 現在會防止在大型 FP binary / D2SPACE consumer 前省掉 producer store，
+  因為這些 consumer 會從 DRAM reload aliased input。這修掉 DPED 的 1-byte tail
+  corruption，也讓 final output compare 有意義。
 
-Validation from this handoff:
+這份交接中的驗證：
 
 - `./batch/run_systemc.py --filter bmm --cx --fast-only --rerun-all --no-html`
   -> BMM `3/3` clean.
