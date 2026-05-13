@@ -283,6 +283,7 @@ module host #(
     wire descriptor_has_stream_flags =
         (desc_stream_meta_flags & (SMF_LOAD_A | SMF_LOAD_B | SMF_COMPUTE | SMF_STORE | SMF_FINAL_TILE)) != 8'd0;
     wire probe_descriptor_mode = cmd_mem[base + 3][15];
+    wire cycle_only_descriptor_mode = cmd_mem[base + 3][14];
 
     assign top_done_ready = 1'b1;
 
@@ -350,7 +351,9 @@ module host #(
                              cmd_mem[base + 9], cmd_mem[base + 8]};
             conv_elem_count <= cmd_mem[base + 12][7:0];
             conv_workload_bytes <= cmd_mem[base + 1];
-            conv_workload_outputs <= cmd_mem[base + 31];
+            conv_workload_outputs <= cmd_mem[base + 3][14] ?
+                                     ((cmd_mem[base + 31] == 32'd0) ? 32'd1 : cmd_mem[base + 31]) :
+                                     ((cmd_mem[base + 31][7:0] == 8'd0) ? 32'd1 : {24'd0, cmd_mem[base + 31][7:0]});
             conv_read_sample_from_l1 <= cmd_mem[base + 3][11];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
@@ -867,7 +870,7 @@ module host #(
                                 test_fail <= 1'b1;
                             end
                         end
-                        if ((desc_op_class == OP_L1CRC) &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_L1CRC) &&
                             ((l1mesh_crc !== cmd_mem[base + 28]) ||
                              (l1mesh_crc_count !== cmd_mem[base + 29]))) begin
                             $display("HOST_VERILOG_FAIL: L1Mesh crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d addr=%0d",
@@ -878,21 +881,21 @@ module host #(
                                      cmd_mem[base + 2]);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_CONV) && conv_fp_mode &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_CONV) && conv_fp_mode &&
                             (conv_fp_sum_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_VERILOG_FAIL: CONV FP sample cmd=%0d got=%016x expected=%016x",
                                      command_index, conv_fp_sum_bits,
                                      {cmd_mem[base + 17], cmd_mem[base + 16]});
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && conv_int16_mode &&
                             (conv_int16_acc_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_VERILOG_FAIL: CONV INT16 sample cmd=%0d acc=%0d expected=%0d",
                                      command_index, conv_int16_acc_out,
                                      $signed(cmd_mem[base + 18]));
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             !cmd_mem[base + 3][6] &&
@@ -902,7 +905,7 @@ module host #(
                                      conv_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][2] &&
@@ -960,7 +963,7 @@ module host #(
                                      expected_conv_tile_count);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][2] &&
@@ -980,7 +983,7 @@ module host #(
                                      cmd_mem[base + 3][5]);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][7] &&
@@ -996,7 +999,7 @@ module host #(
                                      $signed(cmd_mem[base + 19]));
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             !cmd_mem[base + 3][9] &&
                             !cmd_mem[base + 3][10] &&
                             cmd_mem[base + 3][8] &&
@@ -1010,7 +1013,7 @@ module host #(
                                      cmd_mem[base + 29]);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             cmd_mem[base + 3][9] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
@@ -1025,7 +1028,7 @@ module host #(
                                      cmd_mem[base + 1]);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_CONV) && !conv_fp_mode && !conv_int16_mode &&
                             cmd_mem[base + 3][10] &&
                             ((conv_shadow_crc !== cmd_mem[base + 28]) ||
                              (conv_shadow_byte_count !== cmd_mem[base + 29]) ||
@@ -1086,7 +1089,7 @@ module host #(
                                      $signed(conv_shadow_mem_q_values[expected_conv_tile_last_shadow_slot * 32 +: 32]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_REQUANT) && requant_sramcrc_mode &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_REQUANT) && requant_sramcrc_mode &&
                             ((requant_sramcrc_crc !== requant_sramcrc_expected_crc) ||
                              (requant_sramcrc_count !== requant_sramcrc_expected_count))) begin
                             $display("HOST_VERILOG_FAIL: REQUANT sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
@@ -1096,7 +1099,7 @@ module host #(
                                      requant_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_UDMA) && udma_sramcrc_mode &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_UDMA) && udma_sramcrc_mode &&
                             ((udma_sramcrc_crc !== udma_sramcrc_expected_crc) ||
                              (udma_sramcrc_count !== udma_sramcrc_expected_count))) begin
                             $display("HOST_VERILOG_FAIL: UDMA sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
@@ -1106,14 +1109,14 @@ module host #(
                                      udma_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_REQUANT) && !requant_sramcrc_mode &&
                             (requant_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_VERILOG_FAIL: REQUANT sample cmd=%0d scaled=%0d out=%0d expected=%0d",
                                      command_index, requant_scaled_out,
                                      requant_out_q, $signed(cmd_mem[base + 18][7:0]));
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_POOL) && (pool_refcrc_mode || pool_sramcrc_mode) &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_POOL) && (pool_refcrc_mode || pool_sramcrc_mode) &&
                             ((pool_refcrc_crc !== pool_refcrc_expected_crc) ||
                              (pool_refcrc_count !== pool_refcrc_expected_count))) begin
                             $display("HOST_VERILOG_FAIL: POOL crc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d sram=%0d",
@@ -1123,7 +1126,7 @@ module host #(
                                      pool_sramcrc_mode);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_fp_mode &&
                             (pool_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_VERILOG_FAIL: POOL FP sample cmd=%0d got=%016x expected=%016x avg=%0d",
                                      command_index, pool_fp_bits,
@@ -1131,7 +1134,7 @@ module host #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && pool_int16_mode &&
                             (pool_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_VERILOG_FAIL: POOL INT16 sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -1139,7 +1142,7 @@ module host #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_POOL) && !pool_refcrc_mode && !pool_sramcrc_mode && !pool_fp_mode && !pool_int16_mode &&
                             (pool_out_q !== cmd_mem[base + 18][7:0])) begin
                             $display("HOST_VERILOG_FAIL: POOL sample cmd=%0d out=%0d expected=%0d avg=%0d",
                                      command_index, pool_out,
@@ -1147,7 +1150,7 @@ module host #(
                                      pool_avg_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_EWE) && ewe_sramcrc_mode &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_EWE) && ewe_sramcrc_mode &&
                             ((ewe_sramcrc_crc !== ewe_sramcrc_expected_crc) ||
                              (ewe_sramcrc_count !== ewe_sramcrc_expected_count))) begin
                             $display("HOST_VERILOG_FAIL: EWE sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
@@ -1157,7 +1160,7 @@ module host #(
                                      ewe_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && ewe_fp_mode &&
                             (ewe_fp_bits !== {cmd_mem[base + 17], cmd_mem[base + 16]})) begin
                             $display("HOST_VERILOG_FAIL: EWE FP sample cmd=%0d got=%016x expected=%016x mode=%0d",
                                      command_index, ewe_fp_bits,
@@ -1165,7 +1168,7 @@ module host #(
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_EWE) && !ewe_sramcrc_mode && !ewe_final_q_mode && !ewe_fp_mode &&
                             (ewe_out !== $signed(cmd_mem[base + 18]))) begin
                             $display("HOST_VERILOG_FAIL: EWE vector sample cmd=%0d sum=%0d first=%0d expected_sum=%0d mode=%0d",
                                      command_index, ewe_out, ewe_out_q,
@@ -1173,7 +1176,7 @@ module host #(
                                      ewe_op_mode);
                             test_fail <= 1'b1;
                         end
-                        if ((desc_op_class == OP_TNPS) && tnps_sramcrc_mode &&
+                        if (!cycle_only_descriptor_mode && (desc_op_class == OP_TNPS) && tnps_sramcrc_mode &&
                             ((tnps_sramcrc_crc !== tnps_sramcrc_expected_crc) ||
                              (tnps_sramcrc_count !== tnps_sramcrc_expected_count))) begin
                             $display("HOST_VERILOG_FAIL: TNPS sramcrc cmd=%0d crc=%08x expected=%08x bytes=%0d expected=%0d",
@@ -1183,7 +1186,7 @@ module host #(
                                      tnps_sramcrc_expected_count);
                             test_fail <= 1'b1;
                         end
-                        if (!microblock_descriptor_mode && (desc_op_class == OP_TNPS) && !tnps_sramcrc_mode && !tnps_final_write_mode &&
+                        if (!cycle_only_descriptor_mode && !microblock_descriptor_mode && (desc_op_class == OP_TNPS) && !tnps_sramcrc_mode && !tnps_final_write_mode &&
                             ((tnps_sample_valid != (cmd_mem[base + 18] != 32'd0)) ||
                              ((cmd_mem[base + 18] != 32'd0) &&
                               ((tnps_sample_src_byte_offset != cmd_mem[base + 16]) ||

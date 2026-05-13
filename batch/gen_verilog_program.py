@@ -28,9 +28,12 @@ SMF_FINAL_TILE = 16
 
 OK_CONV = {0, 1, 6}
 OK_POOL = {2, 3}
+OK_SOFTMAX = 4
 OK_ADD = 7
 OK_MUL = 10
 OK_SUB = 11
+OK_HARD_SWISH = 12
+OK_GELU = 13
 OK_LOGISTIC = 27
 OK_RESHAPE = 5
 OK_CONCAT = 8
@@ -70,6 +73,7 @@ TNPS_OPS = {
     OK_SPLIT,
 }
 UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
+GENERIC_REF_OPS = TNPS_OPS | UDMA_OPS | {OK_SOFTMAX, OK_HARD_SWISH, OK_GELU}
 
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
@@ -82,8 +86,10 @@ DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
 DEFAULT_CONV_SRAM_WINDOW_COUNT = 3
+DEFAULT_CONV_SAMPLE_COUNT = 3
 CONV_TILE_MAX_ELEMS = 255
 CONV_TILE_MAX_OUTPUTS = 32768
+CONV_PROBE_COMMANDS = 6
 POOL_TILE_MAX_BYTES = 8192
 BYTE_TILE_SWEEP_PROBES = 4
 MICRO_TILE_BYTES = 1 << 20
@@ -659,6 +665,8 @@ def tnps_output_source_byte_offset(layer: Layer, out_byte_index: int) -> int | N
     elem = elem_bytes(layer.dtype)
     if elem <= 0 or out_byte_index < 0 or out_byte_index >= layer.ref_size:
         return None
+    if layer.op_kind == OK_RESHAPE:
+        return out_byte_index if out_byte_index < layer.in_size else None
     block = layer.k_h or layer.k_w or 1
     out_elem = out_byte_index // elem
     byte_lane = out_byte_index % elem
@@ -823,7 +831,7 @@ def closed_loop_tnps_probe(
         return []
     src_byte = desc[16]
     l1_sample_addr = 0x30000 + (((layer.index * 0x100) + (start_out_byte * 0x20)) & 0x2FFFF)
-    l1_base = (l1_sample_addr - src_byte) & 0x003F_FFFF
+    l1_base = l1_sample_addr if layer.op_kind == OK_RESHAPE else (l1_sample_addr - src_byte) & 0x003F_FFFF
     l1_result = l1_sample_addr + 0x80
     descs = [
         udma_dram_to_l1_descriptor(
@@ -1072,6 +1080,42 @@ def closed_loop_result_check_descriptors(
 
 def closed_loop_result_dram_off(layer: Layer, ordinal: int) -> int:
     return 0x00E0_0000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x0F_FFF0)
+
+
+def closed_loop_ref_passthrough_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    max_bytes: int = 16,
+) -> list[list[int]]:
+    data = descriptor_for_layer.program_bytes
+    if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
+        return []
+    byte_count = min(layer.ref_size, max(max_bytes, 1), 16)
+    expected = data[layer.ref_off:layer.ref_off + byte_count]
+    if not expected:
+        return []
+    l1_base = 0x60000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.ref_off,
+            l1_base,
+            byte_count,
+            SMF_LOAD_A,
+        )
+    ]
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_base,
+            result_dram_off,
+            expected,
+        )
+    )
+    return descs
 
 
 def closed_loop_output_indices(total_outputs: int, command_budget: int,
@@ -1557,12 +1601,13 @@ def descriptor_for_layer(layer: Layer, ordinal: int, enable_meta_tnps: bool) -> 
         return words
 
     if layer.op_kind in TNPS_OPS or layer.op_kind in UDMA_OPS:
+        payload_bytes = sim_bytes(max(layer.ref_size, layer.in_size, 1))
         words[0] = OP_UDMA
-        words[1] = sim_bytes(max(layer.ref_size, layer.in_size, 1))
+        words[1] = payload_bytes
         words[2] = addr
         words[3] = 0x1
-        words[4] = sim_bytes(max(layer.in_size, layer.ref_size, 1))
-        words[5] = 1 + (max(layer.ref_size, layer.in_size) // 4096)
+        words[4] = payload_bytes
+        words[5] = 1 + (payload_bytes // 4096)
         words[19] = layer.index
         return words
 
@@ -1886,8 +1931,8 @@ def descriptor_u64_bytes(desc: list[int], lo_word: int) -> bytes:
     return struct.pack("<Q", value)
 
 
-def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
-    if elem_bytes(layer.dtype) != 2 or layer.dtype not in DT_FP:
+def closed_loop_wide_sample_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if elem_bytes(layer.dtype) != 2:
         return []
     if layer.op_kind not in OK_POOL and layer.op_kind not in OK_CONV:
         return []
@@ -1949,6 +1994,77 @@ def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int
                 SMF_LOAD_B,
             )
         )
+    desc[2] = l1_base
+    desc[3] |= READ_FROM_L1_FLAG | MICROBLOCK_FLAG | (1 << 6)
+    desc[27] = l1_result
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    expected = (
+        descriptor_u64_bytes(desc, 16)
+        if layer.dtype in DT_FP else
+        (desc[18] & 0xFFFF_FFFF).to_bytes(4, "little", signed=False)
+    )
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off,
+            expected,
+        )
+    )
+    return descs
+
+
+def closed_loop_fp_sample_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if layer.dtype not in DT_FP:
+        return []
+    return closed_loop_wide_sample_probe(layer, ordinal, result_dram_off)
+
+
+def closed_loop_int16_sample_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if layer.dtype in DT_FP:
+        return []
+    return closed_loop_wide_sample_probe(layer, ordinal, result_dram_off)
+
+
+def closed_loop_fp_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int) -> list[list[int]]:
+    if elem_bytes(layer.dtype) != 2 or layer.dtype not in DT_FP:
+        return []
+    if layer.op_kind not in OK_FP_EWE:
+        return []
+    desc = descriptor_for_layer(layer, ordinal, False)
+    if desc is None or (desc[0] & 0xF) != OP_EWE:
+        return []
+    sample_byte_count = desc[1]
+    if sample_byte_count <= 0 or sample_byte_count > 16:
+        return []
+
+    data = descriptor_for_layer.program_bytes
+    if data[layer.in_off:layer.in_off + sample_byte_count] != descriptor_payload_bytes(desc, 4, sample_byte_count):
+        return []
+    if layer.op_kind in OK_EWE:
+        if data[layer.wgt_off:layer.wgt_off + sample_byte_count] != descriptor_payload_bytes(desc, 8, sample_byte_count):
+            return []
+
+    l1_base = 0x54000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x2FFFF)
+    l1_result = l1_base + 0x80
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(
+            layer,
+            ordinal,
+            layer.in_off,
+            l1_base,
+            sample_byte_count,
+            SMF_LOAD_A,
+        )
+    ]
     desc[2] = l1_base
     desc[3] |= READ_FROM_L1_FLAG | MICROBLOCK_FLAG | (1 << 6)
     desc[27] = l1_result
@@ -2092,24 +2208,57 @@ def closed_loop_conv_probes(
     ordinal: int,
     result_dram_off: int,
     command_budget: int,
+    sample_count: int = DEFAULT_CONV_SAMPLE_COUNT,
 ) -> list[list[int]]:
     output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
-    indices = closed_loop_output_indices(output_elems, command_budget, 4)
     descs: list[list[int]] = []
-    for out_elem_index in indices:
-        remaining = command_budget - len(descs)
-        if remaining < 4:
-            break
-        probe = closed_loop_conv_probe(
-            layer,
-            ordinal + len(descs),
-            result_dram_off,
-            out_elem_index=out_elem_index,
+
+    def nearest_valid_probe(target_index: int) -> tuple[int, list[list[int]]] | None:
+        for delta in range(output_elems):
+            for candidate in (target_index - delta, target_index + delta):
+                if candidate < 0 or candidate >= output_elems:
+                    continue
+                if candidate in sampled_indices:
+                    continue
+                probe = closed_loop_conv_probe(
+                    layer,
+                    ordinal + len(descs),
+                    result_dram_off,
+                    out_elem_index=candidate,
+                )
+                if probe:
+                    return candidate, probe
+        return None
+
+    sampled_indices: set[int] = set()
+    if sample_count > 0:
+        targets = closed_loop_output_indices(
+            output_elems,
+            max(sample_count, 1) * CONV_PROBE_COMMANDS,
+            CONV_PROBE_COMMANDS,
         )
-        if not probe:
-            continue
+    else:
+        targets = closed_loop_output_indices(output_elems, command_budget, CONV_PROBE_COMMANDS)
+
+    for out_elem_index in targets:
+        remaining = command_budget - len(descs)
+        if remaining < CONV_PROBE_COMMANDS:
+            break
+        found = nearest_valid_probe(out_elem_index) if sample_count > 0 else None
+        if found is None:
+            probe = closed_loop_conv_probe(
+                layer,
+                ordinal + len(descs),
+                result_dram_off,
+                out_elem_index=out_elem_index,
+            )
+            if not probe:
+                continue
+            found = (out_elem_index, probe)
+        valid_index, probe = found
         if len(probe) > remaining:
             break
+        sampled_indices.add(valid_index)
         descs.extend(probe)
     return descs
 
@@ -2759,11 +2908,11 @@ def pool_full_ref_crc_descriptor(layer: Layer, ordinal: int) -> list[int] | None
     return words
 
 
-def udma_ref_fill_descriptor(layer: Layer, ordinal: int) -> list[int] | None:
+def udma_ref_fill_descriptor(layer: Layer, ordinal: int, max_fill_bytes: int = MAX_FINAL_OUTPUT_SRAM_BYTES) -> list[int] | None:
     data = descriptor_for_layer.program_bytes
     if layer.ref_size <= 0 or layer.ref_off + layer.ref_size > len(data):
         return None
-    fill_size = min(layer.ref_size, MAX_FINAL_OUTPUT_SRAM_BYTES)
+    fill_size = min(layer.ref_size, max(max_fill_bytes, 1))
     addr = 0x100 + ((layer.index * 0x80 + ordinal * 0x20 + 0x38) & 0x3FFF0)
     words = [0] * WORDS_PER_COMMAND
     words[0] = OP_UDMA
@@ -3152,6 +3301,27 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONV_SRAM_WINDOW_COUNT,
         help="Maximum validated INT8 CONV output SRAM windows per oversized layer. Default: 3",
     )
+    ap.add_argument(
+        "--conv-sample-count",
+        type=int,
+        default=DEFAULT_CONV_SAMPLE_COUNT,
+        help="Default INT8 CONV closed-loop output samples. Use 0 for full coverage. Default: 3",
+    )
+    ap.add_argument(
+        "--full-conv-coverage",
+        action="store_true",
+        help="Validate every INT8 CONV output sample instead of the default sampled probes.",
+    )
+    ap.add_argument(
+        "--check-all-layers",
+        action="store_true",
+        help="Emit closed-loop checks for every layer. Default: only check the final layer.",
+    )
+    ap.add_argument(
+        "--cycle-only",
+        action="store_true",
+        help="Emit op descriptors for cycle measurement only; skip output/final CRC checks.",
+    )
     args = ap.parse_args()
     return args
 
@@ -3159,7 +3329,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     descriptor_for_layer.program_bytes = args.program.read_bytes()
-    descriptor_for_layer.max_payload_bytes = args.max_payload_bytes
+    descriptor_for_layer.max_payload_bytes = 0 if args.cycle_only else args.max_payload_bytes
     layers = parse_layers(args.program)
     commands: list[list[int]] = []
     conv_count = 0
@@ -3177,34 +3347,61 @@ def main() -> int:
     command_limit = max(args.max_commands - 1, 0)
     last_layer_index = layers[-1].index if layers else -1
     for layer in layers:
+        if not (args.check_all_layers or args.cycle_only) and layer.index != last_layer_index:
+            continue
         if len(commands) >= command_limit:
             break
         descs: list[list[int]] = []
         remaining_commands = max(command_limit - len(commands), 0)
         closed_loop_descs: list[list[int]] = []
         result_dram_off = closed_loop_result_dram_off(layer, len(commands))
-        if layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
+        if args.cycle_only:
+            desc = descriptor_for_layer(layer, len(commands), args.enable_meta_tnps)
+            if desc is None and layer.op_kind in GENERIC_REF_OPS:
+                desc = udma_ref_fill_descriptor(layer, len(commands))
+            if desc is not None and (desc[0] & 0xF) != OP_UDMA:
+                desc[3] |= 1 << 14
+            if desc is not None and (desc[0] & 0xF) == OP_CONV:
+                output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+                desc[31] = output_elems & 0xFFFF_FFFF
+            if desc is not None:
+                descs.append(desc)
+        elif layer.op_kind in OK_POOL and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_pool_probes(
                 layer, len(commands), result_dram_off, remaining_commands)
         elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_ewe_probes(
                 layer, len(commands), result_dram_off, remaining_commands)
-        elif layer.op_kind in (OK_S2SPACE, OK_D2SPACE):
+        elif layer.op_kind in (OK_S2SPACE, OK_D2SPACE, OK_RESHAPE):
             closed_loop_descs = closed_loop_tnps_probes(
                 layer, len(commands), result_dram_off,
                 args.max_payload_bytes, remaining_commands)
         elif layer.op_kind in OK_CONV and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_conv_probes(
-                layer, len(commands), result_dram_off, remaining_commands)
+                layer,
+                len(commands),
+                result_dram_off,
+                remaining_commands,
+                0 if args.full_conv_coverage else args.conv_sample_count,
+            )
         elif layer.dtype in DT_FP and (layer.op_kind in OK_POOL or layer.op_kind in OK_CONV):
             closed_loop_descs = closed_loop_fp_sample_probe(
+                layer, len(commands), result_dram_off)
+        elif layer.dtype in DT_FP and layer.op_kind in OK_FP_EWE:
+            closed_loop_descs = closed_loop_fp_ewe_probe(
+                layer, len(commands), result_dram_off)
+        elif layer.op_kind in (OK_POOL | OK_CONV) and elem_bytes(layer.dtype) == 2 and layer.dtype not in DT_FP:
+            closed_loop_descs = closed_loop_int16_sample_probe(
                 layer, len(commands), result_dram_off)
         elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 2 and layer.dtype not in DT_FP:
             closed_loop_descs = closed_loop_int16_ewe_probe(
                 layer, len(commands), result_dram_off)
-        if closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
+        elif layer.op_kind in GENERIC_REF_OPS:
+            closed_loop_descs = closed_loop_ref_passthrough_probe(
+                layer, len(commands), result_dram_off)
+        if not args.cycle_only and closed_loop_descs and len(closed_loop_descs) <= remaining_commands:
             descs.extend(closed_loop_descs)
-        if layer.index == last_layer_index:
+        if not args.cycle_only and layer.index == last_layer_index:
             for desc in descs:
                 if is_sram_crc_descriptor(desc):
                     desc[3] |= 1 << 12

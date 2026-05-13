@@ -24,6 +24,10 @@ FILTER_ALIASES = {
     "ethz_v6": "ETHZ_v6",
     "ethz-v6": "ETHZ_v6",
     "hotspot": "Hotspot",
+    "unit": "UnitTest",
+    "unittest": "UnitTest",
+    "unit_test": "UnitTest",
+    "unit_tflite": "UnitTest",
 }
 PASS_RE = re.compile(
     r"PASS: verilog host-driven .* issued=([0-9]+) done=([0-9]+)"
@@ -53,6 +57,7 @@ WORDS_PER_COMMAND = 32
 DEFAULT_MAX_COMMANDS = 4096
 MDL7_MAGIC = 0x374C444D
 PROGRAM_COL_WIDTH = 34
+RATIO_COL_WIDTH = 14
 SYNTH_CLOCK_HZ = 1_900_000_000.0
 VERILOG_CLOCK_HZ = 100_000_000.0
 
@@ -112,7 +117,7 @@ def collect_bins(filters: list[str], rtl_dir: Path, repo_root: Path, cwd: Path) 
         alias = FILTER_ALIASES.get(pattern.lower())
         candidates: list[Path] = []
         if alias is not None:
-            candidates.extend((bin_root / alias).glob("*.bin"))
+            candidates.extend((bin_root / alias).rglob("*.bin"))
         else:
             p = Path(pattern)
             has_path = p.is_absolute() or "/" in pattern or os.sep in pattern
@@ -227,6 +232,29 @@ def fmt_cycles(value: int | None) -> str:
     return str(value)
 
 
+def parse_cycle_limit(raw: str | None, parser: argparse.ArgumentParser) -> int | None:
+    if raw in (None, ""):
+        return None
+    text = raw.strip().lower().replace("_", "")
+    multiplier = 1
+    if text.endswith("k"):
+        multiplier = 1_000
+        text = text[:-1]
+    elif text.endswith("m"):
+        multiplier = 1_000_000
+        text = text[:-1]
+    elif text.endswith("g"):
+        multiplier = 1_000_000_000
+        text = text[:-1]
+    try:
+        value = float(text)
+    except ValueError:
+        parser.error(f"--cycle limit must be a number, optionally with k/m/g suffix: {raw}")
+    if value < 0:
+        parser.error("--cycle limit must be >= 0")
+    return int(value * multiplier)
+
+
 def fmt_ratio(num: float | None, den: float | None) -> str:
     if num is None or den is None or den == 0:
         return ""
@@ -255,12 +283,33 @@ def has_tensor_crc(refcrc: int, sramcrc: int, finalcrc: int) -> bool:
     return (refcrc + sramcrc + finalcrc) > 0
 
 
-def coverage_label(info: BinInfo, refcrc: int, sramcrc: int, finalbytes: int) -> str:
+def coverage_label(cycle_mode: bool, info: BinInfo, refcrc: int, sramcrc: int, finalbytes: int) -> str:
+    if cycle_mode:
+        return "cycle"
     if (refcrc + sramcrc + finalbytes) == 0:
         return "sample"
     if info.ref_bytes > 0 and finalbytes >= info.ref_bytes:
         return "full"
     return "partial"
+
+
+def is_unit_test_bin(program: Path) -> bool:
+    return "UnitTest" in program.parts
+
+
+def is_perf_comparable(cycle_mode: bool, program: Path, info: BinInfo, finalbytes: int) -> bool:
+    if cycle_mode:
+        return True
+    if is_unit_test_bin(program):
+        return True
+    return info.ref_bytes > 0 and finalbytes >= info.ref_bytes
+
+
+def fmt_perf_ratio(cycle_mode: bool, program: Path, info: BinInfo, finalbytes: int,
+                   verilog_cycles: int | None, synth_cycles: int | None) -> str:
+    if not is_perf_comparable(cycle_mode, program, info, finalbytes):
+        return ""
+    return fmt_ratio(verilog_cycles, synth_cycles)
 
 
 def profile_dir_for(program: Path) -> Path:
@@ -332,7 +381,7 @@ def load_cache(path: Path) -> dict[str, object]:
 
 def save_cache(path: Path, cache: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
 
@@ -382,7 +431,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     repo_root, rtl_dir = repo_paths()
     ap = argparse.ArgumentParser()
     ap.add_argument("--filter", action="append", default=[],
-                    help="bin filter, glob, path, or alias: slice, ethz, hotspot")
+                    help="bin filter, glob, path, or alias: unittest, slice, ethz, hotspot")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=None,
                     help="Manual per-program timeout. Default: auto by bin size/layer class.")
@@ -390,6 +439,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--closed-loop-perf-target", action="store_true",
                     help="Pad closed-loop verilog cycles toward synth profile total_cycles for calibration/debug only.")
+    ap.add_argument("--cycle", nargs="?", const="", default=None, metavar="MAX_CX_CYCLES",
+                    help="Cycle-only run: skip output/CRC checks. Optional limit like 100k or 1m skips rows with cx_cyc above it.")
     ap.add_argument("--require-crc-coverage", action="store_true",
                     help="Fail if the run produces no refcrc/sramcrc coverage.")
     ap.add_argument("--min-ref-bytes", type=int, default=0,
@@ -404,18 +455,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     help="Pass through SRAM-window command budget for oversized INT8 CONV layers.")
     ap.add_argument("--conv-sram-window-count", type=int, default=0,
                     help="Pass through max SRAM-window count for oversized INT8 CONV layers.")
+    ap.add_argument("--conv-sample-count", type=int, default=0,
+                    help="Pass through INT8 CONV closed-loop output sample count. Default: generator default.")
+    ap.add_argument("--full-conv-coverage", action="store_true",
+                    help="Pass through full INT8 CONV output coverage.")
+    ap.add_argument("--check-all-layers", action="store_true",
+                    help="Pass through per-layer closed-loop checks. Default checks final layer only.")
     ap.add_argument("--rerun-all", action="store_true",
                     help="Ignore cached PASS/SKIP results and rerun every matched .bin.")
     ap.add_argument("--cache-file", type=Path,
                     default=rtl_dir / "obj" / "verilog" / "cache.json",
                     help="Regression cache JSON. Default: rtl/obj/verilog/cache.json")
     ap.add_argument("--profile-root", type=Path, default=repo_root / "batch" / "output",
-                    help="Profile directory for synth_ms. Default: batch/output")
+                    help="Profile directory for cx_ms/cx_cyc. Default: batch/output")
+    ap.add_argument("--dpi", action="store_true",
+                    help="Enable DPI datapath helpers (shorthand for --option dpi).")
     ap.add_argument("--option", action="append", default=[],
                     help="verilog option. Use dpi to enable DPI datapath helpers.")
     ap.set_defaults(repo_root=repo_root, rtl_dir=rtl_dir)
     args = ap.parse_args(argv)
-    args.require_crc_coverage = True
+    if args.dpi:
+        args.option.append("dpi")
+    args.cycle_limit_cycles = parse_cycle_limit(args.cycle, ap)
+    args.cycle = args.cycle is not None
+    args.require_crc_coverage = not args.cycle
     return args
 
 
@@ -433,7 +496,12 @@ def normalized_options(options: list[str]) -> set[str]:
 def run_mode(args: argparse.Namespace) -> str:
     options = normalized_options(args.option)
     suffix = "+dpi" if "dpi" in options else ""
-    return "closed_loop_dataflow" + suffix
+    if args.cycle:
+        return "cycle_only" + suffix
+    layer_mode = "+all-layers" if args.check_all_layers else "+final-layer"
+    conv_mode = "+full-conv" if args.full_conv_coverage else ""
+    sample_mode = f"+conv-samples-{args.conv_sample_count}" if args.conv_sample_count > 0 else ""
+    return "closed_loop_dataflow" + suffix + layer_mode + conv_mode + sample_mode
 
 
 def count_commands(hex_path: Path) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]:
@@ -551,16 +619,18 @@ def main(argv: list[str]) -> int:
     mode = run_mode(args)
     print(f"[run_verilog] mode: {mode}")
     options = normalized_options(args.option)
+    ratio_label = "verilog-dpi/cx" if "dpi" in options else "verilog/cx"
+    verilog_cyc_label = "verilog-dpi_cyc" if "dpi" in options else "verilog_cyc"
     if options:
         print(f"[run_verilog] option: {','.join(sorted(options))}")
     if args.rerun_all:
         print("[run_verilog] cache_mode: rerun-all")
     print(
         f"{'idx':>3}  {fmt_program_name('program')} {'class':<6} {'tout':>6} {'ans':<6} {'cov':<7} "
-        f"{'synth_ms':>10} {'synth_cycles':>12} {'verilog_cycles':>20} "
-        f"{'v/synth':>9} {'wall_s':>8}"
+        f"{'cx_ms':>10} {'cx_cyc':>12} {verilog_cyc_label:>20} "
+        f"{ratio_label:>{RATIO_COL_WIDTH}} {'wall_s':>8}"
     )
-    print("-" * (3 + 2 + PROGRAM_COL_WIDTH + 1 + 6 + 1 + 6 + 1 + 6 + 1 + 7 + 1 + 10 + 1 + 12 + 1 + 20 + 1 + 9 + 1 + 8))
+    print("-" * (3 + 2 + PROGRAM_COL_WIDTH + 1 + 6 + 1 + 6 + 1 + 6 + 1 + 7 + 1 + 10 + 1 + 12 + 1 + 20 + 1 + RATIO_COL_WIDTH + 1 + 8))
 
     passed = 0
     failed = 0
@@ -589,6 +659,22 @@ def main(argv: list[str]) -> int:
         rel_bin = display(bin_path, repo_root)
         info = classify_bin(bin_path)
         run_timeout = args.timeout if args.timeout is not None else info.timeout_s
+        synth_cycles_for_target = load_synth_cycles(bin_path, args.profile_root)
+        synth_ms_for_target = synth_ms_from_cycles(synth_cycles_for_target)
+        if (
+            args.cycle and
+            args.cycle_limit_cycles is not None and
+            synth_cycles_for_target is not None and
+            synth_cycles_for_target > args.cycle_limit_cycles
+        ):
+            skipped += 1
+            print(
+                f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
+                f"{fmt_timeout(run_timeout):>6} {'SKIP':<6} {'':<7} "
+                f"{fmt_ms(synth_ms_for_target):>10} {fmt_cycles(synth_cycles_for_target):>12} "
+                f"{'':>20} {'':>{RATIO_COL_WIDTH}} {0.0:>8.2f}"
+            )
+            continue
         cached = None
         if not args.rerun_all:
             cached = cache_hit(
@@ -628,7 +714,11 @@ def main(argv: list[str]) -> int:
             total_srambytes += sramcrc_bytes
             total_finalcrc += finalcrc_count
             total_finalbytes += finalcrc_bytes
-            if synth_ms is not None and synth_cycles is not None and verilog_cycles is not None:
+            comparable_row = is_perf_comparable(args.cycle, bin_path, info, finalcrc_bytes)
+            if (
+                comparable_row and
+                synth_ms is not None and synth_cycles is not None and verilog_cycles is not None
+            ):
                 synth_total += synth_ms
                 synth_cycle_total += synth_cycles
                 verilog_cycle_total += verilog_cycles
@@ -640,23 +730,22 @@ def main(argv: list[str]) -> int:
                     f"{fmt_timeout(run_timeout):>6} {'SKIP':<6} {'':<7} "
                     f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
                     f"{fmt_cycles(verilog_cycles):>20} "
-                    f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {0.0:>8.2f}"
+                    f"{fmt_perf_ratio(args.cycle, bin_path, info, finalcrc_bytes, verilog_cycles, synth_cycles):>{RATIO_COL_WIDTH}} {0.0:>8.2f}"
                 )
                 print("     reason: no byte-moving command (cached)")
             else:
                 passed += 1
                 ans = "CACHED"
-                cov = coverage_label(info, refcrc_count, sramcrc_count, finalcrc_bytes)
+                cov = coverage_label(args.cycle, info, refcrc_count, sramcrc_count, finalcrc_bytes)
                 print(
                     f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
                     f"{fmt_timeout(run_timeout):>6} {ans:<6} {cov:<7} "
                     f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
                     f"{fmt_cycles(verilog_cycles):>20} "
-                    f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {0.0:>8.2f}"
+                    f"{fmt_perf_ratio(args.cycle, bin_path, info, finalcrc_bytes, verilog_cycles, synth_cycles):>{RATIO_COL_WIDTH}} {0.0:>8.2f}"
                 )
             continue
         hex_path = program_dir / f"{bin_path.stem}.verilog.hex"
-        synth_cycles_for_target = load_synth_cycles(bin_path, args.profile_root)
         gen_cmd = [
             sys.executable, str(gen), str(bin_path), "-o", str(hex_path),
             "--max-commands", str(args.max_commands),
@@ -667,13 +756,21 @@ def main(argv: list[str]) -> int:
             gen_cmd.extend(["--conv-sram-window-commands", str(args.conv_sram_window_commands)])
         if args.conv_sram_window_count > 0:
             gen_cmd.extend(["--conv-sram-window-count", str(args.conv_sram_window_count)])
+        if args.conv_sample_count > 0:
+            gen_cmd.extend(["--conv-sample-count", str(args.conv_sample_count)])
+        if args.full_conv_coverage:
+            gen_cmd.append("--full-conv-coverage")
+        if args.check_all_layers:
+            gen_cmd.append("--check-all-layers")
+        if args.cycle:
+            gen_cmd.append("--cycle-only")
         rc, gen_out, _ = run(gen_cmd, repo_root, timeout=run_timeout)
         if rc != 0:
             failed += 1
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
                 f"{fmt_timeout(run_timeout):>6} {'FAIL':<6} {'':<7} "
-                f"{'':>10} {'':>12} {'':>20} {'':>9} {0.0:>8.2f}"
+                f"{'':>10} {'':>12} {'':>20} {'':>{RATIO_COL_WIDTH}} {0.0:>8.2f}"
             )
             print(f"     reason: generator failed rc={rc}: {gen_out.strip()}")
             continue
@@ -706,7 +803,7 @@ def main(argv: list[str]) -> int:
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
                 f"{fmt_timeout(run_timeout):>6} {'SKIP':<6} {'':<7} "
                 f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
-                f"{'':>20} {'':>9} {0.0:>8.2f}"
+                f"{'':>20} {'':>{RATIO_COL_WIDTH}} {0.0:>8.2f}"
             )
             print("     reason: no final command")
             cache_entries[rel_bin] = {
@@ -755,7 +852,11 @@ def main(argv: list[str]) -> int:
         verilog_cycles = int(match.group(3)) if match and match.group(3) is not None else parse_verilog_cycles(out)
         synth_cycles = load_synth_cycles(bin_path, args.profile_root)
         synth_ms = synth_ms_from_cycles(synth_cycles)
-        if synth_ms is not None and synth_cycles is not None and verilog_cycles is not None:
+        comparable_row = is_perf_comparable(args.cycle, bin_path, info, finalcrc_bytes)
+        if (
+            comparable_row and
+            synth_ms is not None and synth_cycles is not None and verilog_cycles is not None
+        ):
             synth_total += synth_ms
             synth_cycle_total += synth_cycles
             verilog_cycle_total += verilog_cycles
@@ -765,13 +866,13 @@ def main(argv: list[str]) -> int:
             done = int(match.group(2))
             passed += 1
             ans = "PASS"
-            cov = coverage_label(info, refcrc_count, sramcrc_count, finalcrc_bytes)
+            cov = coverage_label(args.cycle, info, refcrc_count, sramcrc_count, finalcrc_bytes)
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
                 f"{fmt_timeout(run_timeout):>6} {ans:<6} {cov:<7} "
                 f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
                 f"{fmt_cycles(verilog_cycles):>20} "
-                f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {wall:>8.2f}"
+                f"{fmt_perf_ratio(args.cycle, bin_path, info, finalcrc_bytes, verilog_cycles, synth_cycles):>{RATIO_COL_WIDTH}} {wall:>8.2f}"
             )
             cache_entries[rel_bin] = {
                 "status": "PASS",
@@ -811,10 +912,10 @@ def main(argv: list[str]) -> int:
                 reason = f"TIMEOUT after {run_timeout:.1f}s"
             print(
                 f"{idx:>3}  {fmt_program_name(bin_path.stem)} {info.pattern_class:<6} "
-                f"{fmt_timeout(run_timeout):>6} {'FAIL':<6} {coverage_label(info, refcrc_count, sramcrc_count, finalcrc_bytes):<7} "
+                f"{fmt_timeout(run_timeout):>6} {'FAIL':<6} {coverage_label(args.cycle, info, refcrc_count, sramcrc_count, finalcrc_bytes):<7} "
                 f"{fmt_ms(synth_ms):>10} {fmt_cycles(synth_cycles):>12} "
                 f"{fmt_cycles(verilog_cycles):>20} "
-                f"{fmt_ratio(verilog_cycles, synth_cycles):>9} {wall:>8.2f}"
+                f"{fmt_perf_ratio(args.cycle, bin_path, info, finalcrc_bytes, verilog_cycles, synth_cycles):>{RATIO_COL_WIDTH}} {wall:>8.2f}"
             )
             print(f"     reason: {reason}")
         if args.require_final_output_crc and command_count != 0 and finalcrc_count == 0:
@@ -832,10 +933,10 @@ def main(argv: list[str]) -> int:
     print(
         "[run_verilog] compare: "
         f"comparable={comparable}/{passed + failed} "
-        f"synth_total_ms={fmt_ms(synth_total if comparable else None)} "
-        f"synth_total_cycles={fmt_cycles(synth_cycle_total if comparable else None)} "
-        f"verilog_total_cycles={fmt_cycles(verilog_cycle_total if comparable else None)} "
-        f"v/synth={fmt_ratio(verilog_cycle_total if comparable else None, synth_cycle_total if comparable else None)}"
+        f"cx_total_ms={fmt_ms(synth_total if comparable else None)} "
+        f"cx_total_cyc={fmt_cycles(synth_cycle_total if comparable else None)} "
+        f"verilog_total_cyc={fmt_cycles(verilog_cycle_total if comparable else None)} "
+        f"{ratio_label}={fmt_ratio(verilog_cycle_total if comparable else None, synth_cycle_total if comparable else None)}"
     )
     if args.require_crc_coverage and total_refcrc == 0 and total_sramcrc == 0:
         failed += 1
