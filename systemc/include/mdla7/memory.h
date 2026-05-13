@@ -8,25 +8,21 @@
 // SystemC L1Manager below is still a simplified pass-through router; full
 // priority contention is a future refinement.
 //
-// v2.1 / v3.2: L1Mesh has 16 banks (256-byte interleave) — concurrent
-//       accesses to different banks proceed in parallel, only same-bank
-//       accesses serialize.  Each SRAM macro port = one 16-byte Payload beat
-//       per SRAM cycle and is 1R/W, not independent 1R+1W.  16 banks × 16 byte =
-//       256 B / cycle peak aggregate backend bandwidth
-//       (matches spec §3.2 L1_Manager↔L1Mesh = 16R + 16W Payload lanes).
+// Target L1Mesh: 3 MB = 4 Mesh4x4 tiles. Each Mesh4x4 contains 16 Quad SRAM
+//       macros; each Quad macro is 4 x 1R/W SRAM macro ports, and each SRAM
+//       macro port is one 16-byte Payload beat per SRAM cycle.
+//       The fast timing model keeps the L1Manager edge bandwidth at
+//       16 x 16B R + 16 x 16B W (256 B/cycle per direction). The target CONV
+//       direct edge injects 32 x 16B ACT_R + 32 x 16B WGT_R and bypasses
+//       L1Manager; engine phase models account for those dedicated reads.
 //       Payload is an internal per-beat protocol; tid + last groups beats into
 //       a logical transaction and no burst metadata is carried.
-//       The NoC fabric is modeled as two parallel 4x4 mesh planes sharing this
-//       same 16-bank SRAM backend.
 //       Router input FIFO depth is provisionally 2 flits; current timing only
 //       models edge/router-output/link finish times, not input backpressure.
 //
 // v2.3: DRAM models LPDDR-class row-hit / row-miss latency.
 // v3.1: + DRAM refresh — periodic stall when crossing a refresh boundary.
-// v8.25: spec frequency bump to 1.9 GHz + DRAM dual-channel LPDDR5X-10667.
-//        Bandwidth math at 1.9 GHz, dual x32:
-//          10.667 Gbps/pin × 32 pins × 2 ch / 8 = 85.3 GB/s
-//          85.3 GB/s ÷ 1.9 G cycle/s ≈ 44.9 → BYTES_PER_CYCLE = 48
+// v8.25: DRAM startup latency keeps the LPDDR row-miss scale.
 //        Row-miss tRP+tRCD ≈ 26 ns × 1.9 GHz ≈ 50 cycles (LPDDR5 tighter
 //        than LPDDR6's 30-cyc baseline at 1 GHz).
 //        Refresh: tREFI ≈ 3.9 µs × 1.9 GHz = 7410 cycles → keep 7800 (close
@@ -41,9 +37,10 @@
 //        Rtl = dual-4x4 mesh route plus SRAM bank/port scheduling. Port
 //        conflict is reported as L1Mesh KPI, not selected as a separate mode.
 // v10.1: public mode names are unified across L1 and engines:
-//        fast / rtl / cx. CX is a separately reported mode that starts
-//        from the detailed RTL-style timing path so synthesizable datapath
-//        deltas can be tightened incrementally.
+//        fast / rtl / cx. CX uses the target hierarchy:
+//        8 edge Mesh4x4 fabrics, with each 2 Mesh4x4 mapping to the same
+//        storage Mesh4x4: StorageMesh4x4[4] -> QuadSRAM[16 per mesh]
+//        -> SRAMMacro[4 ports].
 
 #include <systemc>
 #include <array>
@@ -282,9 +279,22 @@ public:
 
 private:
     static constexpr unsigned N_BANKS         = 16;
+    static constexpr unsigned L1MESH_EDGE_MESH4X4_COUNT = 8;
+    static constexpr unsigned L1MESH_STORAGE_MESH4X4_COUNT = 4;
+    static constexpr unsigned MESH4X4_NODES = 16;
+    static constexpr unsigned QUAD_SRAM_PORTS = 4;
+    static constexpr unsigned SRAM_MACRO_WORDS = 768;
     // 16-byte stripe = one Payload beat. Sequential access fans out across
     // all 16 banks → 256 B/cycle peak (matches spec §3.2).
     static constexpr unsigned PAYLOAD_BEAT_BYTES = PAYLOAD_BYTES;
+    static constexpr unsigned SRAM_MACRO_BYTES =
+        SRAM_MACRO_WORDS * PAYLOAD_BEAT_BYTES;
+    static constexpr unsigned QUAD_SRAM_BYTES =
+        QUAD_SRAM_PORTS * SRAM_MACRO_BYTES;
+    static constexpr unsigned MESH4X4_BYTES =
+        MESH4X4_NODES * QUAD_SRAM_BYTES;
+    static constexpr unsigned L1MESH_HIER_BYTES =
+        L1MESH_STORAGE_MESH4X4_COUNT * MESH4X4_BYTES;
     static constexpr unsigned PAYLOAD_FAST_WINDOW_BYTES =
         PayloadPortCount::L1MESH_R * PAYLOAD_BEAT_BYTES;
     static constexpr unsigned PAYLOAD_SCHED_CHUNK_BEATS = 16;
@@ -296,6 +306,10 @@ private:
     static constexpr unsigned SYNTH_L1_PIPE_CYCLES = 3;
     static constexpr double   CORE_CLOCK_GHZ  = 1.9;
     static constexpr double   SRAM_CLOCK_GHZ  = 1.3;
+    static_assert(L1MESH_HIER_BYTES == L1MESH_BYTES,
+                  "L1Mesh hierarchy must match the 3 MB address space");
+    static_assert(PayloadPortCount::L1MESH_R == PayloadPortCount::L1MESH_W,
+                  "hierarchical L1 edge model expects symmetric R/W lanes");
 
     static bool in_process() {
         return sc_core::sc_get_current_process_handle().valid();
@@ -304,7 +318,7 @@ private:
     sc_core::sc_time schedule_latency(uint32_t offset, uint32_t bytes,
                                       bool is_read) {
         if (is_l1_synth_style(timing_mode_)) {
-            return schedule_mesh_latency(offset, bytes, is_read) +
+            return schedule_hierarchical_latency(offset, bytes, is_read) +
                    sc_core::sc_time(double(SYNTH_L1_PIPE_CYCLES), sc_core::SC_NS);
         }
         if (is_l1_rtl_style(timing_mode_))
@@ -351,15 +365,38 @@ private:
                     (display > sram_cycles + pipe_cycles + 2)
                         ? (display - sram_cycles - pipe_cycles - 2)
                         : 1;
-                RtlPhaseTrace mesh;
-                mesh.name = is_l1_synth_style(timing_mode_) ? "noc_pipe" : "mesh";
-                mesh.cycles = route_cycles;
-                mesh.read_bytes = is_read ? bytes : 0;
-                mesh.write_bytes = is_read ? 0 : bytes;
-                mesh.stall = is_l1_synth_style(timing_mode_)
-                            ? "synth_mesh_route"
-                            : "mesh_route";
-                phases.push_back(mesh);
+                if (is_l1_synth_style(timing_mode_)) {
+                    RtlPhaseTrace l1mesh;
+                    l1mesh.name = "l1mesh_select";
+                    l1mesh.cycles = 1;
+                    l1mesh.lanes = L1MESH_EDGE_MESH4X4_COUNT;
+                    l1mesh.stall = "synth_l1mesh8_decode";
+                    phases.push_back(l1mesh);
+
+                    RtlPhaseTrace mesh4x4;
+                    mesh4x4.name = "mesh4x4_route";
+                    mesh4x4.cycles = route_cycles;
+                    mesh4x4.read_bytes = is_read ? bytes : 0;
+                    mesh4x4.write_bytes = is_read ? 0 : bytes;
+                    mesh4x4.lanes = MESH4X4_NODES;
+                    mesh4x4.stall = "synth_mesh4x4_route";
+                    phases.push_back(mesh4x4);
+
+                    RtlPhaseTrace quad;
+                    quad.name = "quad_sram_select";
+                    quad.cycles = 1;
+                    quad.lanes = QUAD_SRAM_PORTS;
+                    quad.stall = "synth_quad_sram_select";
+                    phases.push_back(quad);
+                } else {
+                    RtlPhaseTrace mesh;
+                    mesh.name = "mesh";
+                    mesh.cycles = route_cycles;
+                    mesh.read_bytes = is_read ? bytes : 0;
+                    mesh.write_bytes = is_read ? 0 : bytes;
+                    mesh.stall = "mesh_route";
+                    phases.push_back(mesh);
+                }
                 if (pipe_cycles) {
                     RtlPhaseTrace pipe;
                     pipe.name = "pipe_reg";
@@ -374,8 +411,12 @@ private:
             sram.cycles = sram_cycles;
             sram.read_bytes = is_read ? bytes : 0;
             sram.write_bytes = is_read ? 0 : bytes;
-            sram.lanes = N_BANKS;
-            sram.stall = is_read ? "synth_sram_read_bank" : "synth_sram_write_bank";
+            sram.lanes = is_l1_synth_style(timing_mode_)
+                ? L1MESH_STORAGE_MESH4X4_COUNT * MESH4X4_NODES * QUAD_SRAM_PORTS
+                : N_BANKS;
+            sram.stall = is_l1_synth_style(timing_mode_)
+                ? (is_read ? "synth_sram_macro_read" : "synth_sram_macro_write")
+                : (is_read ? "synth_sram_read_bank" : "synth_sram_write_bank");
             phases.push_back(sram);
 
             RtlPhaseTrace rsp;
@@ -588,6 +629,213 @@ private:
             mesh_router_out_finish_[plane][node_id(x, y)][DIR_LOCAL], now, beats,
             stats_.local_wait_ns, stats_.local_service_ns);
         ready = max_time(ready, start);
+    }
+
+    struct HierTarget {
+        uint32_t edge_mesh = 0;
+        uint32_t storage_mesh = 0;
+        uint32_t node = 0;
+        uint32_t port = 0;
+    };
+
+    static HierTarget hierarchical_target(uint32_t addr) {
+        const uint32_t stripe = (addr / BANK_STRIDE) %
+            (L1MESH_STORAGE_MESH4X4_COUNT * MESH4X4_NODES * QUAD_SRAM_PORTS *
+             SRAM_MACRO_WORDS);
+        HierTarget t;
+        t.storage_mesh = stripe % L1MESH_STORAGE_MESH4X4_COUNT;
+        t.edge_mesh = t.storage_mesh +
+            L1MESH_STORAGE_MESH4X4_COUNT *
+            ((stripe / (L1MESH_STORAGE_MESH4X4_COUNT *
+                        MESH4X4_NODES * QUAD_SRAM_PORTS)) & 1u);
+        t.node = (stripe / L1MESH_STORAGE_MESH4X4_COUNT) % MESH4X4_NODES;
+        t.port = (stripe / (L1MESH_STORAGE_MESH4X4_COUNT * MESH4X4_NODES)) %
+                 QUAD_SRAM_PORTS;
+        return t;
+    }
+
+    void reserve_hier_route(uint32_t mesh,
+                            uint32_t src_x, uint32_t src_y,
+                            uint32_t dst_x, uint32_t dst_y,
+                            uint32_t beats,
+                            sc_core::sc_time now,
+                            sc_core::sc_time& ready) {
+        uint32_t x = src_x;
+        uint32_t y = src_y;
+        while (x != dst_x) {
+            const bool east = x < dst_x;
+            const uint32_t out_dir = east ? DIR_E : DIR_W;
+            sc_core::sc_time start = reserve_resource(
+                hier_router_out_finish_[mesh][node_id(x, y)][out_dir], now,
+                beats, stats_.router_wait_ns, stats_.router_service_ns);
+            ready = max_time(ready, start);
+            if (east) {
+                start = reserve_resource(hier_hlink_finish_[mesh][y][x][0],
+                                         now, beats, stats_.link_wait_ns,
+                                         stats_.link_service_ns);
+                ready = max_time(ready, start);
+                ++x;
+            } else {
+                start = reserve_resource(hier_hlink_finish_[mesh][y][x - 1][1],
+                                         now, beats, stats_.link_wait_ns,
+                                         stats_.link_service_ns);
+                ready = max_time(ready, start);
+                --x;
+            }
+        }
+        while (y != dst_y) {
+            const bool south = y < dst_y;
+            const uint32_t out_dir = south ? DIR_S : DIR_N;
+            sc_core::sc_time start = reserve_resource(
+                hier_router_out_finish_[mesh][node_id(x, y)][out_dir], now,
+                beats, stats_.router_wait_ns, stats_.router_service_ns);
+            ready = max_time(ready, start);
+            if (south) {
+                start = reserve_resource(hier_vlink_finish_[mesh][y][x][0],
+                                         now, beats, stats_.link_wait_ns,
+                                         stats_.link_service_ns);
+                ready = max_time(ready, start);
+                ++y;
+            } else {
+                start = reserve_resource(hier_vlink_finish_[mesh][y - 1][x][1],
+                                         now, beats, stats_.link_wait_ns,
+                                         stats_.link_service_ns);
+                ready = max_time(ready, start);
+                --y;
+            }
+        }
+        sc_core::sc_time start = reserve_resource(
+            hier_router_out_finish_[mesh][node_id(x, y)][DIR_LOCAL], now,
+            beats, stats_.local_wait_ns, stats_.local_service_ns);
+        ready = max_time(ready, start);
+    }
+
+    sc_core::sc_time schedule_hierarchical_latency(uint32_t offset,
+                                                   uint32_t bytes,
+                                                   bool is_read) {
+        using PortArray = std::array<uint32_t, QUAD_SRAM_PORTS>;
+        using NodeArray = std::array<PortArray, MESH4X4_NODES>;
+        using MeshArray = std::array<NodeArray, L1MESH_STORAGE_MESH4X4_COUNT>;
+        using EdgeNodeArray = std::array<NodeArray, L1MESH_EDGE_MESH4X4_COUNT>;
+        using SeenPorts = std::array<bool, QUAD_SRAM_PORTS>;
+        using SeenNodes = std::array<SeenPorts, MESH4X4_NODES>;
+        using SeenMesh = std::array<SeenNodes, L1MESH_STORAGE_MESH4X4_COUNT>;
+
+        const sc_core::sc_time now = sc_core::sc_time_stamp();
+        const uint32_t end = offset + bytes;
+        sc_core::sc_time chunk_now = now;
+
+        stats_.accesses += 1;
+        stats_.bytes += bytes;
+        for (uint32_t chunk_off = offset; chunk_off < end; ) {
+            const uint32_t chunk_end = std::min<uint32_t>(
+                end, chunk_off + PAYLOAD_SCHED_CHUNK_BYTES);
+            MeshArray macro_bytes{};
+            MeshArray macro_addr{};
+            EdgeNodeArray route_bytes{};
+            SeenMesh macro_seen{};
+            uint64_t chunk_stripes = 0;
+
+            for (uint32_t a = chunk_off; a < chunk_end; ) {
+                const uint32_t next_stripe =
+                    ((a / BANK_STRIDE) + 1) * BANK_STRIDE;
+                const uint32_t beat_chunk = std::min(chunk_end, next_stripe) - a;
+                const HierTarget t = hierarchical_target(a);
+                macro_bytes[t.storage_mesh][t.node][t.port] += beat_chunk;
+                route_bytes[t.edge_mesh][t.node][t.port] += beat_chunk;
+                if (!macro_seen[t.storage_mesh][t.node][t.port]) {
+                    macro_seen[t.storage_mesh][t.node][t.port] = true;
+                    macro_addr[t.storage_mesh][t.node][t.port] = a;
+                }
+                ++chunk_stripes;
+                a += beat_chunk;
+            }
+
+            stats_.stripes += chunk_stripes;
+            stats_.chunks += 1;
+
+            const uint32_t chunk_bytes = chunk_end - chunk_off;
+            const uint32_t aggregate_beats =
+                ceil_div(chunk_bytes, PAYLOAD_FAST_WINDOW_BYTES);
+
+            sc_core::sc_time best_start;
+            bool have_best = false;
+            unsigned best_lane = 0;
+            const unsigned rw = is_read ? 0 : 1;
+            for (unsigned lane = 0; lane < PayloadPortCount::L1MESH_R; ++lane) {
+                const sc_core::sc_time finish = hier_edge_finish_[rw][lane];
+                const sc_core::sc_time start =
+                    (finish > chunk_now) ? finish : chunk_now;
+                if (!have_best || start < best_start) {
+                    best_start = start;
+                    best_lane = lane;
+                    have_best = true;
+                }
+            }
+            const sc_core::sc_time ingress_ready = reserve_resource(
+                hier_edge_finish_[rw][best_lane], chunk_now, aggregate_beats,
+                stats_.edge_wait_ns, stats_.edge_service_ns);
+
+            sc_core::sc_time chunk_finish = chunk_now;
+            for (uint32_t edge_mesh = 0; edge_mesh < L1MESH_EDGE_MESH4X4_COUNT; ++edge_mesh) {
+                for (uint32_t node = 0; node < MESH4X4_NODES; ++node) {
+                    for (uint32_t port = 0; port < QUAD_SRAM_PORTS; ++port) {
+                        const uint32_t route_chunk = route_bytes[edge_mesh][node][port];
+                        if (!route_chunk) continue;
+                        const uint32_t beats = ceil_div(route_chunk, BYTES_PER_CYCLE);
+                        const uint32_t dst_x = node % MESH_W;
+                        const uint32_t dst_y = node / MESH_W;
+                        sc_core::sc_time ready = ingress_ready;
+                        const uint32_t west_dist = dst_x;
+                        const uint32_t east_dist = (MESH_W - 1) - dst_x;
+                        const uint32_t src_x =
+                            (west_dist <= east_dist) ? 0 : (MESH_W - 1);
+                        const uint32_t src_y = dst_y;
+                        reserve_hier_route(edge_mesh, src_x, src_y, dst_x, dst_y,
+                                           beats, chunk_now, ready);
+                    }
+                }
+            }
+
+            for (uint32_t mesh = 0; mesh < L1MESH_STORAGE_MESH4X4_COUNT; ++mesh) {
+                for (uint32_t node = 0; node < MESH4X4_NODES; ++node) {
+                    for (uint32_t port = 0; port < QUAD_SRAM_PORTS; ++port) {
+                        const uint32_t macro_chunk = macro_bytes[mesh][node][port];
+                        if (!macro_chunk) continue;
+                        sc_core::sc_time ready = ingress_ready;
+                        const double sram_service_before = stats_.sram_service_ns;
+                        probe_payload_input(ready, is_read, node,
+                                            macro_addr[mesh][node][port]);
+                        sc_core::sc_time t = service_sram_beat(
+                            hier_sram_macro_finish_[mesh][node][port],
+                            ready, macro_chunk);
+                        const double lane_service =
+                            stats_.sram_service_ns - sram_service_before;
+                        Stats::Lane& lane = is_read ? stats_.read_lane[node]
+                                                    : stats_.write_lane[node];
+                        lane.accesses += 1;
+                        lane.bytes += macro_chunk;
+                        const double latency = ns(t - chunk_now);
+                        const double lane_wait =
+                            std::max(0.0, latency - lane_service);
+                        lane.latency_ns += latency;
+                        lane.wait_ns += lane_wait;
+                        lane.service_ns += lane_service;
+                        if (latency > lane.max_latency_ns)
+                            lane.max_latency_ns = latency;
+                        if (lane_wait > lane.max_wait_ns)
+                            lane.max_wait_ns = lane_wait;
+                        if (lane_service > lane.max_service_ns)
+                            lane.max_service_ns = lane_service;
+                        if (t > chunk_finish) chunk_finish = t;
+                    }
+                }
+            }
+            chunk_now = chunk_finish;
+            chunk_off = chunk_end;
+        }
+        stats_.imposed_wait_ns += ns(chunk_now - now);
+        return chunk_now;
     }
 
     // RTL mode: 16 SRAM banks sit behind two parallel 4x4 mesh planes. The
@@ -816,6 +1064,12 @@ private:
     sc_core::sc_time mesh_router_out_finish_[MESH_PLANES][N_BANKS][5];
     sc_core::sc_time mesh_hlink_finish_[MESH_PLANES][MESH_H][MESH_W - 1][2];
     sc_core::sc_time mesh_vlink_finish_[MESH_PLANES][MESH_H - 1][MESH_W][2];
+    sc_core::sc_time hier_edge_finish_[2][PayloadPortCount::L1MESH_R];
+    sc_core::sc_time hier_router_out_finish_[L1MESH_EDGE_MESH4X4_COUNT][MESH4X4_NODES][5];
+    sc_core::sc_time hier_hlink_finish_[L1MESH_EDGE_MESH4X4_COUNT][MESH_H][MESH_W - 1][2];
+    sc_core::sc_time hier_vlink_finish_[L1MESH_EDGE_MESH4X4_COUNT][MESH_H - 1][MESH_W][2];
+    sc_core::sc_time hier_sram_macro_finish_
+        [L1MESH_STORAGE_MESH4X4_COUNT][MESH4X4_NODES][QUAD_SRAM_PORTS];
     static constexpr unsigned PAYLOAD_INPUTS =
         PayloadPortCount::L1MESH_R + PayloadPortCount::L1MESH_W;
     std::ofstream payload_probe_;
@@ -857,18 +1111,16 @@ public:
 private:
     static constexpr uint32_t ROW_BYTES        = 8 * 1024;   // 8 KB row
     static constexpr uint32_t N_BANKS          = 16;
-    // v8.25: dual-channel LPDDR5X-10667 @ 1.9 GHz core clock.
-    //   85.3 GB/s ÷ 1.9 G cyc/s = 44.9 B/cyc → BYTES_PER_CYCLE = 48.
+    // Target UDMA <-> DRAM bus: 4 x 16B AXI R/W = 64 B/cycle.
     //   tRP+tRCD ≈ 26 ns at 1.9 GHz = ~50 cycles.
     //   Refresh tuned for LPDDR5 tRFC/tREFI ratio.
     //   AXI burst length = 16 beats. Since each beat is 128b/16B, DRAM timing
     //   charges whole 256B burst windows touched by an access.
-    // (v8.11 LPDDR6 baseline at 1 GHz was 64 B/cyc + 30 cyc miss + 100 cyc
-    //  refresh-stall; replaced here to reflect the new spec.)
-    static constexpr unsigned AXI_BEAT_BYTES   = 16;
+    static constexpr unsigned AXI_LANES        = 4;
+    static constexpr unsigned AXI_BEAT_BYTES   = PAYLOAD_BYTES;
     static constexpr unsigned AXI_BURST_BEATS  = 16;
     static constexpr unsigned AXI_BURST_BYTES  = AXI_BURST_BEATS * AXI_BEAT_BYTES;
-    static constexpr unsigned BYTES_PER_CYCLE  = 48;
+    static constexpr unsigned BYTES_PER_CYCLE  = AXI_LANES * AXI_BEAT_BYTES;
     static constexpr unsigned ROW_MISS_PENALTY = 50;          // cycles
     static constexpr unsigned REFRESH_PERIOD   = 7800;        // cycles (~ tREFI / 8)
     static constexpr unsigned REFRESH_STALL    = 200;         // cycles per refresh

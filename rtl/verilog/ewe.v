@@ -6,6 +6,8 @@
 /* verilator lint_off DECLFILENAME */
 module vf_ewe_sample_engine #(
     parameter MAX_ELEMS = 16,
+    parameter READ_BYTES_PER_CYCLE = 256,
+    parameter WRITE_BYTES_PER_CYCLE = 128,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (
@@ -129,6 +131,8 @@ module vf_ewe_sample_engine #(
     wire [7:0] safe_fp_count = (elem_count == 8'd0) ? 8'd1 :
                                (elem_count > MAX_FP_COUNT) ? MAX_FP_COUNT :
                                elem_count;
+    wire [31:0] ewe_read_bytes = (fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
+                                                            {24'd0, safe_count};
 
     function [31:0] fnv_byte;
         input [31:0] crc;
@@ -390,10 +394,12 @@ module vf_ewe_sample_engine #(
                           (state == ST_B) || (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
-    assign l1_req_bytes = (state == ST_STORE) ? store_byte_count_value :
-                          ((fp_mode || int16_mode) ? ({24'd0, safe_fp_count} << 1) :
-                                                     {24'd0, safe_count});
-    assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_bytes = (state == ST_STORE) ? store_byte_count_value : ewe_read_bytes;
+    assign l1_req_payload_cycles =
+        (state == ST_STORE) ? ((store_byte_count_value + WRITE_BYTES_PER_CYCLE - 32'd1) /
+                               WRITE_BYTES_PER_CYCLE + 32'd1) :
+        ((ewe_read_bytes + READ_BYTES_PER_CYCLE - 32'd1) /
+         READ_BYTES_PER_CYCLE + 32'd1);
     assign l1_req_wdata = l1_req_write ? store_wdata_value : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write ? store_wstrb_value : {DATA_WIDTH/8{1'b0}};
     assign out_q = first_lane_value[7:0];

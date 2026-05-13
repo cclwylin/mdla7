@@ -20,26 +20,31 @@ module vf_l1mesh_route_estimator #(
     output     [1:0]  bank_y
 );
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [15:0] addr_unused = {addr[21:10], addr[3:0]};
+    wire [7:0] addr_unused = addr[3:0];
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [5:0] bank_global = addr[9:4];
-    wire [1:0] tile_id = bank_global[5:4];
-    wire [3:0] bank_id = bank_global[3:0];
+    wire [31:0] word_addr = {10'd0, addr} >> 4;
+    wire [1:0] storage_mesh_id = word_addr[1:0];
+    wire [3:0] quad_sram_id = word_addr[5:2];
+    wire [1:0] sram_macro_port = word_addr[7:6];
+    wire       edge_mesh_half = word_addr[8];
+    wire [1:0] edge_mesh_x = {edge_mesh_half, storage_mesh_id[0]};
+    wire [1:0] edge_mesh_y = {1'b0, storage_mesh_id[1]};
     wire [31:0] global_dx;
     wire [31:0] global_dy;
     wire [31:0] local_hops;
 
-    assign tile_x = {1'b0, tile_id[0]};
-    assign tile_y = {1'b0, tile_id[1]};
-    assign bank_x = bank_id[1:0];
-    assign bank_y = bank_id[3:2];
-    assign global_dx = (source_x > tile_x)
-        ? ({30'd0, source_x} - {30'd0, tile_x})
-        : ({30'd0, tile_x} - {30'd0, source_x});
-    assign global_dy = (source_y > tile_y)
-        ? ({30'd0, source_y} - {30'd0, tile_y})
-        : ({30'd0, tile_y} - {30'd0, source_y});
-    assign local_hops = {30'd0, bank_x} + {30'd0, bank_y};
+    assign tile_x = edge_mesh_x;
+    assign tile_y = edge_mesh_y;
+    assign bank_x = quad_sram_id[1:0];
+    assign bank_y = quad_sram_id[3:2];
+    assign global_dx = (source_x > edge_mesh_x)
+        ? ({30'd0, source_x} - {30'd0, edge_mesh_x})
+        : ({30'd0, edge_mesh_x} - {30'd0, source_x});
+    assign global_dy = (source_y > edge_mesh_y)
+        ? ({30'd0, source_y} - {30'd0, edge_mesh_y})
+        : ({30'd0, edge_mesh_y} - {30'd0, source_y});
+    assign local_hops = {30'd0, bank_x} + {30'd0, bank_y} +
+                        {30'd0, sram_macro_port};
 
     always @* begin
         case (source_id)

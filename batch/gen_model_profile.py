@@ -320,6 +320,12 @@ def main() -> None:
     ap.add_argument("--hide-mdla6-cx", "--hide-cx", dest="hide_mdla6_cx",
                     action="store_true",
                     help="hide mdla6_cx and myms/mdla6_cx comparison columns")
+    ap.add_argument("--hide-mode-columns", action="store_true",
+                    help="hide conflict/mesh timing columns; show only fast timing")
+    ap.add_argument("--primary-label", default="fast",
+                    help="label for the primary MDLA7 timing column")
+    ap.add_argument("--ratio-label", default="f/mdla6_cx",
+                    help="label for the mdla7/mdla6_cx ratio column")
     args = ap.parse_args()
 
     metrics_csvs = [Path(p) for p in args.metrics_csv]
@@ -336,15 +342,37 @@ def main() -> None:
     title = args.title
     show_mdla6_cx = not args.hide_mdla6_cx
     show_mdla6_cx_json = "true" if show_mdla6_cx else "false"
+    show_mode_columns = not args.hide_mode_columns
+    show_mode_columns_json = "true" if show_mode_columns else "false"
+    primary_label = args.primary_label
+    ratio_label = args.ratio_label
+    primary_label_html = (
+        primary_label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
+    ratio_label_html = (
+        ratio_label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
+    ratio_label_json = json.dumps(ratio_label)
     show_mb = any(r.get("fuse_hit") or r.get("mb_hit") or r.get("mb_count") or r.get("mb_stages")
                   for r in rows)
     show_mb_json = "true" if show_mb else "false"
-    default_sort_key = "ratio" if show_mdla6_cx else "mesh_ratio"
+    default_sort_key = "ratio" if show_mdla6_cx else "our_ms"
     default_sort_key_json = json.dumps(default_sort_key)
     mdla6_cx_headers = """
       <th class="num"><button class="sort-btn" data-sort-key="mdla6_cx">mdla6_cx <span class="sort-mark"></span></button></th>""" if show_mdla6_cx else ""
-    ratio_headers = """
-      <th class="num"><button class="sort-btn" data-sort-key="ratio">myms/mdla6_cx <span class="sort-mark"></span></button></th>""" if show_mdla6_cx else ""
+    ratio_headers = f"""
+      <th class="num"><button class="sort-btn" data-sort-key="ratio">{ratio_label_html} <span class="sort-mark"></span></button></th>""" if show_mdla6_cx else ""
+    chart_button = f"""
+  <button id="chart-btn">Generate {ratio_label_html} Chart</button>""" if show_mdla6_cx else ""
+    mode_headers = """
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>""" if show_mode_columns else ""
+    mode_ratio_headers = """
+      <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="mesh_conflict_ratio">mesh/conflict <span class="sort-mark"></span></button></th>""" if show_mode_columns else ""
     mb_headers = """
       <th><button class="sort-btn" data-sort-key="fuse_hit">fuse <span class="sort-mark"></span></button></th>
       <th class="num"><button class="sort-btn" data-sort-key="mb_count">mb <span class="sort-mark"></span></button></th>
@@ -392,6 +420,12 @@ td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 a {{ color:var(--link); text-decoration:none; }}
 a:hover {{ text-decoration:underline; }}
 tr:hover td {{ background:#f4f7fb; }}
+.chart-panel {{ display:none; margin:0 0 16px; padding:14px; background:var(--panel);
+                border:1px solid var(--line); }}
+.chart-panel.active {{ display:block; }}
+.chart-panel svg {{ width:100%; height:auto; display:block; }}
+.chart-title {{ margin:0 0 8px; font-weight:600; }}
+.chart-note {{ margin:8px 0 0; color:var(--muted); font-size:12px; }}
 </style>
 </head>
 <body>
@@ -399,23 +433,22 @@ tr:hover td {{ background:#f4f7fb; }}
 <h1>{title}</h1>
 <div class="bar">
   <button id="refresh">Refresh Output</button>
+{chart_button}
   <input id="filter" placeholder="filter pattern">
   <span class="meta" id="status"></span>
 </div>
+<section id="chart-panel" class="chart-panel"></section>
 <table>
   <thead>
     <tr>
       <th class="pattern"><button class="sort-btn" data-sort-key="pattern">pattern <span class="sort-mark"></span></button></th>
       <th><button class="sort-btn" data-sort-key="stem">link <span class="sort-mark"></span></button></th>
 {mdla6_cx_headers}
-      <th class="num"><button class="sort-btn" data-sort-key="our_ms">our_ms <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="conflict_ms">conflict_ms <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="mesh_ms">mesh_ms <span class="sort-mark"></span></button></th>
+      <th class="num"><button class="sort-btn" data-sort-key="our_ms">{primary_label_html} <span class="sort-mark"></span></button></th>
+{mode_headers}
 {ratio_headers}
 {mb_headers}
-      <th class="num"><button class="sort-btn" data-sort-key="conflict_ratio">conflict/fast <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="mesh_ratio">mesh/fast <span class="sort-mark"></span></button></th>
-      <th class="num"><button class="sort-btn" data-sort-key="mesh_conflict_ratio">mesh/conflict <span class="sort-mark"></span></button></th>
+{mode_ratio_headers}
     </tr>
   </thead>
   <tbody id="rows"></tbody>
@@ -427,8 +460,10 @@ const LIVE_CSV = {live_csv_json};
 const OUTPUT_DIR = {output_dir_json};
 const ONLY_METRIC_ROWS = {only_metric_rows_json};
 const SHOW_MDLA6_CX = {show_mdla6_cx_json};
+const SHOW_MODE_COLUMNS = {show_mode_columns_json};
 const SHOW_MB = {show_mb_json};
 const DEFAULT_SORT_KEY = {default_sort_key_json};
+const RATIO_LABEL = {ratio_label_json};
 let rows = EMBEDDED_ROWS.slice();
 let sortState = {{ key: DEFAULT_SORT_KEY, dir: "desc", default: true }};
 
@@ -552,36 +587,89 @@ function updateSortButtons() {{
       mark.textContent = "";
   }});
 }}
-function render() {{
+function currentFilteredRows() {{
   const q = document.getElementById("filter").value.trim().toLowerCase();
-  const body = document.getElementById("rows");
-  body.innerHTML = "";
+  const out = [];
   for (const r of sortRows(rows.slice())) {{
     const parts = [r.pattern, r.stem || "",
-                   fmtMs(r.our_ms), fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+                   fmtMs(r.our_ms),
                    r.fuse_hit || "", r.fuse_flows || "", r.streamed_layers || "",
-                   r.mb_count || "", r.mb_stages || "",
-                   fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r)];
+                   r.mb_count || "", r.mb_stages || ""];
     if (SHOW_MDLA6_CX) parts.push(r.mdla6_cx || "", fmtRatio(r));
+    if (SHOW_MODE_COLUMNS) parts.push(
+      fmtMs(r.conflict_ms), fmtMs(r.mesh_ms),
+      fmtConflictRatio(r), fmtMeshRatio(r), fmtMeshConflictRatio(r));
     const allText = parts.join(" ").toLowerCase();
-    if (q && !allText.includes(q)) continue;
+    if (!q || allText.includes(q)) out.push(r);
+  }}
+  return out;
+}}
+function render() {{
+  const body = document.getElementById("rows");
+  body.innerHTML = "";
+  const visible = currentFilteredRows();
+  for (const r of visible) {{
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${{esc(r.pattern)}}</td>` +
       `<td><a href="${{escAttr(r.link)}}">${{esc(r.label || r.stem || r.pattern)}}</a></td>` +
       (SHOW_MDLA6_CX ? `<td class="num">${{esc(r.mdla6_cx || "")}}</td>` : "") +
       `<td class="num">${{esc(fmtMs(r.our_ms))}}</td>` +
-      `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td>` +
-      `<td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` +
+      (SHOW_MODE_COLUMNS ? `<td class="num">${{esc(fmtMs(r.conflict_ms))}}</td><td class="num">${{esc(fmtMs(r.mesh_ms))}}</td>` : "") +
       (SHOW_MDLA6_CX ? `<td class="num">${{esc(fmtRatio(r))}}</td>` : "") +
       (SHOW_MB ? `<td>${{esc(r.fuse_hit || "")}}</td><td class="num">${{esc(r.mb_count || "")}}</td><td>${{esc(r.mb_stages || "")}}</td>` : "") +
-      `<td class="num">${{esc(fmtConflictRatio(r))}}</td>` +
-      `<td class="num">${{esc(fmtMeshRatio(r))}}</td>` +
-      `<td class="num">${{esc(fmtMeshConflictRatio(r))}}</td>`;
+      (SHOW_MODE_COLUMNS ? `<td class="num">${{esc(fmtConflictRatio(r))}}</td><td class="num">${{esc(fmtMeshRatio(r))}}</td><td class="num">${{esc(fmtMeshConflictRatio(r))}}</td>` : "");
     body.appendChild(tr);
   }}
   document.getElementById("status").textContent =
-    `${{body.children.length}} / ${{rows.length}} profiles`;
+    `${{visible.length}} / ${{rows.length}} profiles`;
   updateSortButtons();
+}}
+function renderFcChart() {{
+  if (!SHOW_MDLA6_CX) return;
+  const panel = document.getElementById("chart-panel");
+  const data = currentFilteredRows()
+    .map(r => ({{ pattern: r.pattern, value: ratioOf(r) }}))
+    .filter(d => d.value !== null && Number.isFinite(d.value));
+  if (!data.length) {{
+    panel.classList.add("active");
+    panel.innerHTML = `<p class="chart-title">${{esc(RATIO_LABEL)}} by Pattern</p><p class="chart-note">No ${{esc(RATIO_LABEL)}} data in the current filter.</p>`;
+    return;
+  }}
+  const w = Math.max(900, data.length * 24 + 120);
+  const h = 420, left = 56, right = 24, top = 28, bottom = 128;
+  const plotW = w - left - right, plotH = h - top - bottom;
+  const maxY = Math.max(1, ...data.map(d => d.value)) * 1.12;
+  const x = i => left + (data.length === 1 ? plotW / 2 : i * plotW / (data.length - 1));
+  const y = v => top + plotH - (v / maxY) * plotH;
+  const points = data.map((d, i) => `${{x(i).toFixed(1)}},${{y(d.value).toFixed(1)}}`).join(" ");
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(t => t * maxY);
+  const grid = ticks.map(v => {{
+    const yy = y(v);
+    return `<line x1="${{left}}" y1="${{yy}}" x2="${{w-right}}" y2="${{yy}}" stroke="#e5e9f0"/><text x="${{left-8}}" y="${{yy+4}}" text-anchor="end" font-size="11" fill="#657080">${{v.toFixed(2)}}</text>`;
+  }}).join("");
+  const labels = data.map((d, i) => {{
+    const xx = x(i);
+    const label = esc(d.pattern);
+    return `<g transform="translate(${{xx}},${{h-bottom+12}}) rotate(55)"><text font-size="10" fill="#334155">${{label}}</text></g>`;
+  }}).join("");
+  const dots = data.map((d, i) => {{
+    const xx = x(i), yy = y(d.value);
+    return `<circle cx="${{xx}}" cy="${{yy}}" r="3.5" fill="#0b5cad"><title>${{esc(d.pattern)}} ${{esc(RATIO_LABEL)}}=${{d.value.toFixed(3)}}</title></circle>`;
+  }}).join("");
+  panel.classList.add("active");
+  panel.innerHTML = `
+    <p class="chart-title">${{esc(RATIO_LABEL)}} by Pattern</p>
+    <svg viewBox="0 0 ${{w}} ${{h}}" role="img" aria-label="${{esc(RATIO_LABEL)}} line chart">
+      <rect x="0" y="0" width="${{w}}" height="${{h}}" fill="#fff"/>
+      ${{grid}}
+      <line x1="${{left}}" y1="${{top}}" x2="${{left}}" y2="${{h-bottom}}" stroke="#94a3b8"/>
+      <line x1="${{left}}" y1="${{h-bottom}}" x2="${{w-right}}" y2="${{h-bottom}}" stroke="#94a3b8"/>
+      <polyline fill="none" stroke="#0b5cad" stroke-width="2.2" points="${{points}}"/>
+      ${{dots}}
+      ${{labels}}
+      <text x="${{left}}" y="18" font-size="12" fill="#657080">y: ${{esc(RATIO_LABEL)}}</text>
+    </svg>
+    <p class="chart-note">Chart uses the current table filter and sort order.</p>`;
 }}
 function esc(s) {{
   return String(s ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
@@ -691,6 +779,10 @@ function shortLinkLabel(stem) {{
   return base;
 }}
 document.getElementById("refresh").addEventListener("click", refreshFromOutput);
+if (SHOW_MDLA6_CX) {{
+  const chartBtn = document.getElementById("chart-btn");
+  if (chartBtn) chartBtn.addEventListener("click", renderFcChart);
+}}
 document.getElementById("filter").addEventListener("input", render);
 document.querySelectorAll(".sort-btn").forEach(btn => {{
   btn.addEventListener("click", () => {{

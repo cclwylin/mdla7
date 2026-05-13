@@ -6,7 +6,8 @@
 /* verilator lint_off DECLFILENAME */
 module vf_pool_sample_engine #(
     parameter MAX_ELEMS = 16,
-    parameter L1_BYTES_PER_CYCLE = 256,
+    parameter READ_BYTES_PER_CYCLE = 256,
+    parameter WRITE_BYTES_PER_CYCLE = 128,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (
@@ -132,9 +133,11 @@ module vf_pool_sample_engine #(
     wire [31:0] workload_elem_count = (fp_mode || int16_mode) ? (workload_sample_bytes >> 1) :
                                                                 workload_sample_bytes;
     wire [31:0] fetch_payload_cycles =
-        (state == ST_FETCH) ? ((workload_sample_bytes + L1_BYTES_PER_CYCLE - 32'd1) /
-                               L1_BYTES_PER_CYCLE + 32'd1) : 32'd2;
-    wire [31:0] store_payload_cycles = 32'd2;
+        (state == ST_FETCH) ? ((workload_sample_bytes + READ_BYTES_PER_CYCLE - 32'd1) /
+                               READ_BYTES_PER_CYCLE + 32'd1) : 32'd2;
+    wire [31:0] store_payload_cycles =
+        (state == ST_STORE) ? ((store_byte_count_value + WRITE_BYTES_PER_CYCLE - 32'd1) /
+                               WRITE_BYTES_PER_CYCLE + 32'd1) : 32'd2;
     wire [31:0] reduce_pipe_cycles = ((workload_elem_count + 32'd15) / 32'd16) + 32'd1;
 
     assign start_ready = (state == ST_IDLE);

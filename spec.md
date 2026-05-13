@@ -247,9 +247,19 @@ Timing phases:
 
 Role:
 
-- 4-tile L1 SRAM mesh model with 128-bit data beats.
+- L1 SRAM mesh model with 8 edge Mesh4x4 fabrics and 4 storage Mesh4x4 blocks.
 - Stores and returns real data for engine and UDMA traffic.
 - Exposes a debug FNV CRC scanner for final L1 checks.
+- Target hierarchy:
+  `8 edge Mesh4x4 fabrics -> 4 storage Mesh4x4 blocks -> 16 Quad SRAM per storage Mesh4x4 -> 4 SRAM Macro ports per Quad`.
+- The 8 edge Mesh4x4 fabrics are an injection/route resource. Every 2 edge
+  Mesh4x4 map to the same storage Mesh4x4, so storage remains 3 MB:
+  `4 * 16 * 4 * 768 * 16B`.
+- Total SRAM Macro count is 256:
+  `4 Storage Mesh4x4 * 16 Quad SRAM * 4 SRAM Macro`.
+- Verilog now instantiates explicit edge Mesh4x4 router/link skeletons with
+  N/S/W/E/local route outputs for the 8 edge fabrics. Storage data is still
+  held as 128-bit beats inside four storage blocks.
 
 Parameters:
 
@@ -260,12 +270,20 @@ Parameters:
 | `MEM_WORDS` | `196608` |
 | `BYTES_PER_CYCLE` | `16` |
 | `SYNTH_L1_PIPE_CYCLES` | `3` |
+| `EDGE_MESH4X4_COUNT` | `8` |
+| `STORAGE_MESH4X4_COUNT` | `4` |
+| `QUAD_SRAM_PORTS` | `4` |
+| `SRAM_MACRO_WORDS` | `768` |
 
 Address mapping:
 
 - Byte address is converted to 16-byte word address.
-- `word_addr[5:4]` selects one of 4 tiles.
-- `word_addr[3:0]` selects bank within tile.
+- `word_addr[1:0]` selects one of 4 storage Mesh4x4 blocks.
+- `word_addr[5:2]` selects one of 16 Quad SRAM nodes in that storage Mesh4x4.
+- `word_addr[7:6]` selects one of 4 SRAM macro ports in the Quad.
+- `word_addr[8]` selects the edge-injection half, giving 8 edge Mesh4x4
+  fabrics as `{word_addr[8], word_addr[1:0]}`.
+- `word_addr[31:8]` selects the 768-word SRAM macro depth.
 - Writes use byte strobes.
 - Reads return a full 128-bit line.
 
@@ -274,9 +292,9 @@ Timing phases:
 | Phase | Meaning |
 | --- | --- |
 | `PH_ADDR_DECODE` | Address decode |
-| `PH_GLOBAL_MESH` | Global mesh route |
-| `PH_TILE_MESH` | Tile-local route |
-| `PH_BANK_ARB` | Bank arbitration |
+| `PH_L1MESH_SELECT` | Edge Mesh4x4 selection and placement route |
+| `PH_MESH4X4_ROUTE` | Route inside the selected Mesh4x4 |
+| `PH_QUAD_SRAM_SELECT` | Quad SRAM / macro port selection |
 | `PH_SRAM_MACRO` | SRAM macro access |
 | `PH_RESP` | Response |
 
@@ -293,13 +311,26 @@ Role:
 - Writes selected byte lanes on `start_fire`.
 - Reads a full 128-bit word on `start_fire`.
 
+## `l1mesh.v` / `mdla7_mesh4x4_edge_fabric`
+
+Role:
+
+- Verilog edge Mesh4x4 structure for L1 route tokens.
+- Instantiates 16 `mdla7_mesh4x4_router_node` nodes.
+- Each node exposes N/S/W/E/local route outputs.
+- Connects adjacent nodes through explicit horizontal E/W link buses and
+  vertical S/N link buses.
+- Uses XY routing toward the selected Quad SRAM node.
+- Current storage read/write data path remains attached to the compact storage
+  blocks; this fabric makes the edge route structure explicit for RTL growth.
+
 ## `route.v` / `vf_l1mesh_route_estimator`
 
 Role:
 
 - Placement-aware route cycle estimator.
-- Maps source ID and L1 address to source/tile/bank coordinates.
-- Computes `BASE + global Manhattan hops + local bank hops`.
+- Maps source ID and L1 address to edge Mesh4x4 and Quad SRAM coordinates.
+- Computes `BASE + edge Mesh4x4 Manhattan hops + local Quad/port hops`.
 
 Source placement:
 

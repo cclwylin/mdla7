@@ -54,6 +54,10 @@ SC_MODULE(Udma) {
     EngineModel engine_model = EngineModel::Rtl;
     static constexpr uint32_t UDMA_READ_OUTSTANDING = 2;
     static constexpr bool ACT_COMP_WRITE_ENABLE = false;
+    static constexpr uint64_t L1_PAYLOAD_BYTES_PER_CYCLE =
+        PayloadPortCount::L1MESH_R * PAYLOAD_BYTES;
+    static constexpr uint64_t DRAM_AXI_BYTES_PER_CYCLE = 4 * PAYLOAD_BYTES;
+    static constexpr uint64_t DRAM_STARTUP_CYCLES = 50;
 
     SC_HAS_PROCESS(Udma);
     Udma(sc_core::sc_module_name nm, L1Manager& mgr)
@@ -168,19 +172,21 @@ SC_MODULE(Udma) {
         last_rtl_phases.clear();
         rtl_add_phase("issue", 4);
         if (u.direction == 1) {
-            rtl_add_phase("l1_read", ceil_div_u64(bytes, 256),
+            rtl_add_phase("l1_read", ceil_div_u64(bytes, L1_PAYLOAD_BYTES_PER_CYCLE),
                           bytes, 0, "l1_payload_read");
             if (codec)
                 rtl_add_phase("codec", codec, 0, 0, "act_codec");
-            rtl_add_phase("dram_write", ceil_div_u64(bytes, 48) + 50,
+            rtl_add_phase("dram_write",
+                          ceil_div_u64(bytes, DRAM_AXI_BYTES_PER_CYCLE) + DRAM_STARTUP_CYCLES,
                           0, bytes, "dram_write");
         } else {
             const uint64_t dram_bytes = effective_read_bytes(uint32_t(bytes));
-            rtl_add_phase("dram_read", ceil_div_u64(dram_bytes, 48) + 50,
+            rtl_add_phase("dram_read",
+                          ceil_div_u64(dram_bytes, DRAM_AXI_BYTES_PER_CYCLE) + DRAM_STARTUP_CYCLES,
                           dram_bytes, 0, "dram_read");
             if (codec)
                 rtl_add_phase("codec", codec, 0, 0, "act_codec");
-            rtl_add_phase("l1_write", ceil_div_u64(bytes, 256),
+            rtl_add_phase("l1_write", ceil_div_u64(bytes, L1_PAYLOAD_BYTES_PER_CYCLE),
                           0, bytes, "l1_payload_write");
         }
         rtl_add_phase("done", observed_cycles ? 1 : 0);
@@ -192,21 +198,23 @@ SC_MODULE(Udma) {
         last_rtl_phases.clear();
         rtl_add_phase("cfg_decode", 2, 0, 0, "synth_cfg");
         if (u.direction == 1) {
-            rtl_add_phase("l1_payload_read", ceil_div_u64(bytes, 256) + 1,
+            rtl_add_phase("l1_payload_read", ceil_div_u64(bytes, L1_PAYLOAD_BYTES_PER_CYCLE) + 1,
                           bytes, 0, "synth_l1_read");
             if (codec)
                 rtl_add_phase("codec_pipe", codec + 1, 0, 0, "synth_act_codec");
             rtl_add_phase("dram_cmd", 8, 0, 0, "synth_dram_aw");
-            rtl_add_phase("dram_write_data", ceil_div_u64(bytes, 48) + 50,
+            rtl_add_phase("dram_write_data",
+                          ceil_div_u64(bytes, DRAM_AXI_BYTES_PER_CYCLE) + DRAM_STARTUP_CYCLES,
                           0, bytes, "synth_dram_write");
         } else {
             const uint64_t dram_bytes = effective_read_bytes(uint32_t(bytes));
             rtl_add_phase("dram_cmd", 8, 0, 0, "synth_dram_ar");
-            rtl_add_phase("dram_read_data", ceil_div_u64(dram_bytes, 48) + 50,
+            rtl_add_phase("dram_read_data",
+                          ceil_div_u64(dram_bytes, DRAM_AXI_BYTES_PER_CYCLE) + DRAM_STARTUP_CYCLES,
                           dram_bytes, 0, "synth_dram_read");
             if (codec)
                 rtl_add_phase("codec_pipe", codec + 1, 0, 0, "synth_act_codec");
-            rtl_add_phase("l1_payload_write", ceil_div_u64(bytes, 256) + 1,
+            rtl_add_phase("l1_payload_write", ceil_div_u64(bytes, L1_PAYLOAD_BYTES_PER_CYCLE) + 1,
                           0, bytes, "synth_l1_write");
         }
         rtl_add_phase("retire", observed_cycles ? 1 : 0, 0, 0, "synth_done");
@@ -356,7 +364,9 @@ SC_MODULE(Udma) {
         // Row-streaming approximation: the descriptor below already copied the
         // full functional tile into L1, while these waits reserve the UDMA/ACTC
         // resource for the prologue or tail byte range.
-        const uint64_t dram_cyc = (effective_read_bytes(uint32_t(comp_meta_bytes)) + 47) / 48 + 50;
+        const uint64_t dram_cyc =
+            ceil_div_u64(effective_read_bytes(uint32_t(comp_meta_bytes)),
+                         DRAM_AXI_BYTES_PER_CYCLE) + DRAM_STARTUP_CYCLES;
         const uint64_t l1_cyc = (raw_bytes + 255) / 256;
         const uint64_t codec_cyc = (raw_bytes + 511) / 512;
         wait(double(std::max(dram_cyc, l1_cyc) + codec_cyc + 16), sc_core::SC_NS);

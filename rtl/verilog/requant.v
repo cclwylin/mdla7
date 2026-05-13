@@ -5,7 +5,8 @@
 
 /* verilator lint_off DECLFILENAME */
 module vf_requant_sample_engine #(
-    parameter WRITE_BYTES_PER_CYCLE = 64,
+    parameter READ_BYTES_PER_CYCLE = 128,
+    parameter WRITE_BYTES_PER_CYCLE = 128,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (
@@ -168,7 +169,12 @@ module vf_requant_sample_engine #(
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
     assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 : 32'd1;
-    assign l1_req_payload_cycles = 32'd2;
+    assign l1_req_payload_cycles =
+        (state == ST_PARAM) ? ((32'd4 + READ_BYTES_PER_CYCLE - 32'd1) /
+                               READ_BYTES_PER_CYCLE + 32'd1) :
+        (state == ST_STORE) ? ((32'd1 + WRITE_BYTES_PER_CYCLE - 32'd1) /
+                               WRITE_BYTES_PER_CYCLE + 32'd1) :
+        32'd2;
     assign l1_req_wdata = l1_req_write
         ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
         : {DATA_WIDTH{1'b0}};
@@ -188,7 +194,7 @@ module vf_requant_sample_engine #(
             clamped = quantized;
 
         case (state)
-            ST_PARAM: begin phase_id = PH_PARAM_FETCH; remaining_cycles = 32'd2; end
+            ST_PARAM: begin phase_id = PH_PARAM_FETCH; remaining_cycles = l1_req_payload_cycles; end
             ST_PIPE: begin phase_id = PH_QUANT_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
             ST_SRAMCRC: begin phase_id = PH_QUANT_PIPE; remaining_cycles = sramcrc_remaining; end

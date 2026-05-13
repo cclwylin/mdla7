@@ -8,7 +8,7 @@
 
 module l1manager #(
     parameter L1_BYTES_PER_CYCLE = 256,
-    parameter DRAM_BYTES_PER_CYCLE = 48,
+    parameter DRAM_BYTES_PER_CYCLE = 64,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
 ) (

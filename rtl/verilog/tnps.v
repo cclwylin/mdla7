@@ -97,9 +97,9 @@ module vf_tnps_addrgen (
 endmodule
 
 module vf_tnps_engine #(
-    parameter READ_PORTS = 2,
-    parameter WRITE_PORTS = 2,
-    parameter PAYLOAD_BYTES = 32,
+    parameter READ_PORTS = 8,
+    parameter WRITE_PORTS = 8,
+    parameter PAYLOAD_BYTES = 16,
     parameter PERMUTE_BYTES_PER_CYCLE = 128,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128

@@ -249,7 +249,9 @@ endmodule
 
 module vf_conv_sample_engine #(
     parameter MAX_ELEMS = 16,
-    parameter L1_BYTES_PER_CYCLE = 256,
+    parameter CONV_ACT_BYTES_PER_CYCLE = 512,
+    parameter CONV_WGT_BYTES_PER_CYCLE = 512,
+    parameter CONV_DEBUG_STORE_BYTES_PER_CYCLE = 128,
     parameter MAX_CONV_OUTPUT_SRAM_BYTES = 16777216,
     parameter ADDR_WIDTH = 22,
     parameter DATA_WIDTH = 128
@@ -599,8 +601,9 @@ module vf_conv_sample_engine #(
     wire [31:0] store_bytes = fp_mode ? 32'd8 :
                               int16_mode ? 32'd4 :
                               32'd1;
-    wire [31:0] payload_cycles = ceil_div(workload_sample_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
-    wire [31:0] store_payload_cycles = ceil_div(store_bytes, L1_BYTES_PER_CYCLE) + 32'd1;
+    wire [31:0] act_payload_cycles = ceil_div(workload_sample_bytes, CONV_ACT_BYTES_PER_CYCLE) + 32'd1;
+    wire [31:0] wgt_payload_cycles = ceil_div(workload_sample_bytes, CONV_WGT_BYTES_PER_CYCLE) + 32'd1;
+    wire [31:0] store_payload_cycles = ceil_div(store_bytes, CONV_DEBUG_STORE_BYTES_PER_CYCLE) + 32'd1;
     wire [7:0] safe_tile_output_count = (conv_tile_output_count == 8'd0) ? 8'd1 : conv_tile_output_count;
     wire [31:0] workload_lane_count = (fp_mode || int16_mode) ? (workload_sample_bytes >> 1) :
                                                                  workload_sample_bytes;
@@ -627,7 +630,8 @@ module vf_conv_sample_engine #(
                           workload_sample_bytes;
     assign l1_req_payload_cycles = conv_refcrc_mode ? ceil_div(conv_refcrc_expected_count, 32'd16) + 32'd1 :
                                    (state == ST_STORE) ? store_payload_cycles :
-                                   payload_cycles;
+                                   (state == ST_WGT) ? wgt_payload_cycles :
+                                   act_payload_cycles;
     assign l1_req_wdata = l1_req_write
         ? (fp_mode ? vector_lane_wdata(fp_sum_bits, l1_req_addr[3:0]) :
            int16_mode ? vector_lane_wdata({32'd0, int16_acc_out}, l1_req_addr[3:0]) :
@@ -949,11 +953,11 @@ module vf_conv_sample_engine #(
         case (state)
             ST_ACT: begin
                 phase_id = PH_ACT_READ;
-                remaining_cycles = payload_cycles;
+                remaining_cycles = act_payload_cycles;
             end
             ST_WGT: begin
                 phase_id = PH_WGT_READ;
-                remaining_cycles = payload_cycles;
+                remaining_cycles = wgt_payload_cycles;
             end
             ST_COMPUTE: begin
                 phase_id = PH_MAC_ARRAY;

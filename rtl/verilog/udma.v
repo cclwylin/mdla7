@@ -6,7 +6,7 @@
 /* verilator lint_off DECLFILENAME */
 module vf_udma_engine #(
     parameter L1_BYTES_PER_CYCLE = 256,
-    parameter DRAM_BYTES_PER_CYCLE = 48,
+    parameter DRAM_BYTES_PER_CYCLE = 64,
     parameter DRAM_STARTUP_CYCLES = 50,
     parameter DRAM_CMD_CYCLES = 8,
     parameter ADDR_WIDTH = 22,

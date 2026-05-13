@@ -4,7 +4,7 @@
 Examples:
     ./batch/run_systemc.py --filter ethz
     ./batch/run_systemc.py --filter ethz_v6 --model-filter mobilenet --limit 3
-    ./batch/run_systemc.py --filter hotspot --L1 cx --engine cx
+    ./batch/run_systemc.py --filter hotspot --cx
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ ETHZ_V6_MDLA6_CX: tuple[tuple[str, float], ...] = (
     ("esrgan_quant", 0.97),
     ("swin_quant", 1.0),
     ("xlsr_float", 1.14),
+    ("mobilevit_v2_quant", 1.17),
     ("mobilebert_quant.cut", 1.2),
     ("gpt2_quant.cut", 1.44),
     ("midas_v3_float", 1.54),
@@ -1952,22 +1953,12 @@ def _normalise_pattern(pat: str) -> str:
 
 
 def _normalise_engine(engine_model: str) -> str:
-    if engine_model in ("model", "analytical"):
-        return "fast"
-    if engine_model == "rtl-style":
-        return "rtl"
-    if engine_model == "synth":
-        return "cx"
     if engine_model not in ("fast", "rtl", "cx"):
         raise ValueError(f"unknown engine mode: {engine_model}")
     return engine_model
 
 
 def _normalise_l1(l1_timing: str) -> str:
-    if l1_timing in ("conflict", "mesh", "mesh-opt"):
-        return "rtl"
-    if l1_timing == "synth":
-        return "cx"
     if l1_timing not in ("fast", "rtl", "cx"):
         raise ValueError(f"unknown L1 mode: {l1_timing}")
     return l1_timing
@@ -2312,6 +2303,37 @@ def _load_prior_results(csv_path: Path, fast_only: bool = False) -> dict[str, di
     return rows
 
 
+def _load_cached_result_from_artefacts(pattern: str,
+                                       model_dir: Path,
+                                       *,
+                                       engine_model: str = "fast",
+                                       l1_timing: str = "fast",
+                                       require_html: bool = True) -> dict[str, str] | None:
+    canonical = _normalise_pattern(pattern)
+    model_path = model_dir / f"{canonical}.tflite"
+    suffix = _mode_suffix(l1_timing, engine_model)
+    paths = _mode_paths(model_path, suffix) if suffix else _artefact_paths(model_path)
+    if require_html and not paths["html"].exists():
+        return None
+    if not paths["prof"].exists():
+        return None
+    try:
+        with paths["prof"].open() as f:
+            profile = json.load(f)
+        summary = profile.get("summary", {}) or {}
+        cycles = int(summary.get("total_cycles", 0) or 0)
+        n_fail = int(summary.get("fail", 0) or 0)
+    except Exception:
+        return None
+    if cycles <= 0 or n_fail != 0:
+        return None
+    return {
+        "pattern": canonical,
+        "mdla7_ms": f"{cycles / 1.9e6:.3f}",
+        "status": "ok",
+    }
+
+
 def _discover_models(model_dir: Path, name_filter: str, recursive: bool = False) -> list[str]:
     if not model_dir.exists():
         raise SystemExit(f"model dir not found: {model_dir}")
@@ -2375,7 +2397,13 @@ def _apply_pattern_order(patterns: list[str], order_source: Path | str | None) -
     return [pattern for _, pattern in sorted(enumerate(patterns), key=key)]
 
 
-def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
+def _refresh_profile_index(title: str,
+                           html_out: str,
+                           csv_path: Path,
+                           *,
+                           show_mdla6_cx: bool = False,
+                           primary_label: str = "fast",
+                           ratio_label: str = "f/mdla6_cx") -> None:
     try:
         html_path = Path(html_out)
         if not html_path.is_absolute():
@@ -2388,7 +2416,10 @@ def _refresh_profile_index(title: str, html_out: str, csv_path: Path) -> None:
              "--title", title,
              "--metrics-csv", str(csv_path),
              "--only-metrics-rows",
-             "--hide-mdla6-cx"],
+             "--hide-mode-columns",
+             "--primary-label", primary_label,
+             "--ratio-label", ratio_label,
+             *([] if show_mdla6_cx else ["--hide-mdla6-cx"])],
             cwd=str(HERE), capture_output=True, text=True,
         )
     except Exception:
@@ -2710,7 +2741,7 @@ a:hover {{ text-decoration:underline; }}
 <h1>{html.escape(title)}</h1>
 <div class="meta">csv: {html.escape(str(csv_path))}</div>
 <table>
-  <thead><tr><th>pattern</th><th>mdla6_cx ms</th><th>fast ms</th><th>rtl ms</th><th>f/cx</th><th>rtl/fast</th><th>rtl/mdla6_cx</th><th>status</th></tr></thead>
+  <thead><tr><th>pattern</th><th>mdla6_cx ms</th><th>fast ms</th><th>rtl ms</th><th>f/mdla6_cx</th><th>rtl/fast</th><th>rtl/mdla6_cx</th><th>status</th></tr></thead>
   <tbody>{''.join(body)}</tbody>
 </table>
 </body></html>
@@ -2786,7 +2817,7 @@ def run_corpus(*,
                pattern_order_csv: Path | str | None = None,
                recursive: bool = False,
                microblock_metrics: bool = False) -> None:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument("--model-dir", default=str(default_model_dir),
                     help=f"directory containing {corpus_name} .tflite models")
     ap.add_argument("--csv-out", "--csv", dest="csv_out",
@@ -2803,25 +2834,9 @@ def run_corpus(*,
     ap.add_argument("--rerun-all", action="store_true",
                     help="ignore prior --csv-out cache and re-run everything")
     ap.add_argument("--fast-only", action="store_true",
-                    help="run fast L1/engine mode only unless --engine is set")
-    ap.add_argument("--L1", "--l1", dest="l1_timing",
-                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
-                    help="L1Mesh timing mode for the primary run")
-    ap.add_argument("--l1-timing", dest="l1_timing",
-                    choices=("fast", "rtl", "cx", "synth"),
                     help=argparse.SUPPRESS)
-    ap.add_argument("--engine", dest="engine_model",
-                    choices=("fast", "rtl", "cx", "synth"), default="rtl",
-                    help="engine timing model: fast analytical, RTL-style, or cx mode")
-    ap.add_argument("--engine-model", dest="engine_model",
-                    choices=("fast", "model", "analytical", "rtl", "rtl-style", "cx", "synth"),
-                    help=argparse.SUPPRESS)
-    ap.add_argument("--rtl-fast", action="store_true",
-                    help="legacy alias for --fast-only --engine=rtl")
-    ap.add_argument("--compare-rtl-fast", action="store_true",
-                    help="run pure fast and rtl-fast, then emit combined CSV/HTML")
-    ap.add_argument("--compare-cx-rtl", action="store_true",
-                    help="run full RTL and cx modes, then emit combined CSV/HTML")
+    ap.add_argument("--cx", action="store_true",
+                    help="run cx L1Mesh and cx engine mode (default is fast)")
     ap.add_argument("--keep-bin", action="store_true",
                     help="keep per-model .bin files in output/ after the sweep")
     ap.add_argument("--no-html", action="store_true",
@@ -2829,38 +2844,11 @@ def run_corpus(*,
     ap.add_argument("--list", action="store_true",
                     help="list selected models and exit")
     args = ap.parse_args()
-    if args.compare_rtl_fast and args.compare_cx_rtl:
-        raise SystemExit("--compare-rtl-fast and --compare-cx-rtl are mutually exclusive")
-    engine_explicit = any(
-        arg == name or arg.startswith(f"{name}=")
-        for arg in sys.argv[1:]
-        for name in ("--engine", "--engine-model")
-    )
-    if args.fast_only:
-        args.l1_timing = "fast"
-        if not engine_explicit:
-            args.engine_model = "fast"
-    args.l1_timing = _normalise_l1(args.l1_timing)
-    if args.engine_model in ("model", "analytical"):
-        args.engine_model = "fast"
-    elif args.engine_model == "rtl-style":
-        args.engine_model = "rtl"
-    elif args.engine_model == "synth":
-        args.engine_model = "cx"
-    if args.compare_rtl_fast:
-        args.fast_only = True
-        args.l1_timing = "fast"
-        args.engine_model = "fast"
-    if args.compare_cx_rtl:
-        args.fast_only = True
-        args.l1_timing = "rtl"
-        args.engine_model = "rtl"
-    if args.rtl_fast:
-        args.fast_only = True
-        args.l1_timing = "fast"
-        args.engine_model = "rtl"
-    if args.l1_timing != "fast":
-        args.fast_only = True
+    args.l1_timing = "cx" if args.cx else "fast"
+    args.engine_model = "cx" if args.cx else "fast"
+    args.fast_only = True
+    args.compare_rtl_fast = False
+    args.compare_cx_rtl = False
 
     OUT_DIR.mkdir(exist_ok=True)
     default_csv = Path(default_csv_out)
@@ -2871,7 +2859,8 @@ def run_corpus(*,
             f"{default_csv.stem}.{suffix}{default_csv.suffix}"))
     if suffix:
         profile_path = Path(profile_html)
-        profile_html = f"{profile_path.stem}.{suffix}{profile_path.suffix}"
+        profile_html = str(profile_path.with_name(
+            f"{profile_path.stem}.{suffix}{profile_path.suffix}"))
     model_dir = Path(args.model_dir)
     patterns = _discover_models(model_dir, args.filter, recursive=recursive)
     order_source: Path | str | None
@@ -2970,7 +2959,7 @@ def run_corpus(*,
                            f"mdla6_cx={_ms_cell(cached_filled.get('mdla6_cx_ms', ''))} "
                            f"fast={_ms_cell(cached.get('fast_ms', ''))} "
                            f"rtl={_ms_cell(cached.get('rtl_ms', ''))} "
-                           f"f/cx={_ratio_cell(cached_filled.get('f_over_cx', cached_filled.get('fast_over_mdla6_cx', '')))} "
+                           f"f/mdla6_cx={_ratio_cell(cached_filled.get('f_over_cx', cached_filled.get('fast_over_mdla6_cx', '')))} "
                            f"rtl/fast={_ratio_cell(cached_filled.get('rtl_over_fast', ''))} "
                            f"rtl/mdla6_cx={_ratio_cell(cached_filled.get('rtl_over_mdla6_cx', ''))} cached  "
                            f"{cached.get('status', 'ok')}")
@@ -3016,7 +3005,7 @@ def run_corpus(*,
                        f"mdla6_cx={f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    '} "
                        f"fast={f'{fast_ms:>8.2f} ms' if fast_ms is not None else f'{chr(8212):>8s}    '} "
                        f"rtl={f'{rtl_ms:>8.2f} ms' if rtl_ms is not None else f'{chr(8212):>8s}    '} "
-                       f"f/cx={_ratio_cell(fast_mdla6_cx)} "
+                       f"f/mdla6_cx={_ratio_cell(fast_mdla6_cx)} "
                        f"rtl/fast={_ratio_cell(rtl_fast)} rtl/mdla6_cx={_ratio_cell(rtl_mdla6_cx)}  "
                        f"({elapsed:5.1f}s)  {status}")
             row = {
@@ -3223,9 +3212,14 @@ def run_corpus(*,
     prior_ok = {} if args.rerun_all else _load_prior_results(csv_path, fast_only=args.fast_only)
     if prior_ok:
         print(f"  (cache: {len(prior_ok)} prior ok rows in {csv_path.name}; "
-              f"--rerun-all to ignore)", flush=True)
+              f"per-model artefacts also reusable; --rerun-all to ignore)", flush=True)
+    elif not args.rerun_all:
+        print(f"  (cache: no prior ok rows in {csv_path.name}; "
+              f"will reuse per-model artefacts when present)", flush=True)
     mdla6_cx_ms_by_pattern = _load_mdla6_cx_ms(order_source)
     has_mdla6_cx = bool(mdla6_cx_ms_by_pattern)
+    primary_label = "cx" if (args.l1_timing == "cx" and args.engine_model == "cx") else "fast"
+    ratio_label = "cx/mdla6_cx" if primary_label == "cx" else "f/mdla6_cx"
 
     def _mdla6_cx_ms_for(pattern: str) -> float | None:
         return mdla6_cx_ms_by_pattern.get(_normalise_pattern(pattern))
@@ -3278,10 +3272,18 @@ def run_corpus(*,
     rows_out = []
     t_total = time.time()
     for i, pat in enumerate(patterns, 1):
-        if pat in prior_ok and (args.no_html or _report_exists_for(
+        cached = prior_ok.get(pat)
+        cache_source = "csv"
+        if cached is not None and not (args.no_html or _report_exists_for(
                 pat, model_dir, engine_model=args.engine_model,
                 l1_timing=args.l1_timing)):
-            cached = prior_ok[pat]
+            cached = None
+        if cached is None and not args.rerun_all:
+            cached = _load_cached_result_from_artefacts(
+                pat, model_dir, engine_model=args.engine_model,
+                l1_timing=args.l1_timing, require_html=not args.no_html)
+            cache_source = "artefact"
+        if cached is not None:
             cached = _attach_mdla6_cx(cached)
             mode_suffix = _mode_suffix(args.l1_timing, args.engine_model)
             model_suffix = "" if not mode_suffix else f"/{mode_suffix}"
@@ -3295,9 +3297,9 @@ def run_corpus(*,
             display_pat = _fit_cell(pat)
             _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                        f"{'mdla6_cx=' + _ms_cell(cached.get('mdla6_cx', '')) + ' ' if has_mdla6_cx else ''}"
-                       f"fast={_ms_cell(cached.get('mdla7_ms', ''))} "
-                       f"{'f/cx=' + _ratio_cell(cached.get('f_over_cx', cached.get('fast_over_mdla6_cx', ''))) + ' ' if has_mdla6_cx else ''}"
-                       f"cached  "
+                       f"{primary_label}={_ms_cell(cached.get('mdla7_ms', ''))} "
+                       f"{ratio_label + '=' + _ratio_cell(cached.get('f_over_cx', cached.get('fast_over_mdla6_cx', ''))) + ' ' if has_mdla6_cx else ''}"
+                       f"cached:{cache_source}  "
                        f"{suffix}{mb_suffix}")
             row = {
                 "pattern": pat,
@@ -3340,8 +3342,8 @@ def run_corpus(*,
         fast_mdla6_cx = _ratio_from_ms(ms, mdla6_cx_ms)
         _row_print(f"[{i:>2}/{len(patterns)}] {display_pat} "
                    f"{'mdla6_cx=' + (f'{mdla6_cx_ms:>8.2f} ms' if mdla6_cx_ms is not None else f'{chr(8212):>8s}    ') + ' ' if has_mdla6_cx else ''}"
-                   f"fast={ms_str} "
-                   f"{'f/cx=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
+                   f"{primary_label}={ms_str} "
+                   f"{ratio_label + '=' + _ratio_cell(fast_mdla6_cx) + ' ' if has_mdla6_cx else ''}"
                    f"({elapsed:5.1f}s)  "
                    f"{suffix}{mb_suffix}")
         row = {
@@ -3379,13 +3381,15 @@ def run_corpus(*,
     n_fast = sum(1 for r in rows_out if r.get("mdla7_ms"))
     total_ms = sum(float(r["mdla7_ms"]) for r in rows_out if r.get("mdla7_ms"))
     total_s = time.time() - t_total
-    primary_label = _mode_suffix(args.l1_timing, args.engine_model) or "fast"
     print(f"\n==== summary: {primary_label} {n_fast}/{len(rows_out)} ran, "
           f"sim total {total_ms:.1f} ms, wall {total_s:.0f}s ====",
           flush=True)
     print(f"csv: {csv_path}", flush=True)
     if not args.no_html:
-        _refresh_profile_index(profile_title, profile_html, csv_path)
+        _refresh_profile_index(profile_title, profile_html, csv_path,
+                               show_mdla6_cx=has_mdla6_cx,
+                               primary_label=primary_label,
+                               ratio_label=ratio_label)
         print(f"html: {HERE / profile_html}", flush=True)
 
 # ---- Unified public CLI ----
@@ -3450,7 +3454,7 @@ def _has_option(args: list[str], *names: str) -> bool:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(add_help=False)
+    ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     ap.add_argument("--filter", default="ethz",
                     help="corpus selector: ethz, ethz_v6, ethz_v5, hotspot, slice, mlperf")
     ap.add_argument("--model-filter", default="",
@@ -3463,7 +3467,7 @@ def main() -> None:
         corpus_key = "ethz_v6"
     if ns.help:
         print(__doc__.strip())
-        print("\nCommon options: --limit N --offset N --rerun-all --L1 fast|rtl|cx --engine fast|rtl|cx")
+        print("\nCommon options: --limit N --offset N --rerun-all --cx")
         print("Corpus keys:", ", ".join(sorted(k for k in CORPORA if k != "ethz")))
         return
     if corpus_key not in CORPORA:
@@ -3473,13 +3477,8 @@ def main() -> None:
     if ns.model_filter:
         runner_args.extend(["--filter", ns.model_filter])
 
-    compare_mode = _has_option(runner_args, "--compare-rtl-fast", "--compare-cx-rtl")
-    if not compare_mode and not _has_option(runner_args, "--fast-only"):
+    if not _has_option(runner_args, "--fast-only"):
         runner_args.append("--fast-only")
-    if not _has_option(runner_args, "--L1", "--l1", "--l1-timing"):
-        runner_args.extend(["--L1", "fast"])
-    if not _has_option(runner_args, "--engine", "--engine-model"):
-        runner_args.extend(["--engine", "fast"])
 
     sys.argv = [sys.argv[0], *runner_args]
     cfg = CORPORA[corpus_key]
