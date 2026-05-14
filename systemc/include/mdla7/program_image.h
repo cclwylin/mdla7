@@ -86,6 +86,7 @@ enum OpKindEnum : uint16_t {
     OK_LOGISTIC    = 27,
     OK_RSQRT       = 28,    // 1/sqrt(x), INT8 LUT-based EWE unary
     OK_TANH        = 29,    // tanh(x), INT8 LUT-based EWE unary
+    OK_FC_BMM      = 30,    // BATCH_MATMUL lowered to 1x1 CONV; same engine as OK_FC
 };
 
 inline const char* op_name(uint16_t k) {
@@ -120,8 +121,13 @@ inline const char* op_name(uint16_t k) {
         case OK_LOGISTIC:   return "logist";
         case OK_RSQRT:      return " rsqrt";
         case OK_TANH:       return "  tanh";
+        case OK_FC_BMM:     return "fc(bmm)";
     }
     return "??unknown";
+}
+// True for both native FC and BATCH_MATMUL lowered to CONV.
+inline bool is_fc_kind(uint16_t k) {
+    return k == OK_FC || k == OK_FC_BMM;
 }
 #pragma pack(pop)
 

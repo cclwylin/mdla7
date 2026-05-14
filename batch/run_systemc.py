@@ -971,16 +971,15 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                              f"{html.escape(label)}</td>")
         elif op_norm in TNPS_OPS:
             tag = _tnps_fold_tag(L)
-            label = f"{op_label}({tag})"
-            # Colour by fold state: view = grey (free), folded = orange (hidden
-            # in chain), copy = default (real work charged to TNPS).
+            # view (cy=0, no bus): show "-" — no hardware cost at all.
             if tag == "view":
-                style = " style='color:#888'"
-            elif tag == "folded":
-                style = " style='color:#a06000'"
+                op_cell_layer = "<td style='color:#bbb'>—</td>"
             else:
-                style = ""
-            op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
+                label = f"{op_label}({tag})"
+                style = " style='color:#a06000'" if tag == "folded" else ""
+                op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
+        elif op_label == "fc(bmm)":
+            op_cell_layer = "<td style='color:#1a7ab0;font-weight:600'>fc(bmm)</td>"
         else:
             op_cell_layer = f"<td>{html.escape(op_label)}</td>"
         return ("<tr>" +

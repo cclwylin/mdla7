@@ -1211,7 +1211,7 @@ int sc_main(int argc, char* argv[]) {
     // trunk feeding the next slice fanout (32ch -> four 8ch branches) and the
     // final long skip concat (L24 32ch + L0 16ch -> 48ch).
     auto is_conv_class_meta = [](const LayerMeta& M) {
-        return M.op_kind == OK_CONV || M.op_kind == OK_DWCONV || M.op_kind == OK_FC;
+        return M.op_kind == OK_CONV || M.op_kind == OK_DWCONV || is_fc_kind(M.op_kind);
     };
     auto is_binary_meta = [](const LayerMeta& M) {
         return M.op_kind == OK_ADD || M.op_kind == OK_SUB;
@@ -1830,7 +1830,7 @@ int sc_main(int argc, char* argv[]) {
 
         if (L.op_kind == OK_TRANSPOSE && i + 2 < N &&
             metas[i + 1].op_kind == OK_RESHAPE &&
-            metas[i + 2].op_kind == OK_FC &&
+            is_fc_kind(metas[i + 2].op_kind) &&
             !fc_prefetch_wgt_tag[i + 2]) {
             const auto& F = metas[i + 2];
             const bool fc_is_fp = (F.dtype == DT_FP16 || F.dtype == DT_BFP16 || F.dtype == DT_FP8);
@@ -2357,14 +2357,14 @@ int sc_main(int argc, char* argv[]) {
         auto try_stream_conv_fanout = [&]() -> bool {
             const auto streamable = [&](uint32_t k) -> bool {
                 const auto& A = metas[k];
-                if (A.op_kind != OK_CONV && A.op_kind != OK_DWCONV && A.op_kind != OK_FC)
+                if (A.op_kind != OK_CONV && A.op_kind != OK_DWCONV && !is_fc_kind(A.op_kind))
                     return false;
                 if (!producer_no_store[k]) return false;
                 if (A.op_kind == OK_CONV && A.group != 1) return false;
                 if (A.op_kind == OK_DWCONV &&
                     (A.group != A.in_c || A.out_c != A.in_c))
                     return false;
-                if (A.op_kind == OK_FC && (A.out_h != 1 || A.out_w != 1))
+                if (is_fc_kind(A.op_kind) && (A.out_h != 1 || A.out_w != 1))
                     return false;
                 if (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8) return false;
                 return true;
@@ -2674,14 +2674,14 @@ int sc_main(int argc, char* argv[]) {
         auto try_stream_conv_concat_pointwise = [&]() -> bool {
             const auto streamable = [&](uint32_t k) -> bool {
                 const auto& A = metas[k];
-                if (A.op_kind != OK_CONV && A.op_kind != OK_DWCONV && A.op_kind != OK_FC)
+                if (A.op_kind != OK_CONV && A.op_kind != OK_DWCONV && !is_fc_kind(A.op_kind))
                     return false;
                 if (!producer_no_store[k]) return false;
                 if (A.op_kind == OK_CONV && A.group != 1) return false;
                 if (A.op_kind == OK_DWCONV &&
                     (A.group != A.in_c || A.out_c != A.in_c))
                     return false;
-                if (A.op_kind == OK_FC && (A.out_h != 1 || A.out_w != 1))
+                if (is_fc_kind(A.op_kind) && (A.out_h != 1 || A.out_w != 1))
                     return false;
                 if (A.dtype == DT_FP16 || A.dtype == DT_BFP16 || A.dtype == DT_FP8) return false;
                 return true;
@@ -3501,7 +3501,7 @@ int sc_main(int argc, char* argv[]) {
             if (i + 1 >= N) return false;
             const auto& A = metas[i];
             const bool conv_class =
-                A.op_kind == OK_CONV || A.op_kind == OK_DWCONV || A.op_kind == OK_FC;
+                A.op_kind == OK_CONV || A.op_kind == OK_DWCONV || is_fc_kind(A.op_kind);
             auto is_binary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_ADD || L.op_kind == OK_MUL || L.op_kind == OK_SUB;
             };
@@ -4451,7 +4451,7 @@ int sc_main(int argc, char* argv[]) {
             const auto& A = metas[i];
             const auto& D = metas[i + 1];
             const bool conv_class =
-                A.op_kind == OK_CONV || A.op_kind == OK_DWCONV || A.op_kind == OK_FC;
+                A.op_kind == OK_CONV || A.op_kind == OK_DWCONV || is_fc_kind(A.op_kind);
             if (!conv_class || D.op_kind != OK_D2SPACE) return false;
             if (A.dtype != D.dtype) return false;
             if (A.out_h != D.in_h || A.out_w != D.in_w || A.out_c != D.in_c)
@@ -5763,7 +5763,7 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             if (S.out_h != B.in_h || S.out_w != B.in_w || S.out_c != B.in_c)
                 return false;
-            if (B.op_kind == OK_FC || (B.op_kind == OK_CONV && (B.group ? B.group : 1) != 1))
+            if (is_fc_kind(B.op_kind) || (B.op_kind == OK_CONV && (B.group ? B.group : 1) != 1))
                 return false;
             if (B.op_kind == OK_DWCONV &&
                 ((B.group ? B.group : 1) != B.in_c || B.out_c != B.in_c))
@@ -6053,7 +6053,7 @@ int sc_main(int argc, char* argv[]) {
             const auto& B = metas[i + 1];
             if (D.op_kind != OK_D2SPACE || !is_conv_class_meta(B))
                 return false;
-            if (B.op_kind == OK_FC)
+            if (is_fc_kind(B.op_kind))
                 return false;
             if (D.dtype != B.dtype ||
                 D.out_h != B.in_h || D.out_w != B.in_w || D.out_c != B.in_c)
@@ -6346,7 +6346,7 @@ int sc_main(int argc, char* argv[]) {
             const auto& B = metas[i + 2];
             if (D.op_kind != OK_D2SPACE || P.op_kind != OK_PAD || !is_conv_class_meta(B))
                 return false;
-            if (B.op_kind == OK_FC)
+            if (is_fc_kind(B.op_kind))
                 return false;
             if (D.dtype != P.dtype || P.dtype != B.dtype)
                 return false;
@@ -6687,7 +6687,7 @@ int sc_main(int argc, char* argv[]) {
             const auto& B = metas[i + 1];
             if (P.op_kind != OK_PAD || !is_conv_class_meta(B))
                 return false;
-            if (B.op_kind == OK_FC)
+            if (is_fc_kind(B.op_kind))
                 return false;
             if (P.dtype != B.dtype ||
                 P.out_h != B.in_h || P.out_w != B.in_w || P.out_c != B.in_c)
@@ -6969,7 +6969,7 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             if (!producer_no_store[i])
                 return false;
-            if (B.op_kind == OK_FC)
+            if (is_fc_kind(B.op_kind))
                 return false;
             if (S.dtype != B.dtype ||
                 S.out_h != B.in_h || S.out_w != B.in_w || S.out_c != B.in_c)
@@ -7457,7 +7457,7 @@ int sc_main(int argc, char* argv[]) {
 
         auto try_stream_fc_row_oc_slices = [&]() -> bool {
             const auto& A = metas[i];
-            if (A.op_kind != OK_FC) return false;
+            if (!is_fc_kind(A.op_kind)) return false;
             if (A.in_w != 1 || A.out_w != 1 || A.in_h != A.out_h || A.out_h <= 1)
                 return false;
             if ((A.group ? A.group : 1) != 1) return false;
@@ -7697,7 +7697,7 @@ int sc_main(int argc, char* argv[]) {
 
         auto try_stream_fc_oc_slices = [&]() -> bool {
             const auto& A = metas[i];
-            if (A.op_kind != OK_FC) return false;
+            if (!is_fc_kind(A.op_kind)) return false;
             if (A.in_h != 1 || A.in_w != 1 || A.out_h != 1 || A.out_w != 1)
                 return false;
             if ((A.group ? A.group : 1) != 1) return false;
@@ -7973,7 +7973,7 @@ int sc_main(int argc, char* argv[]) {
         }
 
         switch (L.op_kind) {
-        case OK_CONV: case OK_DWCONV: case OK_FC: {
+        case OK_CONV: case OK_DWCONV: case OK_FC: case OK_FC_BMM: {
             // v7: 2-D tile loop over (oh, oc). Either dim collapses to 1 tile
             // when full layer fits. Layout in L1 is:
             //   L1_PARAMS = 0                                    (full layer params blob)
@@ -8041,7 +8041,7 @@ int sc_main(int argc, char* argv[]) {
             const bool fp_spatial_ewe_to_fc =
                 fuse_prev_is_binary_ewe &&
                 is_fp &&
-                L.op_kind == OK_FC &&
+                is_fc_kind(L.op_kind) &&
                 (L.in_h > 1 || L.in_w > 1 || L.out_h > 1 || L.out_w > 1);
             const bool fuse_eligible =
                 fuse_prev_is_conv_class &&
@@ -8259,7 +8259,7 @@ int sc_main(int argc, char* argv[]) {
 
             bool fc_prefetched_wgt = false;
             if (!fused_this_layer && fc_prefetch_wgt_tag[i] &&
-                L.op_kind == OK_FC && tile_oc == L.out_c) {
+                is_fc_kind(L.op_kind) && tile_oc == L.out_c) {
                 const uint32_t pref_wgt = fc_prefetch_wgt_l1[i];
                 const uint32_t pref_in = align64(uint32_t(pref_wgt + tile_wgt_max));
                 const uint32_t pref_out = align64(uint32_t(pref_in + L.in_size));
@@ -8317,7 +8317,7 @@ int sc_main(int argc, char* argv[]) {
                 conv_ws_enable &&
                 !is_dw &&
                 !fused_this_layer &&
-                (L.op_kind == OK_FC || (L.op_kind == OK_CONV && L.k_h == 1 && L.k_w == 1));
+                (is_fc_kind(L.op_kind) || (L.op_kind == OK_CONV && L.k_h == 1 && L.k_w == 1));
             const uint64_t worst_tile_in_bytes =
                 uint64_t(tile_oh * L.s_h + (L.k_h ? L.k_h - 1 : 0)) * L.in_w * L.in_c * in_elem;
             const uint64_t ws_weight_saved =
@@ -10796,7 +10796,7 @@ int sc_main(int argc, char* argv[]) {
                 L.op_kind == OK_RESHAPE &&
                 graph_metas &&
                 i > 0 &&
-                metas[i - 1].op_kind == OK_FC &&
+                is_fc_kind(metas[i - 1].op_kind) &&
                 graph_metas[i - 1].producer0_layer >= 0 &&
                 graph_metas[i - 1].producer0_layer < int32_t(N) &&
                 (metas[uint32_t(graph_metas[i - 1].producer0_layer)].op_kind == OK_ADD ||
@@ -10939,7 +10939,7 @@ int sc_main(int argc, char* argv[]) {
              L.op_kind == OK_EXPAND_DIMS) &&
             fuse_prev_single_tile;
         if (!keep_layout_view_source &&
-            L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && L.op_kind != OK_FC
+            L.op_kind != OK_CONV && L.op_kind != OK_DWCONV && !is_fc_kind(L.op_kind)
             && L.op_kind != OK_ADD && L.op_kind != OK_MUL && L.op_kind != OK_SUB
             && L.op_kind != OK_AVG_POOL && L.op_kind != OK_MAX_POOL
             && L.op_kind != OK_LOGISTIC) {

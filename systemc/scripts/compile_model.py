@@ -136,6 +136,7 @@ OP_SPLIT      = 26
 OP_LOGISTIC   = 27       # v10: sigmoid unary EWE (EfficientNet swish gate)
 OP_RSQRT      = 28       # 1/sqrt(x) INT8 LUT EWE (LayerNorm/RMSNorm normaliser)
 OP_TANH       = 29       # tanh(x)   INT8 LUT EWE (RNN/transformer activation)
+OP_FC_BMM     = 30       # BATCH_MATMUL lowered to 1x1 CONV; same engine as OP_FC
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -173,7 +174,8 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_SPLIT:     " split",
            OP_LOGISTIC:  "logist",
            OP_RSQRT:     " rsqrt",
-           OP_TANH:      "  tanh"}
+           OP_TANH:      "  tanh",
+           OP_FC_BMM:    "fc(bmm)"}
 
 
 def _load_interpreter(path: str):
@@ -1545,7 +1547,7 @@ def main():
                             _lowered_ok = False
                             break
                         _slice_label = f"[{_bi}/{_B_total}]" if _B_total > 1 else ""
-                        print(f"  layer {li:>2d}  {OP_NAME[OP_FC]}  "
+                        print(f"  layer {li:>2d}  {OP_NAME[OP_FC_BMM]}  "
                               f"in={_M_bmm}x1x{_K_bmm}  k=1x1  s=1x1  g=1  "
                               f"out={_M_bmm}x1x{_N_bmm}  "
                               f"({_M_bmm * _N_bmm} {'FP16' if _is_fp_bmm else 'INT8'})  "
@@ -1566,7 +1568,7 @@ def main():
                             in_off=in_off, wgt_off=wgt_off, ref_off=ref_off,
                             in_alias_layer=-1,
                             group=1,
-                            op_kind=OP_FC,
+                            op_kind=OP_FC_BMM,
                             dtype=_ld_bmm,
                             zp_in_eff=_zp_in_eff_sl,
                             orig_op_index=orig_op_index,
@@ -3557,7 +3559,7 @@ def main():
         in_b  = in_arr.tobytes(order="C")
         if layout_wgt_payload is not None:
             wgt_b = layout_wgt_payload
-        elif op_kind in (OP_CONV, OP_DWCONV, OP_FC):
+        elif op_kind in (OP_CONV, OP_DWCONV, OP_FC, OP_FC_BMM):
             wgt_b = conv_wgt_payload                      # weights + params blob
         elif op_kind in (OP_ADD, OP_MUL, OP_SUB,
                          OP_HARD_SWISH, OP_GELU, OP_LOGISTIC,
@@ -3572,7 +3574,7 @@ def main():
 
         # zp_in_eff is meaningful only for conv-class ops (CONV/DWCONV/FC); 0 elsewhere.
         zp_in_eff_local = 0
-        if op_kind in (OP_CONV, OP_DWCONV, OP_FC):
+        if op_kind in (OP_CONV, OP_DWCONV, OP_FC, OP_FC_BMM):
             zp_in_eff_local = int(zp_in_eff)
         # v8.29: descriptor LAYER_FMT stores each spatial / channel dim as
         # ushort (max 65535). sd_encoder_quant attention has a 65536-row
