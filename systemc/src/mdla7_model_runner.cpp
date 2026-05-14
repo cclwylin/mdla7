@@ -275,6 +275,80 @@ Descriptor make_softmax(const LayerMeta& L,
     return d;
 }
 
+// v13: softmax decomposition primitives — POOL_MAX → EWE_SUB → EWE_EXP →
+// POOL_SUM → EWE_DIV. Used when MDLA7_DECOMPOSE_SOFTMAX=1 is set, replacing
+// the monolithic ES_SOFTMAX dispatch with a chain that exposes per-engine
+// L1 traffic (see softmax.md §Phase B). Only the FP16 path is wired today;
+// INT8 keeps the monolithic dispatch until ES_DIV / ES_EXP INT8 paths are
+// implemented (see softmax.md handoff).
+//
+// Each row of length K is reduced row-wise. The descriptor body uses
+// PoolBody/EweBody shape [in_h=rows, in_w=K, in_c=1] so PM_MAX/PM_SUM with
+// k_w=K produces one scalar per row.
+Descriptor make_pool_row_reduce(const LayerMeta& L, uint32_t in_addr,
+                                uint32_t out_addr, uint32_t rows, uint32_t K,
+                                uint8_t mode, uint8_t wait_a, uint8_t signal_tag) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_POOL;
+    d.hdr.dtype = uint8_t(L.dtype);
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& p = d.body.pool;
+    p.in_addr = in_addr; p.out_addr = out_addr;
+    p.in_n = 1;  p.in_h  = uint16_t(rows); p.in_w  = uint16_t(K); p.in_c  = 1;
+    p.out_n = 1; p.out_h = uint16_t(rows); p.out_w = 1;           p.out_c = 1;
+    p.mode = mode;
+    p.k_h = 1;  p.k_w = uint8_t(std::min<uint32_t>(K, 255));
+    // k_w==255 is the sentinel for "full dim" so PoolEngine reads p.in_w.
+    if (K > 255) p.k_w = 255;
+    p.stride = encode_stride_pair(1, 1);
+    p.pad_tb = 0;
+    p.pad_lr = 0;
+    p.count_include_pad = 0;
+    return d;
+}
+
+// EWE binary with last-axis broadcast: in_a has [rows*K] elements, in_b has
+// [rows] scalars (one per row). Subtype picks ES_SUB or ES_DIV.
+Descriptor make_ewe_binary_bcast(const LayerMeta& L, uint32_t in_a_addr,
+                                 uint32_t in_b_addr, uint32_t out_addr,
+                                 uint32_t params_addr, uint32_t rows, uint32_t K,
+                                 uint8_t subtype, uint8_t wait_a, uint8_t wait_b,
+                                 uint8_t signal_tag) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_EWE;
+    d.hdr.dtype = uint8_t(L.dtype);
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = (wait_a ? 1 : 0) + (wait_b ? 1 : 0);
+    d.hdr.wait_tags[0] = wait_a;
+    d.hdr.wait_tags[1] = wait_b;
+    auto& e = d.body.ewe;
+    e.in_a_addr = in_a_addr;  e.in_b_addr = in_b_addr;  e.out_addr = out_addr;
+    e.n = 1;  e.h = uint16_t(rows);  e.w = 1;  e.c = uint16_t(K);
+    e.lut_addr = params_addr;
+    e.subtype = subtype;
+    e.broadcast_axes = 1;          // bit 0 = last axis (C)
+    return d;
+}
+
+Descriptor make_ewe_exp(const LayerMeta& L, uint32_t in_addr, uint32_t out_addr,
+                        uint32_t params_addr, uint32_t rows, uint32_t K,
+                        uint8_t wait_a, uint8_t signal_tag) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_EWE;
+    d.hdr.dtype = uint8_t(L.dtype);
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& e = d.body.ewe;
+    e.in_a_addr = in_addr;  e.in_b_addr = 0;  e.out_addr = out_addr;
+    e.n = 1;  e.h = uint16_t(rows);  e.w = 1;  e.c = uint16_t(K);
+    e.lut_addr = params_addr;
+    e.subtype = ES_EXP;
+    return d;
+}
+
 Descriptor make_ewe_add(const LayerMeta& L,
                         uint32_t in_a_addr, uint32_t in_b_addr,
                         uint32_t out_addr,  uint32_t params_addr,
@@ -9324,7 +9398,51 @@ int sc_main(int argc, char* argv[]) {
                     program.push_back(id);
                     acc[i].sram_w += L.in_size;
                 }
-                program.push_back(make_softmax(L, L1_IN, L1_OUT, softmax_in_tag, req_tag));
+                // v13: optional decomposed softmax chain (POOL_MAX → EWE_SUB →
+                // EWE_EXP → POOL_SUM → EWE_DIV) — FP path only. INT8 still
+                // takes the monolithic dispatch because ES_DIV/ES_EXP INT8 are
+                // not yet wired (see softmax.md handoff Stage C).
+                const bool decompose_sm =
+                    std::getenv("MDLA7_DECOMPOSE_SOFTMAX") != nullptr &&
+                    L.dtype == DT_FP16;
+                if (decompose_sm) {
+                    const uint32_t K = uint32_t(vec_elems);
+                    const uint32_t row1 = 1;
+                    const uint32_t es = elem_size;
+                    // L1 temp layout (after L1_OUT region):
+                    //   max  : align64(row1 * es)
+                    //   ctr  : align64(K * es)
+                    //   exp  : align64(K * es)
+                    //   sum  : align64(row1 * es)
+                    uint32_t cur = align64(uint32_t(L1_OUT + L.ref_size));
+                    const uint32_t addr_max = cur;  cur = align64(cur + row1 * es);
+                    const uint32_t addr_ctr = cur;  cur = align64(cur + K   * es);
+                    const uint32_t addr_exp = cur;  cur = align64(cur + K   * es);
+                    const uint32_t addr_sum = cur;  cur = align64(cur + row1 * es);
+                    if (cur > L1_BUDGET) {
+                        std::cerr << "layer " << i << ": decomposed softmax tmp "
+                                  << "exceeds L1 budget\n";
+                        return 4;
+                    }
+                    const uint8_t t_max = alloc_tag();
+                    const uint8_t t_sub = alloc_tag();
+                    const uint8_t t_exp = alloc_tag();
+                    const uint8_t t_sum = alloc_tag();
+                    program.push_back(make_pool_row_reduce(L, L1_IN, addr_max,
+                                       row1, K, PM_MAX, softmax_in_tag, t_max));
+                    program.push_back(make_ewe_binary_bcast(L, L1_IN, addr_max,
+                                       addr_ctr, /*params*/0, row1, K,
+                                       ES_SUB, t_max, t_max, t_sub));
+                    program.push_back(make_ewe_exp(L, addr_ctr, addr_exp,
+                                       /*params*/0, row1, K, t_sub, t_exp));
+                    program.push_back(make_pool_row_reduce(L, addr_exp, addr_sum,
+                                       row1, K, PM_SUM, t_exp, t_sum));
+                    program.push_back(make_ewe_binary_bcast(L, addr_exp, addr_sum,
+                                       L1_OUT, /*params*/0, row1, K,
+                                       ES_DIV, t_sum, t_sum, req_tag));
+                } else {
+                    program.push_back(make_softmax(L, L1_IN, L1_OUT, softmax_in_tag, req_tag));
+                }
                 if (!suppress_producer_store) {
                     program.push_back(make_udma(L1_OUT, L.dram_out, L.ref_size,
                                                 /*dir*/ 1, st_tag, req_tag));
