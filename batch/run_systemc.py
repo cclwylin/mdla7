@@ -950,6 +950,10 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         cycles_layer = int(L.get('cycles_layer', 0) or 0)
         op_norm = str(L.get("op", "")).strip().lower()
         engine_name = _OP_TO_ENGINE.get(op_norm, "—")
+        # view-class TNPS (cy=0, no bus): engine column shows "—" since no
+        # hardware dispatch happens.
+        if op_norm in TNPS_OPS and _tnps_fold_tag(L) == "view":
+            engine_name = "—"
         conv_task = conv_task_cycles[layer_idx] if 0 <= layer_idx < len(conv_task_cycles) else 0
         mac_util = (
             100.0 * ideal_layer / conv_task
@@ -971,13 +975,10 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                              f"{html.escape(label)}</td>")
         elif op_norm in TNPS_OPS:
             tag = _tnps_fold_tag(L)
-            # view (cy=0, no bus): show "-" — no hardware cost at all.
-            if tag == "view":
-                op_cell_layer = "<td style='color:#bbb'>—</td>"
-            else:
-                label = f"{op_label}({tag})"
-                style = " style='color:#a06000'" if tag == "folded" else ""
-                op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
+            label = f"{op_label}({tag})" if tag != "view" else op_label
+            style = " style='color:#888'" if tag == "view" else (
+                    " style='color:#a06000'" if tag == "folded" else "")
+            op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
         elif op_label == "fc(bmm)":
             op_cell_layer = "<td style='color:#1a7ab0;font-weight:600'>fc(bmm)</td>"
         else:
