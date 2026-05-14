@@ -163,7 +163,7 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 | **C+D (rest)** — tile-path decomposition | systemc/src/mdla7_model_runner.cpp:9462-9564 | **done (FP)** — `rows>1` softmax now emits per-row 5-op chain when `MDLA7_DECOMPOSE_SOFTMAX=1` and `L.dtype == DT_FP16`. Single-slot, one row at a time; handles both fused and non-fused producer. Engine-side fix in `ewe_pool.h` so `run_binary_fp` honors `e.broadcast_axes` (bit 0 = last-axis row broadcast) and `run_unary_fp` skips the params blob for `ES_EXP`. BMM fast 9/13 = baseline. |
 | **C (INT8)** — INT8 chain | systemc/include/mdla7/ewe_pool.h | not started — ES_EXP INT8 needs `lut_addr` populated with 256-byte exp LUT; ES_DIV INT8 not implemented. Alternative: dequant-on-entry, requant-on-exit so chain runs all-FP16 in L1 for INT8 models too. |
 | **E** — Verilog RTL | rtl/verilog/ewe.v, rtl/verilog/pool.v | not started — `ewe.v` currently dispatches 2-bit subtype (line 472); needs widening + handlers for ES_EXP (subtype 9) and ES_DIV (subtype 10). `pool.v` needs PM_SUM mode. |
-| **F** — Verify | — | fast already runs (regression clean for both baseline and decomp flag). cx/verilog: TBD. L1Mesh per-sub-op breakdown: should auto-appear once the chain fires on a real model. |
+| **F** — Verify | L1Mesh_report.md | **done (FP cx)** — Stage C verified in cx mode on `bmm_softmax_bmm_fp32` and `qwen35_attention_s128`. EWE 2→49 and POOL 0→32 tasks for the small fp32 model (16 rows × 5 sub-ops); per-engine deltas documented in L1Mesh_report.md "Descriptor-level decomposition" section. BMM cx 9/13 clean = baseline. verilog: TBD. |
 
 ### Next pickup
 

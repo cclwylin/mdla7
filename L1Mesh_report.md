@@ -68,8 +68,17 @@ the ~1.87 MB increase in L1Mesh bytes in the totals table above.
 ## Activate
 
 ```bash
-# SystemC fast/cx modes pick up the decomposition with this env flag:
+# Engine-internal: one ES_SOFTMAX descriptor that internally runs the
+# 5-phase chain (visible per-phase in the EWE engine trace, but still a
+# single descriptor in the program stream):
 export MDLA7_SOFTMAX_DECOMPOSE=1
+
+# Descriptor-level (Stage C, commit 679783f): compiler emits the chain
+# as 5 distinct descriptors per row — POOL_MAX, EWE_SUB, EWE_EXP,
+# POOL_SUM, EWE_DIV — so the EWE and POOL engines pick the work up
+# independently and the L1Mesh sees real per-engine R/W traffic.
+# Currently FP16 only.
+export MDLA7_DECOMPOSE_SOFTMAX=1
 
 ./batch/run_systemc.py --filter bmm --fast-only --rerun-all --no-html
 ./batch/run_systemc.py --filter bmm --cx --fast-only --rerun-all --no-html
@@ -79,3 +88,32 @@ export MDLA7_SOFTMAX_DECOMPOSE=1
 Decomposition is opt-in via env flag because the 1 MB scratchpad at the
 top of L1MESH collides with models that already saturate L1; toggle off
 to revert to the monolithic LUT softmax.
+
+## Descriptor-level decomposition (MDLA7_DECOMPOSE_SOFTMAX, FP only)
+
+Verified by running each model with the flag on and off in cx mode and
+diffing the per-engine task counts:
+
+`bmm_softmax_bmm_fp32` (rows = 16, K = 8, FP16, fused with prev MUL):
+
+| Mode | Total cyc | EWE busy | EWE tasks | POOL busy | POOL tasks | softmax row | tiles_h |
+|------|----------:|---------:|----------:|----------:|-----------:|------------:|--------:|
+| cx-monolithic | 764   | 67    |  2 | 0   |  0 | streamed (0) |  1 |
+| cx-decomposed | 2,620 | 1,138 | 49 | 831 | 32 | 1,856        | 16 |
+
+`qwen35_attention_s128` (softmax layer 52: rows = 8, K = 1, FP16):
+
+| Mode | Total cyc | EWE busy | EWE tasks | POOL busy | POOL tasks |
+|------|----------:|---------:|----------:|----------:|-----------:|
+| cx-monolithic | 186,545 | 364 |  8 | 0   |  0 |
+| cx-decomposed | 187,574 | 890 | 31 | 304 | 16 |
+
+Task-count delta matches the predicted `rows × 5` chain: every row adds
+1 POOL_MAX + 1 EWE_SUB + 1 EWE_EXP + 1 POOL_SUM + 1 EWE_DIV. POOL goes
+from 0 → `rows × 2` tasks (it had no work in the monolithic path);
+EWE picks up the remaining `rows × 3` on top of its baseline traffic.
+
+Functional regression: BMM `fast` and `cx` both clean 9/13 with the
+flag on, matching the pre-decomp baseline. The 4 pre-existing fails
+(bmm_softmax_bmm_2.5ms_1g_int8 — INT8 so not exercised by this flag —
+and three qwen35 fp16 compile-skips) are unaffected.
