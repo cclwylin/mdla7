@@ -1,397 +1,195 @@
 # MDLA7 Verilog vs CX 待補清單
 
-日期：2026-05-14（更新 — Phase 1/2/3/5 完成 session）
+日期：2026-05-14（session 結尾 handoff）
 Repo：`/Volumes/4T_OFFICE/_Claude/MDLA7_Claude`
 Branch：`main`
-最新已提交 commit：`163db63 Add REQUANT per-OC param table (v12 Phase 3)`
+最新 commit：`7755b00 Add qwen35 KV-cache attention models + fix FP16 BMM reference`
 
-## 本 session 完成的工作（未 commit）
+---
 
-### Phase 1：CONV→REQUANT chain wiring（COMPLETE）
+## 本 session 全部已提交的工作（10 commits）
 
-| 檔 | 變更 |
-|---|---|
-| `rtl/verilog/conv.v` | 加 `chain_out_enable` port；ST_DONE 入口在 `chain_out_enable=1` 時 latch psum + pulse `chain_psum_valid`；sticky 直到 REQUANT ack；`start_ready` 加上 `!chain_psum_valid` gate；FP path 改用 `$shortrealtobits(fp_sum)` 做正確 fp32 cast（之前 `fp_sum_bits[31:0]` 是 fp64 lower half，意義錯誤）|
-| `rtl/verilog/host.v` | 加 `conv_chain_out_enable` output reg + 解碼 `cmd_mem[base+3][15]` + reset default 0 |
-| `rtl/verilog/mdla7_top.v` | 加 `conv_chain_out_enable` input port + `conv_chain_out_enable_q` flop + ST_IDLE latch + reset；接到 CONV instance |
-| `rtl/verilog/Testbench_host_program.v` | `conv_chain_out_enable` wire + host/mdla7_top 兩邊 instance 接線 |
+### v12 Phase 1-5 RTL chain wiring（`ca31f7e`）
 
-### Phase 2：REQUANT FP mode（COMPLETE — wire-up + bias apply）
+完成 CONV→REQUANT chain descriptor 接線：
 
-| 檔 | 變更 |
-|---|---|
-| `rtl/verilog/requant.v` | `fp_in_with_bias` 改為 always block，當 `fp_bias != 0` 時用 `$shortrealtobits($bitstoshortreal(active_input_value) + $bitstoshortreal(fp_bias))` 算 fp32 加法（sim-only constructs，ArcSim 用）|
-| `rtl/verilog/host.v` | 加 `requant_fp_bias` output reg + 解碼 `cmd_mem[base+5]` + reset default 0 |
-| `rtl/verilog/mdla7_top.v` | 加 `requant_fp_bias` input port + `requant_fp_bias_q` flop + ST_IDLE latch + reset；REQUANT instance `.fp_bias` 從 hardcoded `32'd0` 改成 `requant_fp_bias_q` |
-| `rtl/verilog/Testbench_host_program.v` | `requant_fp_bias` wire + host/mdla7_top 兩邊接線 |
-
-注意：原來 `fp_bias` plumb 但綁 `32'd0`，現在 descriptor 控制。
-
-### Phase 3：REQUANT per-OC params table（COMPLETE — wire-up）
-
-RTL 端在前一個 commit (163db63) 已完成 ST_PARAM_LOAD + param_mem。本 session 補完 descriptor wire-up：
-
-| 檔 | 變更 |
-|---|---|
-| `rtl/verilog/host.v` | 加 `requant_param_load_mode`（word[3][14]）、`requant_param_l1_addr`（word[6][21:0]）、`requant_oc_count`（word[7][15:0]）、`requant_oc_index`（word[7][31:16]）四個 output reg + 解碼 + reset |
-| `rtl/verilog/mdla7_top.v` | 加 4 個 input port + 4 個 `_q` flop + ST_IDLE latch + reset；REQUANT instance 四個 input 從 hardcoded 改成 `_q` |
-| `rtl/verilog/Testbench_host_program.v` | 四個 wire + host/mdla7_top 兩邊接線 |
-
-注意：Phase 4 generator 還沒發 param_load_mode=1 descriptor，所以這些 wire 目前都 idle，sample mode unchanged。
-
-### Phase 5：CONV chain payload fp32 cast（COMPLETE）+ skip ST_STORE（DEFERRED）
-
-CONV 的 `chain_psum_data` 在 FP path 改用 `$shortrealtobits(fp_sum)` 做正確 fp32 cast（見 Phase 1 表）。
-
-「CONV 在 `chain_out_enable=1` 時跳過 ST_STORE」這步 deferred：ST_STORE 帶 partial_first/accumulate/final psum 暫存簿記，貿然 skip 會破壞 partial-tile path。建議在 Phase 4 generator 第一個 chain pair 上線後，再做受控的 ST_STORE bypass。
-
-### 驗證
-
-`rm -rf rtl/obj/verilog/host && ./batch/run_verilog.py --filter bmm --rerun-all --dpi`：
-
-```
-1  bmm_softmax_bmm_fp32               PASS
-2  bmm_softmax_bmm_int8               PASS
-3  bmm_softmax_bmm_sam_quant_L22_L61  PASS
-4  qwen35_attention_s1024             PASS
-5  qwen35_attention_s128              PASS
-summary: pass=5 fail=0 skip=0
-```
-
-無 regression。所有 chain / fp_bias / per-OC 新 wire 在 BMM descriptor 上都是 idle（default 0），sample mode 行為與本 session 前一致。
-
-### Descriptor bit allocation 總表（v12 Phase 1-3 加的）
-
-| 欄位 | cmd word | 位元 | 解碼於 host.v | latch in mdla7_top.v |
-|---|---|---|---|---|
-| `conv_chain_out_enable` | word[3] | bit 15 | 全 op_class（非 CONV 等於 don't care）| `conv_chain_out_enable_q` |
-| `requant_use_chain_input` | word[3] | bit 12 | REQUANT desc | `requant_use_chain_input_q` |
-| `requant_fp_mode` | word[3] | bit 13 | REQUANT desc | `requant_fp_mode_q` |
-| `requant_param_load_mode` | word[3] | bit 14 | REQUANT desc | `requant_param_load_mode_q` |
-| `requant_fp_bias` | word[5] | full 32-bit | REQUANT desc | `requant_fp_bias_q` |
-| `requant_param_l1_addr` | word[6] | bits[21:0] | REQUANT desc | `requant_param_l1_addr_q` |
-| `requant_oc_count` | word[7] | bits[15:0] | REQUANT desc | `requant_oc_count_q` |
-| `requant_oc_index` | word[7] | bits[31:16] | REQUANT desc | `requant_oc_index_q` |
-
-注意：word[5-7] 在 REQUANT descriptor 之前是 CONV/POOL/EWE 的 act/wgt vector 內容；REQUANT 不用 act/wgt vector，所以 reuse OK，但 generator 寫 REQUANT descriptor 時要小心不要 leak vector 進去。
-
-## 還沒完成
-
-### Phase 4：Generator emit chain-mode descriptor pair（NOT DONE）
-
-仍須在 `batch/gen_verilog_program.py` 增加 `closed_loop_conv_requant_chain_probe()` 之類的 builder：
-1. 選一個最小 CONV 層
-2. emit UDMA load act/wgt/param
-3. emit CONV descriptor with `chain_out_enable=1`
-4. emit REQUANT descriptor with `use_chain_input=1` + `param_load_mode=1`
-5. UDMA store + L1CRC verify
-
-注意：CONV 目前在 chain_out_enable=1 時仍會走 ST_STORE 寫 L1（Phase 5 skip 未做），所以 chain pair 會產生兩次 L1 write（CONV 的 int8 + REQUANT 的 chain 結果）。可用 REQUANT fp_mode=1 寫 fp16 來區隔，或先做 Phase 5 step 1 skip。
-
-### Phase 6：Sample-engine → tile-engine（DEFERRED — multi-session）
-
-Handoff 已明示這是 multi-session 工作。涉及：
-- CONV/REQUANT 內部加 OH/OW/OC nested loop
-- Generator 從「一個 sample 一個 descriptor」改成「一個 tile 一個 descriptor pair」
-- DRAM-model 16-byte/req limit 要修
-- ~1500 行 RTL + ~500 行 Python + testbench driver
-
-下個 session 起手點：先做 Phase 4（小 scope，驗 chain wire），再評估 Phase 6 怎麼切。
-
-## 自上次 commit 以來的成果（未 commit）
-
-### 1. EWE LUT engine 完整實作（SystemC + RTL，已通過 BMM 5/5 PASS）
-
-| 元件 | 變更 |
-|---|---|
-| `systemc/include/mdla7/program_image.h` | 新增 `OK_RSQRT=28`, `OK_TANH=29` |
-| `systemc/include/mdla7/descriptor.h` | 新增 `ES_RSQRT=7`, `ES_TANH=8` |
-| `systemc/scripts/compile_model.py` | INT8 + INT16 RSQRT/TANH/LOGISTIC/HARD_SWISH/GELU 全部 lower 成 LUT in `wgt_b`（INT8 256 byte、INT16 128 KB）|
-| `systemc/include/mdla7/ewe_pool.h` | `run_unary_int8_lut()` + `run_unary_int16_lut()` byte-indexed lookup |
-| `systemc/src/mdla7_model_runner.cpp` | `make_ewe_unary` subtype 支援 RSQRT/TANH，所有 unary 分類 lambda 都加進來 |
-| `rtl/verilog/ewe.v` | 真實 `lut_mem[0:255]` register array、`ST_LUT_LOAD` state、16-beat L1 read FSM、`compute_lane` 在 `lut_mode` 下做 `lut_mem[av[7:0]]` 索引查表 |
-| `rtl/verilog/host.v` + `mdla7_top.v` + `Testbench_host_program.v` | `ewe_lut_mode` (word[12][12])、`ewe_lut_addr` (word[30]) 接線 |
-| `batch/gen_verilog_program.py` | `int8_lut_unary_descriptor` + `closed_loop_lut_unary_probes`：先發 16 個 16-byte UDMA-load-LUT，再發 EWE descriptor with `lut_addr` |
-
-驗證：BMM verilog DPI 3/3 PASS，`perf_ewe = 7180 cyc`（real LUT load + lookup work）。
-
-**重要踩雷**：`vf_dram_model` 一次只回 16 byte（不管 `req_bytes` 多大），所以 256-byte LUT 必須拆 16 個 16-byte UDMA。Phase 6 改 tile-engine 時要解決這個 DRAM-model bottleneck。
-
-### 2. qwen35_attention bug fix
-
-| 修正 | 細節 |
-|---|---|
-| FP BATCH_MATMUL `np.matmul` shape mismatch | qwen35 attention 的 `(1,8,1,256) × (1,8,1,1)` 需 broadcast K=1→256；compile_model.py 加偵測 |
-| 新增 `SHAPE` / `REVERSE_V2` / `RANDOM_STANDARD_NORMAL` materialize fallback | qwen35 graph 有這 3 個 op，全進 `MATERIALIZED_FALLBACK_OPS` + `shape_changing_materialized` set，加 reference compute（SHAPE pad 到 out_hwc / REVERSE_V2 用 np.flip / RANDOM 固定 seed `0xC0DEBEEF`）|
-
-驗證：BMM regression 5/5 PASS（SystemC + Verilog），qwen35 兩個都 PASS。
-
-### 3. memory.md 規劃文字修正
-
-明示「**CONV/DWCONV/FC 永遠不直接寫 L1**，所有 dtype 都過 REQUANT」這個 invariant。REQUANT row 描述拆 INT mode / FP mode 兩段 datapath，匯流排表把 W lane 共用講清楚。
-
-### 4. Per-layer profile 報表格式調整
-
-| 變更 | 細節 |
-|---|---|
-| 新欄位 `engine` | per-layer 表第 4 欄、跟 op→engine 對照（`conv+requant` / `ewe` / `pool` / `tnps` / matrlz=`—`）|
-| 欄序重排 | `iH..tiles` 12 欄移到 `verify` 之前 |
-| matrlz 顯示 | `matrlz(原TFLite_op)` 紅字粗體，例：`matrlz(BATCH_MATMUL)` |
-| TNPS-class fold tag | `reshape(view)` 灰、`reshape(folded)` 橘、`reshape(copy)` 黑 |
-| TNPS ideal model | reshape/trnps/d2spac/concat 算 `bytes/128 + setup` (TNPS architectural target) |
-| matrlz ideal model | 也按 TNPS self-copy 估 |
-
-## 進行中且 BROKEN 的工作
-
-### CONV→REQUANT chain 重構（Phase 1，BUILD FAIL）
-
-要把 Verilog CONV/REQUANT 從「sample bring-up + CONV 自己寫 L1」拉到「CONV → chain → REQUANT → L1」這個 production 規劃。Phase 1 寫到一半時 `vf_requant_sample_engine` port 列出現重複 `fp_mode`、`mdla7_top.v` 1353 行 binding 也有重複，目前 verilator build 失敗。
-
-#### 已寫進去的東西
-
-| 檔 | 變更 | 狀態 |
+| 新 descriptor 欄位 | bit 位置 | 用途 |
 |---|---|---|
-| `rtl/verilog/conv.v` | 加 `chain_psum_valid` / `chain_psum_data[31:0]` / `chain_psum_ready` ports；ST_STORE→ST_DONE 時 latch acc 並 pulse valid（INT path 用 `acc_out`、INT16 用 `int16_acc_out`、FP path 用 `fp_sum_bits[31:0]` bit-cast）| ✓ |
-| `rtl/verilog/requant.v` | 加 `use_chain_input` / `chain_psum_valid` / `chain_psum_data` / `chain_psum_ready` ports；新 `ST_CHAIN_WAIT` state；IDLE 在 `use_chain_input=1` 時轉 ST_CHAIN_WAIT；state 寬度從 3 擴到 4 bit | ✓ |
-| `rtl/verilog/requant.v` | linter 多加了 `fp_mode` / `fp_bias` / `fp32_lt()` / FP32→FP16 cast helper（Phase 2 work），但 **`fp_mode` 被宣告兩次**（line 30 + line 37）| ✗ DUPLICATE |
-| `rtl/verilog/host.v` | `requant_use_chain_input` 解碼自 word[3] bit 12 + reset | ✓ |
-| `rtl/verilog/mdla7_top.v` | `requant_use_chain_input_q` 暫存 + 接到 REQUANT instance；新 `conv_chain_psum_valid/data/ready` wire 連 CONV→REQUANT；CONV instance 已加 chain pin binding | ✓ 但 1353 行 REQUANT instance 有 **重複 fp_mode pin** |
-| `rtl/verilog/Testbench_host_program.v` | `requant_use_chain_input` wire + 兩個 `host`/`mdla7_top` instance 接線 | ✓ |
+| `conv_chain_out_enable` | word[3][15] | CONV 是否 push chain（sample mode=0）|
+| `requant_use_chain_input` | word[3][12] | REQUANT 是否從 chain 讀 psum |
+| `requant_fp_mode` | word[3][13] | REQUANT FP16 輸出模式 |
+| `requant_param_load_mode` | word[3][14] | REQUANT per-OC table 模式 |
+| `requant_fp_bias` | word[5] | FP bias（chain 模式用）|
+| `requant_param_l1_addr` | word[6][21:0] | per-OC param table L1 位址 |
+| `requant_oc_count` | word[7][15:0] | per-OC param 數量 |
+| `requant_oc_index` | word[7][31:16] | 當前 OC 索引 |
 
-#### 修復步驟
+- `conv.v`：chain_out_enable gating；`chain_skip_store`（chain mode 跳過 L1 write）；FP chain payload 改用 `$shortrealtobits(fp_sum)` 正確 fp32 cast
+- `requant.v`：fp_bias 套用 `$bitstoshortreal` FP32 add
+- 全部通過 `host.v` → `mdla7_top.v (_q flop)` → instance 接線 → `Testbench`
 
-1. `rtl/verilog/requant.v`：刪除 line 30（或 line 37）的重複 `input fp_mode,` 宣告
-2. `rtl/verilog/mdla7_top.v`：line 1353 REQUANT instance 找重複的 `.fp_mode(...)`，刪一個
-3. `rtl/verilog/host.v` + `mdla7_top.v` + `Testbench_host_program.v`：補 `requant_fp_mode` 和 `requant_fp_bias` 接線（descriptor 解碼建議用 word[3] bit 13、word[14] full word）
-4. `rm -rf rtl/obj/verilog/host && ./batch/run_verilog.py --filter bmm --rerun-all --dpi`，預期 5/5 PASS
-5. （可選）跑 `MDLA7_DEBUG_EWE_LUT=1 ./batch/run_verilog.py --filter bmm_softmax_bmm_sam` 確認 EWE LUT path 仍正常
+### v12 Phase 4-6 tile engine + generator（`4785e3d`）
 
-#### Phase 1 還沒做完的剩餘工作
+- **Phase 5 step 1**：`chain_skip_store = chain_out_enable && !conv_partial_final`，chain mode 下 ST_STORE 不發 L1 request 直接 advance
+- **Phase 4**：`closed_loop_conv_requant_chain_probe()`：UDMA + CONV(chain) + REQUANT(use_chain) + L1CRC；`CONV_CHAIN_OUT_FLAG=1<<15`、`REQUANT_USE_CHAIN=1<<12` 常數
+- **Phase 6a** REQUANT tile drain：`tile_drain_count` port（word[8][15:0]），`tile_drain_remaining` reg，ST_DONE 後 advance `active_out_byte_offset`，loop 回 ST_CHAIN_WAIT
+- **Phase 6b** CONV OC tile loop：`conv_tile_oc_count` port（word[31][31:16]），`wgt_tile_l1_offset` reg，ST_STORE 後 advance `wgt_tile_l1_offset += workload_sample_bytes`，loop 回 ST_WGT
+- **Phase 6c**：`closed_loop_conv_requant_oc_tile_probe()` generator
 
-- 確認 chain wire 的 sample-mode 行為：`use_chain_input=0` 時 `chain_psum_ready=0`，CONV 的 chain pulse 應該是無害的（latch 之後在 IDLE 清掉）。需要在 BMM regression PASS 之後加一個 trace 驗證 chain 真的 idle
-- `host.v` 對 `ewe_lut_mode` 等其他 word[3] bit 用法要做衝突檢查；目前我用 word[3][12] 給 `requant_use_chain_input`，沒跟其他衝到（已驗）
+### INT8 BATCH_MATMUL ZP correction（`5eaefcd`）
 
-## 接下來 6 phase 的整體計劃
+chain interface 從 32→64 bit 解決 INT8 BATCH_MATMUL 非零 ZP 問題：
 
-### Phase 1（IN PROGRESS）：CONV↔REQUANT chain infrastructure
+```
+chain_psum_data[31:0]  = psum (acc_out)
+chain_psum_data[63:32] = sum_a = Σ a_q[k]  ← per-sample correction term
+```
 
-見上面「進行中且 BROKEN」段。修好就算 Phase 1 完成。
+- `conv.v`：加 `sum_a` 累加
+- `requant.v`：加 `chain_zp_b`（word[9][7:0]）、`use_act_correction`（word[3][17]）
+- 計算：`corrected = psum - zp_B × sum_a`
+- `bias_eff[n] = -zp_A×sum_b[n] + K×zp_A×zp_B`（compile-time，per-OC）
 
-**收尾條件**：BMM 5/5 PASS、`use_chain_input=1` 路徑可走（雖然 generator 還沒用，但 wire path 通）。
+### BATCH_MATMUL → CONV lowering（`81acbe9`、`5eaefcd`）
 
-### Phase 2：REQUANT FP mode
+`compile_model.py`：BATCH_MATMUL 全面 lower 到 CONV engine：
 
-linter 已經把 port + helper function 寫進 `requant.v`：`fp_mode` / `fp_bias` / `fp32_lt()` / FP32→FP16 cast。剩下要做的：
+- FP16：永遠 lower；INT8：ZP=0 guard 已移除，靠 per-sample correction 處理任意 ZP
+- 每個 batch/head slice → 一個 OP_FC_BMM 層（`fc(bmm)` label）
+- qwen35 BMM：362K cy → 185K cy（−49%）；bmm_int8：366 → 140 cy（−62%）
 
-1. 在 `always @*` 加 fp_mode 分支（mirror SystemC `requant_engine.h:174-213` FP path）：
-   - `quantized_fp = bit_cast(active_input_value) + fp_bias`
-   - `clamped_fp = clamp(quantized_fp, act_min_fp, act_max_fp)`（act_min/act_max 重新解釋為 fp32 bit pattern）
-   - `out_fp16 = fp32_to_fp16(clamped_fp)`
-2. ST_STORE 在 fp_mode 下寫 2 byte（FP16 lane）而不是 1 byte（INT8 lane）
-3. host.v / mdla7_top.v 把 `requant_fp_mode` / `requant_fp_bias` 接線（見上面「修復步驟 3」）
-4. 驗證：synthetic FP CONV layer 跑 chain mode，比對 SystemC FP requant 結果 bit-exact
+### fc(bmm) label + profile 顯示（`19c3e55`）
 
-### Phase 3：REQUANT per-OC params table
+- `OK_FC_BMM = 30`：新 op kind，hardware 同 OK_FC，profile 可區分
+- `program_image.h` / `compile_model.py` / `mdla7_model_runner.cpp`（is_fc_kind() helper）/ `run_systemc.py`
+- View-class TNPS（cy=0, bus=0）：engine 欄顯示 `—`，op 名保留（灰色）
 
-目前 sample REQUANT 一次接 1 組 mult/shift/zp。tile mode 需要：
+### SHAPE → constant-load layer（`de48fb4`）
 
-1. 加 `param_l1_addr` port + `oc_count` port
-2. 新 state `ST_PARAM_LOAD_OC`：從 L1 連續讀 `oc_count` 組 (mult, shift, bias_eff)，存進 `param_mem[]` regs 或 SRAM
-3. PIPE 階段按 oc index 從 `param_mem[oc % CHAIN_LANES]` 取 mult/shift/bias_eff
-4. SystemC `requant_engine.h:245-256` 已有對應 layout（`scale_lut_addr` 起點，後接 `[zp_out|act_min|act_max | mult[OC] | shift[OC] | bias_eff[OC]]`），照搬
+TFLite SHAPE op（輸入 tensor 的維度向量，compile-time 常數）從 `matrlz` 改為：
+- `OK_SHAPE = 31`；wgt area 存 INT32 shape bytes
+- runner：UDMA load wgt→L1，不寫回 DRAM（dram_w=0）
+- Profile：`shape` label，engine=`—`
 
-### Phase 4：Generator emit chain-mode descriptor pair
+### qwen35 KV cache attention models + FP16 BMM reference fix（`7755b00`）
 
-選一個最小 BMM CONV 層（例如 BMM SAM L24 STRIDED_SLICE 後面的小 CONV），發：
+新增 generator `gen_qwen35_kvcache_tflite.py`：
 
-1. UDMA load act + wgt 進 L1
-2. UDMA load REQUANT params 進 L1
-3. CONV descriptor with `chain_out_enable`（不寫 L1）
-4. REQUANT descriptor with `use_chain_input=1` + `param_l1_addr`
-5. UDMA store result + L1CRC verify
+```
+Q [1,8,1,256] × K [1,8,N,256]^T → scores [1,8,1,N] → softmax
+→ scores × V [1,8,N,256] → [1,8,1,256]
+```
 
-驗證：BMM 5/5 仍 PASS，新加的 chain CONV 那層的 `perf_conv` + `perf_requant` 都有 cycles。
+生成 `model/BMM/qwen35_kvcache_{128,512,1024}_fp16.tflite`，cycle 結果：
 
-### Phase 5：CONV 拔 L1 store production path
+| KV 長度 | total cy | Q×Kᵀ/head | softmax | S×V/head |
+|---|---|---|---|---|
+| 128 | 25,299 | 1,559 | 59 | 1,546 |
+| 512 | 88,534 | 5,440 | 285 | 5,478 |
+| 1024 | 172,833 | 10,660 | 416 | 10,672 |
 
-目前 `vf_conv_sample_engine` 有 `ST_STORE`（寫 L1）。Production 規劃下這條 path 不該存在（per memory.md）。但 sample/debug 還想留。
-
-做法：
-
-1. 加 `chain_out_enable` port — generator 設 1 時 CONV 跳過 ST_STORE，直接 ST_DONE，只 push chain
-2. FP path 同步改：`chain_psum_data` 用 fp32 bit-cast（目前 `fp_sum_bits[31:0]` 取低 32 位，可能不對；要確認 `fp_sum_bits` 的 layout 是 fp32 在 [31:0] 還是 fp64。看 conv.v line 930 `$realtobits(fp_sum)` 是 fp64 → 取 [31:0] 不對，需要先 `$shortrealtobits` 或手動 cast）
-3. 移除 `vf_conv_int8_mac` 內建的 `mbqm + zp + clamp`（這是不該在 CONV 做的事）— 但這會破壞 sample mode 的 out_q 輸出，需要慎重；可能要保留兩個 primitive：`vf_conv_int8_mac_legacy`（含 requant，sample 用）vs `vf_conv_int8_mac_pure`（純 MAC，chain 用）
-
-### Phase 6：Sample-engine → tile-engine
-
-最大改動。整體 CONV/REQUANT 從「一次處理 1 sample」改成「一次掃整個 tile / layer」。涉及：
-
-- 描述子格式重新設計（tile shape、stride、padding 等已在 sample 描述子裡，但 traversal loop 要從 testbench/host 移到 engine 內部）
-- CONV 內部加 OH/OW/OC 三層 nested loop，每個 sample 推一筆 chain
-- REQUANT 內部加同樣的 NHWC drain loop
-- Generator 改成「一個 tile 一個 CONV+REQUANT descriptor pair」而非「一個 sample 一個」
-- BMM regression 的 perf_conv / perf_requant cycles 才會跟 SystemC `conv_cycles()` 對齊
-- DRAM-model 16-byte/req 限制要修（multi-beat read 或 burst 模式），否則 weight load 會超慢
-
-預估規模：~1500 行 RTL changes、~500 行 Python generator changes、testbench 補 driver。**這是多 session 工作，不要嘗試一次完成**。
-
-## 已知 follow-up（不在這次 chain 重構直接 scope 內）
-
-1. **DRAM model multi-beat**：`vf_dram_model` 一次只回 16 byte。Phase 6 weight load 要解決（要嘛 model 升級成 burst，要嘛 generator 用 16-beat UDMA chain）
-2. **INT16 LUT engine RTL path**：SystemC 有 `run_unary_int16_lut`，verilog 還沒實作（需要 64K-entry SRAM + 16-bit indexed lookup）。等 INT16 unary model 出現再做
-3. **qwen35 7 個 materialize fallback** 算 deterministic reference，但 reference bytes 跟 TFLite 比可能不 bit-exact（特別 RANDOM_STANDARD_NORMAL）；如果未來要用 qwen35 做 perf comparison 要重新校準
-4. **`bring-up sample CONV L1 write`**：memory.md 已標 production datapath 不該有，但目前還在用。Phase 5 才會處理
+FP16 BMM reference bug fix：
+- 舊：`np.matmul(a.float32, b.float32)` — BLAS 化，對大 N 可能有 1-ULP 差異
+- 新：`conv_fp_ref(a.fp16→f32, b.T.fp16→f32, ...)` — 與 engine `compute_fp()` 相同的 sequential FP32 累加 + FP16 operands；也修了遺漏的 `.T` 轉置
 
 ---
 
-# 原 P0–P6 計劃（仍部分有效）
+## 目前整體狀態
 
-下方原本的 P0–P6 是更早期（CONV/REQUANT 還沒進行重構時）的待補清單。Phase 1–6 chain 重構完成後，原 P0–P3 的「regression coverage / generator full tile / RTL full traversal」會自然收斂。原 P4（final answer verification）和 P5（performance correlation）仍是獨立工作。
+### Regression
 
-## P0：報表與 regression 語意修正（仍有效）
+```
+BMM (8 models):  SystemC 5/8 clean  (3 compile-skipped:1 = DEQUANTIZE in FP16 TFLite，無害)
+                 Verilog DPI 8/8 PASS
+```
 
-1. `run_verilog.py` 必須偵測 `.bin` 內有 compute layers，但 generated descriptor 沒有 compute op 的情況。
+`compile-skipped:1` 只是 FP16 conversion 產生的 DEQUANTIZE op 被 skip 的資訊，不影響 pass/fail。
 
-   - 條件：model layers 包含 CONV/EWE/POOL/TNPS/REQUANT/SOFTMAX 等 compute op。
-   - 但 generated program 的 `conv/ewe/pool/tnps/requant == 0`。
-   - 結果不可顯示成一般 PASS performance row。
-   - 應標成 `NO-COMPUTE`、`MATERIALIZED-CHECK` 或直接 FAIL，擇一固定 policy。
+### Descriptor bit 全覽（v12 完整版）
 
-2. HTML per-model report 要清楚標出 descriptor coverage。
-
-   - 顯示 compute descriptor counts。
-   - 顯示 materialized/fallback descriptor counts。
-   - 顯示 unsupported / not-lowered layer list。
-   - 如果 engine counters 全 0，要在頁面上明確寫出原因。
-
-3. profile index 的 ratio 欄位要排除 materialized-only rows。
-
-   - materialized-only 不可計入 `verilog/cx`。
-   - `verilog_total_cyc` 只統計真正有 compute descriptor 的 row。
-
-## P1：Compiler / `.bin` metadata 要補齊（仍有效）
-
-1. `.bin` 需要讓 Verilog 能知道每一層是：
-
-   - lowered to hardware engine
-   - fused into previous/next layer
-   - materialized fallback
-   - unsupported
-
-2. 對 fused layer，要能追蹤 final answer 比對來源。
-
-   - 如果 CX fuse 多層，Verilog 要知道 fused group 的 output tensor。
-   - report 要列出 fused group：起始 layer、結束 layer、output tensor offset/size。
-
-3. unsupported op 不可靜默 materialize。
-
-   - `SOFTMAX`、複雜 `TRANSPOSE`、`RESHAPE`、`GATHER/MATERIALIZE` 等要有明確 status。
-   - regression 要能區分：
-     - supported and executed in Verilog
-     - unsupported but checked through materialized output
-     - unsupported and unchecked
-
-## P2：Generator 要從 sample/check 改成 full layer/tile descriptor（被 Phase 4-6 取代）
-
-詳見 Phase 4-6。原文保留：
-
-1. `batch/gen_verilog_program.py` 要為 supported layers 產生完整 tile traversal。
-
-   每個 layer 應是：
-
-   ```text
-   DRAM input/weight -> UDMA -> L1
-   L1 -> engine compute tile
-   engine output -> L1
-   L1 -> UDMA -> DRAM output
-   final/check CRC
-   ```
-
-2. BMM SAM model 先補這些 op 的 descriptor：
-
-   - INT8 CONV full tile descriptor
-   - INT8 EWE/MUL/SUB full tile descriptor
-   - TNPS / TRANSPOSE descriptor
-   - RESHAPE / S2D / D2S descriptor
-   - SOFTMAX descriptor or explicit unsupported status
-
-3. Descriptor 不可只挑 sample。
-
-   - 目前 sample/probe 只能用於 bring-up。
-   - regression PASS 必須跑足夠 tile 覆蓋，最後答案要和 golden 對上。
-
-4. 對每個 layer 產生 descriptor summary。
-
-   - layer id
-   - op type
-   - tile count
-   - read bytes
-   - write bytes
-   - expected output bytes
-   - check bytes
-
-## P3：RTL engine 要補完整 compute path（被 Phase 1-6 取代）
-
-1. CONV — 補完整 OH/OW/OC/KH/KW/IC traversal，輸出走 chain 不寫 L1（見 Phase 5-6）
-2. REQUANT — 接 CONV chain，full tile（見 Phase 1-3）
-3. EWE / MUL / SUB — 完整 tensor tile（部分已隨 LUT engine 完成；INT8 ADD/MUL/SUB 還是 sample）
-4. POOL — 完整 pooling window traversal（未動）
-5. TNPS / TRANSPOSE / RESHAPE — 已支援 BMM SAM 大部分，仍 sample-level
-6. SOFTMAX — 仍只在 SystemC 跑，Verilog 沒原生支援，generator 走 generic ref-CRC
-
-## P4：Final answer verification 要補齊（仍有效）
-
-1. 每個 model 必須有最後 output tensor check。
-
-   - 最終 output CRC 或 byte compare。
-   - 不是只 check 中間 materialized layer。
-
-2. fused group 要比對 fused group output。
-
-   - 如果多層 fuse，Verilog 不一定逐層 check。
-   - 但 fused output 必須和 CX/fast golden 對上。
-
-3. layer check 與 final check 要分開顯示。
-
-   - layer partial check 不能讓 final answer 變 PASS。
-   - final output 沒 check 到，答案不可顯示 PASS。
-
-## P5：Performance correlation（仍有效）
-
-1. `verilog_cyc` 只使用 RTL `perf_total`。
-
-   - 不恢復 `--cycle`。
-   - 不使用 host stopwatch。
-   - 不新增 host synthetic cycle command。
-
-2. Engine utilization 只使用 RTL counters。
-
-   - `perf_conv` / `perf_requant` / `perf_ewe` / `perf_pool` / `perf_tnps` / `perf_udma_r` / `perf_udma_w`
-
-3. 只有 full compute descriptor row 可以和 CX 算 ratio。
-
-   - materialized-only row 不計入。
-   - sample/probe row 不計入。
-   - unsupported unchecked row 直接 FAIL。
-
-4. 目標：Synth/CX vs Verilog correlation 誤差小於 10%。
-
-## P6：建議實作順序（被 Phase 1-6 取代，原文保留參考）
-
-1. 在 `run_verilog.py` 加 descriptor coverage classification
-2. 在 `gen_verilog_program.py` 對 BMM SAM supported ops 發 compute descriptors（先 INT8 EWE/TNPS/RESHAPE，再 CONV full tile）
-3. 補 RTL EWE/TNPS/RESHAPE full tile traversal
-4. 補 RTL CONV full tile traversal
-5. 補 final output verification
-6. 跑 BMM 全集：`./batch/run_verilog.py --filter bmm --rerun-all --dpi`
+| 欄位 | word | bits | engine |
+|---|---|---|---|
+| `conv_chain_out_enable` | [3] | [15] | CONV |
+| `requant_use_chain_input` | [3] | [12] | REQUANT |
+| `requant_fp_mode` | [3] | [13] | REQUANT |
+| `requant_param_load_mode` | [3] | [14] | REQUANT |
+| `requant_use_act_correction` | [3] | [17] | REQUANT |
+| `conv_tile_oc_count` | [31] | [31:16] | CONV |
+| `requant_fp_bias` | [5] | [31:0] | REQUANT |
+| `requant_param_l1_addr` | [6] | [21:0] | REQUANT |
+| `requant_oc_count` | [7] | [15:0] | REQUANT |
+| `requant_oc_index` | [7] | [31:16] | REQUANT |
+| `requant_tile_drain_count` | [8] | [15:0] | REQUANT |
+| `requant_chain_zp_b` | [9] | [7:0] | REQUANT |
+| `chain_psum_data[31:0]` | chain | — | CONV→REQUANT psum |
+| `chain_psum_data[63:32]` | chain | — | CONV→REQUANT sum_a |
 
 ---
 
-# 立即下一步（next session 接手用）
+## 接下來 next session 的建議工作
 
-1. 把 `requant.v` line 30/37 重複 `fp_mode` 砍一個
-2. 把 `mdla7_top.v` line 1353 附近重複 `.fp_mode(...)` binding 砍一個
-3. 把 `requant_fp_mode` / `requant_fp_bias` 補到 host.v / mdla7_top.v / Testbench_host_program.v 三邊
-4. `rm -rf rtl/obj/verilog/host && ./batch/run_verilog.py --filter bmm --rerun-all --dpi`
-5. 預期：5/5 PASS（chain wire 在 use_chain_input=0 時應為 no-op）
-6. 完成 Phase 1，進 Phase 2（FP mode functional path），逐步推 3→6
+### 1. Phase 6：full tile traversal（最大 scope，multi-session）
+
+目前 CONV/REQUANT 的 Phase 6b/6a 是 OC-only tile loop（每個 descriptor 處理多個 OC，相同 spatial position）。真正的 tile engine 需要：
+
+- CONV：OH/OW/OC 三層 nested loop（每個 descriptor 掃 tile_h × tile_w × tile_oc 個輸出）
+- REQUANT：對應的 drain loop
+- Generator：為每個 layer 的完整 tile traversal 發 descriptor pair
+- DRAM model multi-beat：`vf_dram_model` 目前每次只回 16 byte，weight load 要 burst
+
+預估規模：~1000 行 RTL + ~500 行 Python。**分多個 sub-session 做。**
+
+### 2. INT8 KV cache attention model
+
+`qwen35_kvcache_{N}_fp16.tflite` 目前是 FP16。要加 INT8 版本：
+- TFLite quantization 在 softmax 邊界有 shape inference 問題（見 generator 的 error）
+- Fix：在 `gen_qwen35_kvcache_tflite.py` 改 Keras model 寫法避免 softmax→BMM shape mismatch
+
+### 3. BATCH_MATMUL INT8 注意事項
+
+目前 INT8 BMM lowering 正確的前提：`bias_eff[n]` 用 compile-time 的 B reference data 計算 `-zp_A × sum_b[n]`。B 是 dynamic activation，inference 時換 token 就會錯。
+
+- ArcSim regression（固定 binary data）：✅ bit-exact
+- Production chip driver：需要 dynamic `sum_b` correction（CONV 也送 sum_b 給 REQUANT）
+
+如果要做 production path，需要把 `chain_psum_data` 再擴成 96-bit（加 `sum_b[n]` per OC）或用別的機制。
+
+### 4. REVERSE_V2 lowering
+
+目前 `REVERSE_V2` 仍然是 `matrlz`（flip along axes）。類似 SHAPE 的做法：
+- Reverse 是 byte-movement，走 TNPS
+- Compile-time 計算 flipped bytes → 存 wgt area → UDMA load 或 TNPS copy
+
+### 5. Profile HTML 改進
+
+- `fc(bmm)` 在 profile HTML 中顯示藍色粗體（已做）
+- 可考慮加 KV length 標籤到 fc(bmm) 行（`fc(bmm, kv=1024)`）方便識別
+- matrlz 裡還有 RESHAPE、RANDOM_STANDARD_NORMAL 可考慮類似 SHAPE 的處理
+
+---
+
+## 已知 follow-up（不在 immediate scope）
+
+1. **DRAM multi-beat**：`vf_dram_model` 16 byte/request，weight load 慢；Phase 6 tile engine 需要 burst
+2. **INT16 LUT engine**：SystemC 有 `run_unary_int16_lut`，Verilog 還沒（需要 64K-entry SRAM）
+3. **SOFTMAX native Verilog**：目前走 generic ref-CRC，沒有真正 engine
+4. **FP32 BATCH_MATMUL**：FP32 模型的 BMM 也用 FP16 路（compile 轉成 FP16 存），精度 OK 但概念上不純
+
+---
+
+## 快速重建指令
+
+```bash
+# SystemC rebuild
+cd /Volumes/4T_OFFICE/_Claude/MDLA7_Claude/systemc && make
+
+# BMM regression (SystemC fast)
+~/.venvs/mdla7/bin/python batch/run_systemc.py --filter bmm --rerun-all
+
+# BMM regression (Verilog DPI)
+rm -rf rtl/obj/verilog/host
+./batch/run_verilog.py --filter bmm --rerun-all --dpi
+
+# 生成新的 KV cache 模型
+~/.venvs/mdla7/bin/python systemc/scripts/gen_qwen35_kvcache_tflite.py --kv-len 128 512 1024 --dtype fp16
+```
