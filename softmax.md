@@ -165,6 +165,25 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 | **E** — Verilog RTL | rtl/verilog/ewe.v, rtl/verilog/pool.v | not started — `ewe.v` currently dispatches 2-bit subtype (line 472); needs widening + handlers for ES_EXP (subtype 9) and ES_DIV (subtype 10). `pool.v` needs PM_SUM mode. |
 | **F** — Verify | L1Mesh_report.md | **done (FP cx)** — Stage C verified in cx mode on `bmm_softmax_bmm_fp32` and `qwen35_attention_s128`. EWE 2→49 and POOL 0→32 tasks for the small fp32 model (16 rows × 5 sub-ops); per-engine deltas documented in L1Mesh_report.md "Descriptor-level decomposition" section. BMM cx 9/13 clean = baseline. verilog: TBD. |
 
+### `MDLA7_SOFTMAX_DECOMPOSE` is now default-on
+
+Engine-internal decomposition runs by default (it is bit-exact vs the
+monolithic LUT/FP softmax — `4ede074` showed Fast/cx/Verilog all 13/13
+equal to the monolithic baseline). The env flag still exists for opt-out:
+
+```bash
+# default — chain fires inside EweEngine, profile splits into 5 sub-rows
+./batch/run_systemc.py --filter bmm --fast-only --rerun-all --no-html
+
+# opt out for a perf comparison / regression bisect
+MDLA7_SOFTMAX_DECOMPOSE=0 ./batch/run_systemc.py ...
+```
+
+Note that the descriptor-level `MDLA7_DECOMPOSE_SOFTMAX=1` (Stage C, the
+5–7-descriptors-per-row form) remains opt-in because it materially
+changes the program stream and scheduling, not just engine-internal
+behaviour.
+
 ### Next pickup
 
 1. ~~Verify rows==1 FP softmax path~~ — done; bmm_softmax_bmm_fp32.tflite passes (16 rows × K=8, fuse-eligible, fires the new tile chain).

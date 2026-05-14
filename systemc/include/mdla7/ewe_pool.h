@@ -67,9 +67,13 @@ static constexpr uint32_t EWE_SOFTMAX_SCRATCH_BASE =
     L1MESH_BYTES - EWE_SOFTMAX_SCRATCH_BYTES;
 
 inline bool softmax_decompose_enabled() {
+    // v13: engine-internal 5-phase decomposition is on by default; the env
+    // flag still exists so a regression bisect or perf comparison can opt out
+    // with MDLA7_SOFTMAX_DECOMPOSE=0. Bit-exact vs the monolithic LUT/FP path
+    // (see softmax.md handoff Stage F).
     static const bool en = []() {
         const char* env = std::getenv("MDLA7_SOFTMAX_DECOMPOSE");
-        return env && env[0] && env[0] != '0';
+        return !env || (env[0] && env[0] != '0');
     }();
     return en;
 }

@@ -11673,15 +11673,15 @@ int sc_main(int argc, char* argv[]) {
 
         // accumulate the profile entry.
         // v13: when SOFTMAX is decomposed into POOL_MAX → EWE_SUB → EWE_EXP →
-        // POOL_SUM → EWE_DIV (via MDLA7_SOFTMAX_DECOMPOSE=1), emit 5 sub-rows
-        // so the profile / HTML report visibly shows the chain instead of
-        // rolling all traffic into one "softmax" row. Cycles + SRAM bytes are
-        // split per phase using the same arithmetic model that EweEngine uses
-        // internally (POOL @ 2× lanes, EWE @ 1× lanes; SRAM bytes from the
+        // POOL_SUM → EWE_DIV (engine-internal chain, on by default — opt out
+        // with MDLA7_SOFTMAX_DECOMPOSE=0), emit 5 sub-rows so the profile /
+        // HTML report visibly shows the chain instead of rolling all traffic
+        // into one "softmax" row. Cycles + SRAM bytes are split per phase
+        // using the same arithmetic model that EweEngine uses internally
+        // (POOL @ 2× lanes, EWE @ 1× lanes; SRAM bytes from the
         // intermediate tensor sizes).
         const bool decompose_sm_profile =
-            (L.op_kind == OK_SOFTMAX) &&
-            std::getenv("MDLA7_SOFTMAX_DECOMPOSE") != nullptr;
+            (L.op_kind == OK_SOFTMAX) && softmax_decompose_enabled();
         if (decompose_sm_profile) {
             const uint32_t es = (L.dtype == DT_FP16 || L.dtype == DT_BFP16 ||
                                  L.dtype == DT_FP8 || L.dtype == DT_INT16x16) ? 2u : 1u;

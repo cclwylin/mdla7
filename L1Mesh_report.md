@@ -68,16 +68,18 @@ the ~1.87 MB increase in L1Mesh bytes in the totals table above.
 ## Activate
 
 ```bash
-# Engine-internal: one ES_SOFTMAX descriptor that internally runs the
-# 5-phase chain (visible per-phase in the EWE engine trace, but still a
-# single descriptor in the program stream):
-export MDLA7_SOFTMAX_DECOMPOSE=1
+# Engine-internal decomposition runs by default — one ES_SOFTMAX
+# descriptor that internally runs the 5-phase chain (visible per-phase
+# in the EWE engine trace, but still a single descriptor in the
+# program stream). Set the env to 0 to opt out for a baseline diff:
+# export MDLA7_SOFTMAX_DECOMPOSE=0
 
-# Descriptor-level (Stage C, commit 679783f): compiler emits the chain
-# as 5 distinct descriptors per row — POOL_MAX, EWE_SUB, EWE_EXP,
-# POOL_SUM, EWE_DIV — so the EWE and POOL engines pick the work up
-# independently and the L1Mesh sees real per-engine R/W traffic.
-# Currently FP16 only.
+# Descriptor-level (Stage C, commits 679783f + 13f54aa): compiler
+# emits the chain as 5 distinct descriptors per row — POOL_MAX,
+# EWE_SUB, EWE_EXP, POOL_SUM, EWE_DIV — so the EWE and POOL engines
+# pick the work up independently and the L1Mesh sees real per-engine
+# R/W traffic. INT8 inputs get DEQUANT_INT8 + chain + QUANT_FP_INT8
+# (7 sub-descriptors per row). Still opt-in:
 export MDLA7_DECOMPOSE_SOFTMAX=1
 
 ./batch/run_systemc.py --filter bmm --fast-only --rerun-all --no-html
@@ -85,9 +87,12 @@ export MDLA7_DECOMPOSE_SOFTMAX=1
 ./batch/run_verilog.py  --filter bmm --rerun-all --timeout 180 --no-html
 ```
 
-Decomposition is opt-in via env flag because the 1 MB scratchpad at the
-top of L1MESH collides with models that already saturate L1; toggle off
-to revert to the monolithic LUT softmax.
+The engine-internal decomposition is bit-exact vs the monolithic
+LUT/FP softmax and so it is on by default. The descriptor-level
+decomposition is still opt-in via `MDLA7_DECOMPOSE_SOFTMAX=1` because
+it changes the program stream layout (5–7× more descriptors per
+softmax row) which affects scheduling and is not always what a perf
+sweep wants.
 
 ## Descriptor-level decomposition (MDLA7_DECOMPOSE_SOFTMAX, FP only)
 
