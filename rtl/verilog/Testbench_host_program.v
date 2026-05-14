@@ -188,6 +188,9 @@ module Testbench_host_program;
     wire [15:0] conv_tile_oc_count;
     wire [15:0] conv_tile_ow_count;
     wire [21:0] conv_act_tile_col_stride;
+    wire [15:0] conv_tile_oh_count;
+    wire [21:0] conv_act_tile_row_stride;
+    wire        conv_spatial_tile_enable;
     wire requant_sramcrc_mode;
     wire [31:0] requant_sramcrc_expected_crc;
     wire [31:0] requant_sramcrc_expected_count;
@@ -447,6 +450,9 @@ module Testbench_host_program;
         .conv_tile_oc_count(conv_tile_oc_count),
         .conv_tile_ow_count(conv_tile_ow_count),
         .conv_act_tile_col_stride(conv_act_tile_col_stride),
+        .conv_tile_oh_count(conv_tile_oh_count),
+        .conv_act_tile_row_stride(conv_act_tile_row_stride),
+        .conv_spatial_tile_enable(conv_spatial_tile_enable),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
@@ -682,6 +688,9 @@ module Testbench_host_program;
         .conv_tile_oc_count(conv_tile_oc_count),
         .conv_tile_ow_count(conv_tile_ow_count),
         .conv_act_tile_col_stride(conv_act_tile_col_stride),
+        .conv_tile_oh_count(conv_tile_oh_count),
+        .conv_act_tile_row_stride(conv_act_tile_row_stride),
+        .conv_spatial_tile_enable(conv_spatial_tile_enable),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
         .requant_out_byte_offset(requant_out_byte_offset),

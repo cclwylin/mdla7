@@ -373,11 +373,20 @@ module vf_conv_sample_engine #(
     input      [15:0]             conv_tile_oc_count,
     // v12 Phase 6c: OW spatial tile loop. When conv_tile_ow_count > 1, after
     // completing the OC loop for one output column the ACT base advances by
-    // act_tile_col_stride and the OC loop repeats. REQUANT receives
-    // tile_oc × tile_ow chain pulses; its tile_drain_count should equal
-    // tile_oc × tile_ow. Default 0 treated as 1 (single position).
+    // act_tile_col_stride and the OC loop repeats. Default 0 treated as 1.
     input      [15:0]             conv_tile_ow_count,
-    input      [21:0]             act_tile_col_stride   // L1 bytes per OW step
+    input      [21:0]             act_tile_col_stride,  // L1 bytes per OW step
+    // v12 Phase 6d: OH spatial tile loop (outermost). When conv_tile_oh_count > 1,
+    // after the OW loop completes the ACT base advances by act_tile_row_stride,
+    // the OW counter resets, and the (OW × OC) loops repeat. REQUANT receives
+    // tile_oh × tile_ow × tile_oc chain pulses total. Default 0 treated as 1.
+    input      [15:0]             conv_tile_oh_count,
+    input      [21:0]             act_tile_row_stride,  // L1 bytes per OH step
+    // v12 Phase 6c/6d: spatial tile enable (word[3][18]). Must be 1 to activate
+    // OW/OH looping. Guards against garbage tile counts that arise when non-L1
+    // descriptors carry WGT data in words[8..11]; with this bit=0 both loops
+    // default to 1 iteration regardless of the other tile count fields.
+    input                         conv_spatial_tile_enable
 );
 `ifdef MDLA7_DPI_DATAPATH
     import "DPI-C" function void mdla7_dpi_conv_fp16(
@@ -413,6 +422,8 @@ module vf_conv_sample_engine #(
     reg [21:0] wgt_tile_l1_offset;   // v12 Phase 6b: byte offset into L1 for wgt
     reg [15:0] tile_ow_remaining;    // v12 Phase 6c: remaining OW spatial iterations
     reg [21:0] act_tile_ow_offset;   // v12 Phase 6c: cumulative ACT L1 offset per OW step
+    reg [15:0] tile_oh_remaining;    // v12 Phase 6d: remaining OH spatial iterations
+    reg [21:0] act_tile_oh_offset;   // v12 Phase 6d: cumulative ACT L1 offset per OH step
     reg [31:0] compute_remaining;
     integer fp_i;
     integer i16_i;
@@ -663,7 +674,9 @@ module vf_conv_sample_engine #(
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
         (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0] +
                               {{(ADDR_WIDTH-22){1'b0}}, wgt_tile_l1_offset}) :
-        (state == ST_ACT) ? (l1_req_base_addr + {{(ADDR_WIDTH-22){1'b0}}, act_tile_ow_offset}) :
+        (state == ST_ACT) ? (l1_req_base_addr +
+                              {{(ADDR_WIDTH-22){1'b0}}, act_tile_oh_offset} +
+                              {{(ADDR_WIDTH-22){1'b0}}, act_tile_ow_offset}) :
         l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
                           (state == ST_STORE) ? store_bytes :
@@ -1052,6 +1065,8 @@ module vf_conv_sample_engine #(
             wgt_tile_l1_offset <= 22'd0;
             tile_ow_remaining <= 16'd1;
             act_tile_ow_offset <= 22'd0;
+            tile_oh_remaining <= 16'd1;
+            act_tile_oh_offset <= 22'd0;
             compute_remaining <= 32'd0;
             active_act_vec <= {MAX_ELEMS*8{1'b0}};
             active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
@@ -1085,9 +1100,16 @@ module vf_conv_sample_engine #(
                     // v12 Phase 6b: latch OC tile count; 0 treated as 1.
                     tile_oc_remaining <= (conv_tile_oc_count == 16'd0) ? 16'd1 : conv_tile_oc_count;
                     wgt_tile_l1_offset <= 22'd0;
-                    // v12 Phase 6c: latch OW tile count; 0 treated as 1.
-                    tile_ow_remaining <= (conv_tile_ow_count == 16'd0) ? 16'd1 : conv_tile_ow_count;
+                    // v12 Phase 6c/6d: spatial tile counts. Gate on
+                    // conv_spatial_tile_enable (word[3][18]) so that existing
+                    // descriptors with WGT data in words[8..11] do not
+                    // accidentally activate the spatial loops.
+                    tile_ow_remaining <= (conv_spatial_tile_enable && conv_tile_ow_count != 16'd0)
+                                        ? conv_tile_ow_count : 16'd1;
                     act_tile_ow_offset <= 22'd0;
+                    tile_oh_remaining <= (conv_spatial_tile_enable && conv_tile_oh_count != 16'd0)
+                                        ? conv_tile_oh_count : 16'd1;
+                    act_tile_oh_offset <= 22'd0;
                     // v12 Phase 4: keep chain_psum_valid sticky across IDLE
                     // until REQUANT handshakes; only clear on real ready ack.
                     if (chain_psum_valid && chain_psum_ready)
@@ -1244,10 +1266,12 @@ module vf_conv_sample_engine #(
                                              :              {conv_sum_act_out, acc_out};
                             chain_psum_valid <= 1'b1;
                         end
-                        // v12 Phase 6b/6c: nested OC × OW tile loop.
-                        // Inner loop (OC): advance wgt, re-run ST_WGT, ACT stays.
-                        // Outer loop (OW): when OC exhausted, advance ACT base by
-                        // act_tile_col_stride, reset OC/wgt, re-run ST_ACT.
+                        // v12 Phase 6b/6c/6d: nested OC × OW × OH tile loop.
+                        // Innermost (OC): advance wgt pointer, re-run ST_WGT.
+                        // Middle (OW): when OC exhausted, advance ACT col offset,
+                        //              reset OC/wgt, re-run ST_ACT.
+                        // Outermost (OH): when OW exhausted, advance ACT row offset,
+                        //                 reset OW/OC/wgt, re-run ST_ACT.
                         if (tile_oc_remaining > 16'd1) begin
                             tile_oc_remaining <= tile_oc_remaining - 16'd1;
                             wgt_tile_l1_offset <= wgt_tile_l1_offset +
@@ -1259,7 +1283,21 @@ module vf_conv_sample_engine #(
                             tile_ow_remaining    <= tile_ow_remaining - 16'd1;
                             act_tile_ow_offset   <= act_tile_ow_offset +
                                                     act_tile_col_stride;
-                            // Reset OC loop and wgt pointer for the new column.
+                            tile_oc_remaining    <= (conv_tile_oc_count == 16'd0)
+                                                    ? 16'd1 : conv_tile_oc_count;
+                            wgt_tile_l1_offset   <= 22'd0;
+                            act_req_sent         <= 1'b0;
+                            wgt_req_sent         <= 1'b0;
+                            state <= ST_ACT;
+                        end else if (tile_oh_remaining > 16'd1) begin
+                            // OW loop done for this OH row — advance to next row.
+                            tile_oh_remaining    <= tile_oh_remaining - 16'd1;
+                            act_tile_oh_offset   <= act_tile_oh_offset +
+                                                    act_tile_row_stride;
+                            // Reset OW col offset and OW counter for new row.
+                            act_tile_ow_offset   <= 22'd0;
+                            tile_ow_remaining    <= (conv_tile_ow_count == 16'd0)
+                                                    ? 16'd1 : conv_tile_ow_count;
                             tile_oc_remaining    <= (conv_tile_oc_count == 16'd0)
                                                     ? 16'd1 : conv_tile_oc_count;
                             wgt_tile_l1_offset   <= 22'd0;

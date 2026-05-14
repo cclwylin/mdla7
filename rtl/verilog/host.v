@@ -66,6 +66,14 @@ module host #(
     output reg [15:0]  conv_tile_ow_count,
     // v12 Phase 6c: ACT L1 byte stride per OW step (cmd_mem[base+10][21:0]).
     output reg [21:0]  conv_act_tile_col_stride,
+    // v12 Phase 6d: CONV OH spatial tile count (cmd_mem[base+9][23:8]). 0 = 1.
+    output reg [15:0]  conv_tile_oh_count,
+    // v12 Phase 6d: ACT L1 byte stride per OH step (cmd_mem[base+11][21:0]).
+    output reg [21:0]  conv_act_tile_row_stride,
+    // v12 Phase 6c/6d: spatial tile enable (cmd_mem[base+3][18]). Must be 1 to
+    // activate OW/OH loops. Keeps existing descriptors immune to garbage in
+    // words[8..11] that hold WGT data in non-L1 mode.
+    output reg         conv_spatial_tile_enable,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -406,9 +414,14 @@ module host #(
             // v12 Phase 6c: OW tile count from word[8] upper 16 bits (REQUANT
             // uses word[8][15:0] for tile_drain_count; upper bits were unused).
             conv_tile_ow_count <= cmd_mem[base + 8][31:16];
-            // v12 Phase 6c: ACT col stride from word[10] lower 22 bits (safe in
-            // L1-mode descriptors where wgt_vec word[10]/[11] is ignored).
+            // v12 Phase 6c: ACT col stride from word[10] lower 22 bits.
             conv_act_tile_col_stride <= cmd_mem[base + 10][21:0];
+            // v12 Phase 6d: OH tile count from word[9][23:8].
+            conv_tile_oh_count <= cmd_mem[base + 9][23:8];
+            // v12 Phase 6d: ACT row stride from word[11] lower 22 bits.
+            conv_act_tile_row_stride <= cmd_mem[base + 11][21:0];
+            // v12 Phase 6c/6d: spatial tile enable from word[3][18].
+            conv_spatial_tile_enable <= cmd_mem[base + 3][18];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
@@ -744,6 +757,9 @@ module host #(
             conv_tile_oc_count <= 16'd0;
             conv_tile_ow_count <= 16'd0;
             conv_act_tile_col_stride <= 22'd0;
+            conv_tile_oh_count <= 16'd0;
+            conv_act_tile_row_stride <= 22'd0;
+            conv_spatial_tile_enable <= 1'b0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;
