@@ -366,7 +366,11 @@ module vf_conv_sample_engine #(
     input                         chain_out_enable,
     output reg                    chain_psum_valid,
     output reg signed [31:0]      chain_psum_data,
-    input                         chain_psum_ready
+    input                         chain_psum_ready,
+    // v12 Phase 6b: OC tile loop. When conv_tile_oc_count > 1, after each
+    // ST_STORE the weight pointer advances by workload_sample_bytes and ST_WGT
+    // re-runs while ACT stays resident. Default 0 treated as 1 (sample mode).
+    input      [15:0]             conv_tile_oc_count
 );
 `ifdef MDLA7_DPI_DATAPATH
     import "DPI-C" function void mdla7_dpi_conv_fp16(
@@ -398,6 +402,8 @@ module vf_conv_sample_engine #(
     localparam [31:0] FNV_PRIME = 32'd16777619;
 
     reg [2:0] state;
+    reg [15:0] tile_oc_remaining;    // v12 Phase 6b: remaining OC iterations
+    reg [21:0] wgt_tile_l1_offset;   // v12 Phase 6b: byte offset into L1 for wgt
     reg [31:0] compute_remaining;
     integer fp_i;
     integer i16_i;
@@ -622,9 +628,13 @@ module vf_conv_sample_engine #(
                                                                          workload_outputs;
     wire [31:0] workload_mac_ops = workload_lane_count * workload_output_count;
     wire [31:0] mac_cycles = ceil_div(workload_mac_ops, 32'd16) + 32'd1;
+    // v12 Phase 5: chain-skip — when chain_out_enable=1 and conv_partial_final=0
+    // the CONV sample is being forwarded to REQUANT via the chain, so skip the
+    // actual L1 write (no writeback anyway since conv_writeback_valid_mask=0).
+    wire chain_skip_store = chain_out_enable && !conv_partial_final;
     wire req_state = ((state == ST_ACT) && (!read_sample_from_l1 || !act_req_sent)) ||
                      ((state == ST_WGT) && (!read_sample_from_l1 || !wgt_req_sent)) ||
-                     (state == ST_STORE);
+                     ((state == ST_STORE) && !chain_skip_store);
 
     // v12 Phase 4: only gate start on chain availability when there's a real
     // chain consumer (chain_out_enable was high on the producing descriptor).
@@ -635,10 +645,12 @@ module vf_conv_sample_engine #(
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = req_state;
     assign l1_req_write = (state == ST_STORE);
+    // v12 Phase 6b: wgt L1 address advances by wgt_tile_l1_offset each OC iteration.
     assign l1_req_addr =
         ((state == ST_STORE) && conv_partial_final && !read_sample_from_l1) ?
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
-        (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0]) :
+        (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0] +
+                              {{(ADDR_WIDTH-22){1'b0}}, wgt_tile_l1_offset}) :
         l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
                           (state == ST_STORE) ? store_bytes :
@@ -1014,6 +1026,8 @@ module vf_conv_sample_engine #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= ST_IDLE;
+            tile_oc_remaining <= 16'd1;
+            wgt_tile_l1_offset <= 22'd0;
             compute_remaining <= 32'd0;
             active_act_vec <= {MAX_ELEMS*8{1'b0}};
             active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
@@ -1044,6 +1058,9 @@ module vf_conv_sample_engine #(
                     compute_remaining <= 32'd0;
                     act_req_sent <= 1'b0;
                     wgt_req_sent <= 1'b0;
+                    // v12 Phase 6b: latch OC tile count; 0 treated as 1.
+                    tile_oc_remaining <= (conv_tile_oc_count == 16'd0) ? 16'd1 : conv_tile_oc_count;
+                    wgt_tile_l1_offset <= 22'd0;
                     // v12 Phase 4: keep chain_psum_valid sticky across IDLE
                     // until REQUANT handshakes; only clear on real ready ack.
                     if (chain_psum_valid && chain_psum_ready)
@@ -1121,7 +1138,7 @@ module vf_conv_sample_engine #(
                         state <= ST_STORE;
                 end
                 ST_STORE: begin
-                    if (l1_req_ready) begin
+                    if (l1_req_ready || chain_skip_store) begin
                         if (conv_partial_first) begin
                             conv_psum_valid_mask <= 4'd0;
                             conv_psum_acc_values <= 128'd0;
@@ -1198,7 +1215,18 @@ module vf_conv_sample_engine #(
                                              :              acc_out;
                             chain_psum_valid <= 1'b1;
                         end
-                        state <= ST_DONE;
+                        // v12 Phase 6b: OC tile loop — if more OC iterations
+                        // remain, advance wgt pointer and re-run ST_WGT.
+                        // ACT remains loaded; only wgt is re-fetched.
+                        if (tile_oc_remaining > 16'd1) begin
+                            tile_oc_remaining <= tile_oc_remaining - 16'd1;
+                            wgt_tile_l1_offset <= wgt_tile_l1_offset +
+                                                  workload_sample_bytes[21:0];
+                            wgt_req_sent <= 1'b0;
+                            state <= ST_WGT;
+                        end else begin
+                            state <= ST_DONE;
+                        end
                     end
                 end
                 ST_SRAMCRC: begin

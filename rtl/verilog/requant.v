@@ -47,6 +47,10 @@ module vf_requant_sample_engine #(
     input      [ADDR_WIDTH-1:0] param_l1_addr,
     input      [15:0]      oc_count,
     input      [15:0]      oc_index,
+    // v12 Phase 6a: OC tile drain loop. When tile_drain_count > 1 REQUANT
+    // repeats the quantise-store cycle for consecutive output bytes. Default 0
+    // is treated as 1 (single-element sample mode, unchanged behaviour).
+    input      [15:0]      tile_drain_count,
     input                  read_input_from_l1,
     input                  sramcrc_mode,
     input      [31:0]      sramcrc_expected_count,
@@ -101,6 +105,8 @@ module vf_requant_sample_engine #(
     localparam integer MAX_REQUANT_OUTPUT_SRAM_BYTES = 16777216;
 
     reg [3:0] state;
+    reg [15:0] tile_drain_remaining;  // v12 Phase 6a: remaining tile iterations
+    reg [31:0] active_out_byte_offset; // v12 Phase 6a: current write address (advances per drain)
     reg [31:0] pipe_remaining;
     reg signed [31:0] quantized;
     reg signed [31:0] clamped;
@@ -305,8 +311,9 @@ module vf_requant_sample_engine #(
                           ((state == ST_PARAM_LOAD) && !param_beat_req_sent) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
+    // v12 Phase 6a: use active_out_byte_offset for write address (advances per tile drain).
     assign l1_req_addr =
-        (state == ST_STORE)      ? out_byte_offset[ADDR_WIDTH-1:0] :
+        (state == ST_STORE)      ? active_out_byte_offset[ADDR_WIDTH-1:0] :
         (state == ST_PARAM_LOAD) ? (param_l1_addr +
                                     {{(ADDR_WIDTH-16){1'b0}}, param_byte_offset}) :
                                    l1_req_base_addr;
@@ -326,12 +333,12 @@ module vf_requant_sample_engine #(
     // FP mode: place fp_q_bits (16 bits) at the byte-aligned lane.
     // INT mode: place out_q (8 bits) at the byte lane.
     assign l1_req_wdata = l1_req_write
-        ? (fp_mode ? ({{(DATA_WIDTH-16){1'b0}}, fp_q_bits} << ({l1_req_addr[3:0], 3'd0}))
-                   : byte_lane_wdata(out_q[7:0], l1_req_addr[3:0]))
+        ? (fp_mode ? ({{(DATA_WIDTH-16){1'b0}}, fp_q_bits} << ({active_out_byte_offset[3:0], 3'd0}))
+                   : byte_lane_wdata(out_q[7:0], active_out_byte_offset[3:0]))
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
-        ? (fp_mode ? ({{(DATA_WIDTH/8-2){1'b0}}, 2'b11} << l1_req_addr[3:0])
-                   : ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0]))
+        ? (fp_mode ? ({{(DATA_WIDTH/8-2){1'b0}}, 2'b11} << active_out_byte_offset[3:0])
+                   : ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << active_out_byte_offset[3:0]))
         : {DATA_WIDTH/8{1'b0}};
     assign scaled_out = clamped;
     assign out_q = clamped[7:0];
@@ -394,6 +401,8 @@ module vf_requant_sample_engine #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= ST_IDLE;
+            tile_drain_remaining <= 16'd1;
+            active_out_byte_offset <= 32'd0;
             pipe_remaining <= 32'd0;
             sramcrc_remaining <= 32'd0;
             sramcrc_index <= 32'd0;
@@ -413,6 +422,9 @@ module vf_requant_sample_engine #(
                     pipe_remaining <= 32'd0;
                     param_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
+                        // v12 Phase 6a: latch drain count; 0 treated as 1.
+                        tile_drain_remaining <= (tile_drain_count == 16'd0) ? 16'd1 : tile_drain_count;
+                        active_out_byte_offset <= out_byte_offset;
                         if (sramcrc_mode) begin
                             sramcrc_crc <= FNV_OFFSET;
                             sramcrc_count <= 32'd0;
@@ -544,14 +556,14 @@ module vf_requant_sample_engine #(
                 end
                 ST_STORE: begin
                     if (l1_req_ready) begin
-                        if (out_byte_offset < MAX_REQUANT_OUTPUT_SRAM_BYTES) begin
+                        if (active_out_byte_offset < MAX_REQUANT_OUTPUT_SRAM_BYTES) begin
                             if (fp_mode) begin
                                 // v12 Phase 2: write FP16 (2 bytes, little-endian).
-                                output_sram[out_byte_offset]      <= fp_q[7:0];
-                                if (out_byte_offset + 32'd1 < MAX_REQUANT_OUTPUT_SRAM_BYTES)
-                                    output_sram[out_byte_offset + 32'd1] <= fp_q[15:8];
+                                output_sram[active_out_byte_offset]      <= fp_q[7:0];
+                                if (active_out_byte_offset + 32'd1 < MAX_REQUANT_OUTPUT_SRAM_BYTES)
+                                    output_sram[active_out_byte_offset + 32'd1] <= fp_q[15:8];
                             end else begin
-                                output_sram[out_byte_offset] <= out_q;
+                                output_sram[active_out_byte_offset] <= out_q;
                             end
                         end
                         state <= ST_DONE;
@@ -584,8 +596,22 @@ module vf_requant_sample_engine #(
                     end
                 end
                 ST_DONE: begin
-                    if (done_ready)
+                    // v12 Phase 6a: tile drain loop — if more elements remain,
+                    // advance the output offset by 1 (INT8) or 2 (FP16) and
+                    // re-run the quantise/store cycle. Chain mode re-enters
+                    // ST_CHAIN_WAIT; sample mode re-enters ST_PARAM (input_value
+                    // is set from the next chain beat when we get there).
+                    if (tile_drain_remaining > 16'd1) begin
+                        tile_drain_remaining <= tile_drain_remaining - 16'd1;
+                        active_out_byte_offset <= active_out_byte_offset +
+                            (fp_mode ? 32'd2 : 32'd1);
+                        if (use_chain_input)
+                            state <= ST_CHAIN_WAIT;
+                        else
+                            state <= ST_PARAM;
+                    end else if (done_ready) begin
                         state <= ST_IDLE;
+                    end
                 end
                 default: begin
                     state <= ST_IDLE;

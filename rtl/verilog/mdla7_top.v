@@ -615,6 +615,7 @@ module mdla7_top #(
     input                       conv_read_sample_from_l1,
     input                       conv_fp_mode,
     input                       conv_chain_out_enable,
+    input      [15:0]           conv_tile_oc_count,
     input                       conv_int16_mode,
     // v12 Phase 2/3: REQUANT FP bias + per-OC param-table descriptor inputs.
     // host.v decodes these from REQUANT descriptors; Phase 4 generator will
@@ -624,6 +625,7 @@ module mdla7_top #(
     input      [21:0]           requant_param_l1_addr,
     input      [15:0]           requant_oc_count,
     input      [15:0]           requant_oc_index,
+    input      [15:0]           requant_tile_drain_count,
     input signed [15:0]         conv_zp_in,
     input signed [31:0]         conv_bias,
     input signed [31:0]         conv_multiplier,
@@ -856,6 +858,7 @@ module mdla7_top #(
     reg conv_read_sample_from_l1_q;
     reg conv_fp_mode_q;
     reg conv_chain_out_enable_q;
+    reg [15:0] conv_tile_oc_count_q;
     reg conv_int16_mode_q;
     reg signed [15:0] conv_zp_in_q;
     reg signed [31:0] conv_bias_q;
@@ -901,6 +904,7 @@ module mdla7_top #(
     reg [21:0] requant_param_l1_addr_q;
     reg [15:0] requant_oc_count_q;
     reg [15:0] requant_oc_index_q;
+    reg [15:0] requant_tile_drain_count_q;
     wire [15:0] requant_fp_q_bits;
     reg requant_sramcrc_mode_q;
     reg [31:0] requant_sramcrc_expected_count_q;
@@ -1371,7 +1375,8 @@ module mdla7_top #(
         .chain_out_enable(conv_chain_out_enable_q),
         .chain_psum_valid(conv_chain_psum_valid),
         .chain_psum_data(conv_chain_psum_data),
-        .chain_psum_ready(conv_chain_psum_ready)
+        .chain_psum_ready(conv_chain_psum_ready),
+        .conv_tile_oc_count(conv_tile_oc_count_q)
     );
 
     vf_requant_sample_engine u_requant (
@@ -1390,6 +1395,7 @@ module mdla7_top #(
         .param_l1_addr(requant_param_l1_addr_q),
         .oc_count(requant_oc_count_q),
         .oc_index(requant_oc_index_q),
+        .tile_drain_count(requant_tile_drain_count_q),
         .fp_mode(requant_fp_mode_q),
         .fp_bias(requant_fp_bias_q),
         .fp_q(requant_fp_q_bits),
@@ -1788,6 +1794,7 @@ module mdla7_top #(
             conv_read_sample_from_l1_q <= 1'b0;
             conv_fp_mode_q <= 1'b0;
             conv_chain_out_enable_q <= 1'b0;
+            conv_tile_oc_count_q <= 16'd0;
             conv_int16_mode_q <= 1'b0;
             conv_zp_in_q <= 16'sd0;
             conv_bias_q <= 32'sd0;
@@ -1833,6 +1840,7 @@ module mdla7_top #(
             requant_param_l1_addr_q <= 22'd0;
             requant_oc_count_q <= 16'd0;
             requant_oc_index_q <= 16'd0;
+            requant_tile_drain_count_q <= 16'd0;
             requant_sramcrc_mode_q <= 1'b0;
             requant_sramcrc_expected_count_q <= 32'd0;
             requant_out_byte_offset_q <= 32'd0;
@@ -1943,6 +1951,7 @@ module mdla7_top #(
                         conv_read_sample_from_l1_q <= conv_read_sample_from_l1;
                         conv_fp_mode_q <= conv_fp_mode;
                         conv_chain_out_enable_q <= conv_chain_out_enable;
+                        conv_tile_oc_count_q <= conv_tile_oc_count;
                         conv_int16_mode_q <= conv_int16_mode;
                         conv_zp_in_q <= conv_zp_in;
                         conv_bias_q <= conv_bias;
@@ -1988,6 +1997,7 @@ module mdla7_top #(
                         requant_param_l1_addr_q <= requant_param_l1_addr;
                         requant_oc_count_q <= requant_oc_count;
                         requant_oc_index_q <= requant_oc_index;
+                        requant_tile_drain_count_q <= requant_tile_drain_count;
                         requant_sramcrc_mode_q <= requant_sramcrc_mode;
                         requant_sramcrc_expected_count_q <= requant_sramcrc_expected_count;
                         requant_out_byte_offset_q <= requant_out_byte_offset;

@@ -60,6 +60,8 @@ module host #(
     // chain-mode descriptors to push the per-sample psum onto the CONV->REQUANT
     // chain; sample-mode descriptors leave 0 so chain pulse stays low.
     output reg         conv_chain_out_enable,
+    // v12 Phase 6b: CONV OC tile loop count (cmd_mem[base+3][31:16]). 0 = 1.
+    output reg [15:0]  conv_tile_oc_count,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -112,6 +114,8 @@ module host #(
     output reg [21:0]  requant_param_l1_addr,
     output reg [15:0]  requant_oc_count,
     output reg [15:0]  requant_oc_index,
+    // v12 Phase 6a: OC tile drain count (cmd_mem[base+8][15:0]). 0 = single.
+    output reg [15:0]  requant_tile_drain_count,
     output reg         requant_sramcrc_mode,
     output reg [31:0]  requant_sramcrc_expected_crc,
     output reg [31:0]  requant_sramcrc_expected_count,
@@ -390,6 +394,9 @@ module host #(
             // descriptors use word[3][12]+[13] for chain/fp). Decoded for all
             // op_classes -- non-CONV descriptors will hold 0.
             conv_chain_out_enable <= cmd_mem[base + 3][15];
+            // v12 Phase 6b: OC tile loop count from word[31] upper 16 bits
+            // (bits [31:17] were unused before). Default 0 = 1 iteration.
+            conv_tile_oc_count <= cmd_mem[base + 31][31:16];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
@@ -442,6 +449,8 @@ module host #(
             requant_param_l1_addr <= cmd_mem[base + 6][21:0];
             requant_oc_count <= cmd_mem[base + 7][15:0];
             requant_oc_index <= cmd_mem[base + 7][31:16];
+            // v12 Phase 6a: tile drain count from word[8] low 16 bits.
+            requant_tile_drain_count <= cmd_mem[base + 8][15:0];
             requant_sramcrc_mode <= cmd_mem[base + 3][10];
             requant_sramcrc_expected_crc <= cmd_mem[base + 28];
             requant_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -717,6 +726,7 @@ module host #(
             conv_fp_mode <= 1'b0;
             conv_int16_mode <= 1'b0;
             conv_chain_out_enable <= 1'b0;
+            conv_tile_oc_count <= 16'd0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;
@@ -761,6 +771,7 @@ module host #(
             requant_param_l1_addr <= 22'd0;
             requant_oc_count <= 16'd0;
             requant_oc_index <= 16'd0;
+            requant_tile_drain_count <= 16'd0;
             requant_sramcrc_mode <= 1'b0;
             requant_sramcrc_expected_crc <= 32'd0;
             requant_sramcrc_expected_count <= 32'd0;

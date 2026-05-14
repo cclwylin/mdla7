@@ -89,6 +89,8 @@ MAX_FINAL_OUTPUT_SRAM_BYTES = 16 * 1024 * 1024
 PROBE_DESCRIPTOR_FLAG = 1 << 15
 READ_FROM_L1_FLAG = 1 << 11
 MICROBLOCK_FLAG = 1 << 13
+CONV_CHAIN_OUT_FLAG = 1 << 15   # word[3] bit 15 — CONV chain output enable
+REQUANT_USE_CHAIN   = 1 << 12   # word[3] bit 12 — REQUANT pull from chain
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
@@ -2223,6 +2225,298 @@ def closed_loop_conv_probe(
     return descs
 
 
+def closed_loop_conv_requant_chain_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    out_elem_index: int = 0,
+) -> list[list[int]]:
+    """Build a CONV+REQUANT chain pair that verifies the INT32 psum forwarding wire.
+
+    CONV runs in L1-sample mode with chain_out_enable=1 (skips L1 write).
+    REQUANT waits on ST_CHAIN_WAIT, receives the psum, quantises, and writes
+    one INT8 byte to L1. A L1CRC check then verifies the expected value.
+    """
+    if layer.op_kind not in OK_CONV or elem_bytes(layer.dtype) != 1:
+        return []
+    data = descriptor_for_layer.program_bytes
+    params = int8_conv_params(layer, data)
+    if params is None:
+        return []
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    if out_elem_index < 0 or out_elem_index >= output_elems:
+        return []
+
+    # Geometry
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = out_elem_index // out_area
+    ow = (out_elem_index % out_area) // max(layer.out_c, 1)
+    oc = out_elem_index % max(layer.out_c, 1)
+    final_bias = params.bias[oc] + int8_conv_corr(params, layer, oh, ow, oc)
+
+    # Build CONV descriptor
+    sample = int8_conv_real_descriptor(
+        layer,
+        params,
+        ordinal,
+        start_lane=0,
+        max_count=8,
+        out_elem_index=out_elem_index,
+        psum_flag=0,
+        final_bias=final_bias,
+    )
+    if sample is None:
+        return []
+    desc, raw_acc = sample
+
+    sample_elem_count = desc[12] & 0xFF
+    if sample_elem_count == 0:
+        return []
+    # Require valid address geometry
+    if (desc[3] & (1 << 3)) == 0 or (desc[30] & 0xFF) != sample_elem_count:
+        return []
+
+    act_src = desc[28]
+    wgt_src = desc[29]
+    act_expected = descriptor_payload_bytes(desc, 4, sample_elem_count)
+    wgt_expected = descriptor_payload_bytes(desc, 8, sample_elem_count)
+    if data[layer.in_off + act_src:layer.in_off + act_src + sample_elem_count] != act_expected:
+        return []
+    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + sample_elem_count] != wgt_expected:
+        return []
+
+    # Tile count for the L1 load (rounded to 16 for bandwidth alignment)
+    group = layer.group or 1
+    in_per_group = layer.in_c // group
+    total_lanes = max(layer.k_h or 1, 1) * max(layer.k_w or 1, 1) * max(in_per_group, 1)
+    tile_elem_count = min(total_lanes, layer.in_size - act_src, layer.wgt_size - wgt_src, CONV_TILE_MAX_ELEMS)
+    tile_elem_count -= tile_elem_count % 16
+    if tile_elem_count == 0:
+        tile_elem_count = sample_elem_count
+    if tile_elem_count < sample_elem_count:
+        return []
+    desc[1] = tile_elem_count
+    desc[30] = (desc[30] & ~0xFF) | sample_elem_count
+    desc[31] = min(output_elems - out_elem_index, CONV_TILE_MAX_OUTPUTS)
+
+    # L1 addresses
+    l1_base = 0x50000 + ((layer.index * 0x100 + out_elem_index * 0x20) & 0x1FFF0)
+    l1_act = l1_base
+    l1_wgt = l1_act + tile_elem_count
+    l1_result = l1_wgt + tile_elem_count
+
+    # UDMA loads for act and wgt
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(layer, ordinal,             layer.in_off + act_src, l1_act, tile_elem_count, SMF_LOAD_A),
+        udma_dram_to_l1_descriptor(layer, ordinal + 1,         layer.wgt_off + wgt_src, l1_wgt, tile_elem_count, SMF_LOAD_B),
+    ]
+
+    # Patch CONV descriptor for L1-read + chain-out mode.
+    # Bit 6 = conv_partial_final; chain_skip_store requires partial_final=0.
+    # Bit 11 = read_sample_from_l1, bit 13 = MICROBLOCK, bit 15 = chain_out_enable.
+    desc[2] = l1_base        # act base in L1
+    desc[3] = (desc[3] & ~(1 << 6)) | READ_FROM_L1_FLAG | MICROBLOCK_FLAG | CONV_CHAIN_OUT_FLAG
+    desc[27] = l1_result     # dummy write address (won't fire with chain_skip_store)
+    stamp_synth_microblock_metadata(
+        desc, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+
+    # Expected REQUANT output: MBQM(raw_acc, mult, shift) + zp_out, clamped
+    expected_q = mbqm(clamp_i32(raw_acc), params.mult[oc], params.shift[oc]) + params.zp_out
+    expected_q = max(params.act_min, min(params.act_max, expected_q))
+    expected_byte = bytes([expected_q & 0xFF])
+
+    # REQUANT descriptor.
+    # Note: bit 13 of word[3] = requant_fp_mode in host.v, so we must NOT set
+    # MICROBLOCK_FLAG (1<<13) here lest the engine switch to FP16 output.
+    # Without MICROBLOCK_FLAG the Python assembler will call stamp_microblock_metadata
+    # automatically and the host will verify word[18] against requant_out_q (INT8 path).
+    rq_words = [0] * WORDS_PER_COMMAND
+    rq_words[0] = OP_REQUANT
+    rq_words[1] = 1
+    rq_words[2] = l1_result          # L1 output address
+    rq_words[3] = REQUANT_USE_CHAIN | (1 << 6)   # bit 12 = use_chain; bit 6 = final-write
+    rq_words[14] = params.mult[oc] & 0xFFFF_FFFF
+    rq_words[15] = (params.shift[oc] & 0xFF) | ((params.zp_out & 0xFF) << 8)
+    rq_words[16] = params.act_min & 0xFFFF_FFFF
+    rq_words[17] = params.act_max & 0xFFFF_FFFF
+    rq_words[18] = expected_q & 0xFF
+    rq_words[19] = layer.index
+    rq_words[27] = l1_result
+    # Do not call stamp_synth_microblock_metadata — let the assembler auto-stamp
+    # via stamp_microblock_metadata (stream_flags inferred from op + word[3] bits).
+    descs.append(rq_words)
+
+    # L1CRC check: verify the byte REQUANT wrote at l1_result
+    crc_check = l1mesh_crc_probe_descriptor(
+        ordinal + len(descs), l1_result, expected_byte,
+    )
+    if crc_check is None:
+        return []
+    crc_check[3] |= MICROBLOCK_FLAG
+    stamp_synth_microblock_metadata(
+        crc_check, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_FINAL_TILE,
+    )
+    descs.append(crc_check)
+    return descs
+
+
+def closed_loop_conv_requant_oc_tile_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    tile_oc: int = 4,
+) -> list[list[int]]:
+    """OC-dimension tile probe: CONV runs tile_oc iterations over sequential
+    weight rows while ACT stays resident in L1. All iterations push acc to the
+    chain (chain_out_enable=1); the last push remains valid when CONV finishes.
+    REQUANT then drains once (tile_drain_count=1) and writes 1 byte to L1.
+    The L1CRC probe verifies that byte matches the expected LAST-iteration acc.
+
+    This tests the CONV OC tile loop mechanism (Phase 6b) by verifying that the
+    final psum corresponds to the correct weight row. It also exercises the
+    CONV->REQUANT chain in the tile-loop context.
+
+    Simplification: loads tile_oc COPIES of the same weight row (OC=0), so all
+    iterations yield the same acc. The expected REQUANT output is one byte.
+    """
+    if layer.op_kind not in OK_CONV or elem_bytes(layer.dtype) != 1:
+        return []
+    data = descriptor_for_layer.program_bytes
+    params = int8_conv_params(layer, data)
+    if params is None:
+        return []
+    if layer.in_size <= 0 or layer.wgt_size <= 0:
+        return []
+    output_elems = max(layer.ref_size // max(elem_bytes(layer.dtype), 1), 1)
+    if output_elems < 1:
+        return []
+
+    # Build CONV descriptor for OC=0 at out_elem_index=0
+    oc0 = 0
+    out_area = max(layer.out_w * layer.out_c, 1)
+    oh = 0
+    ow = 0
+    final_bias_oc0 = params.bias[oc0] + int8_conv_corr(params, layer, oh, ow, oc0)
+    sample = int8_conv_real_descriptor(
+        layer, params, ordinal, start_lane=0, max_count=8,
+        out_elem_index=0, psum_flag=0, final_bias=final_bias_oc0,
+    )
+    if sample is None:
+        return []
+    desc, raw_acc_oc0 = sample
+
+    sample_elem_count = desc[12] & 0xFF
+    if sample_elem_count == 0:
+        return []
+    if (desc[3] & (1 << 3)) == 0 or (desc[30] & 0xFF) != sample_elem_count:
+        return []
+
+    act_src = desc[28]
+    wgt_src = desc[29]
+    if data[layer.in_off + act_src:layer.in_off + act_src + sample_elem_count] != \
+       descriptor_payload_bytes(desc, 4, sample_elem_count):
+        return []
+    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + sample_elem_count] != \
+       descriptor_payload_bytes(desc, 8, sample_elem_count):
+        return []
+
+    # Tile element count
+    group = layer.group or 1
+    in_per_group = layer.in_c // group
+    total_lanes = max(layer.k_h or 1, 1) * max(layer.k_w or 1, 1) * max(in_per_group, 1)
+    tile_elem_count = min(total_lanes, layer.in_size - act_src, layer.wgt_size - wgt_src, CONV_TILE_MAX_ELEMS)
+    tile_elem_count -= tile_elem_count % 16
+    if tile_elem_count == 0:
+        tile_elem_count = sample_elem_count
+    if tile_elem_count < sample_elem_count:
+        return []
+
+    # Determine how many iterations fit in L1 without overlap
+    l1_base = 0x58000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x7FF0)
+    l1_act = l1_base
+    l1_wgt = l1_act + tile_elem_count
+    # Use at most tile_oc copies, limited by L1 address space
+    actual_tile_oc = 1
+    for oc_i in range(1, tile_oc):
+        if l1_wgt + (oc_i + 1) * tile_elem_count < (1 << 22):
+            actual_tile_oc = oc_i + 1
+        else:
+            break
+    if actual_tile_oc < 2:
+        return []   # Need >= 2 iterations to prove the loop
+    l1_result = l1_wgt + actual_tile_oc * tile_elem_count
+
+    desc[1] = tile_elem_count
+    desc[30] = (desc[30] & ~0xFF) | sample_elem_count
+    desc[31] = min(output_elems, CONV_TILE_MAX_OUTPUTS)
+
+    # UDMA: load ACT
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(layer, ordinal, layer.in_off + act_src, l1_act, tile_elem_count, SMF_LOAD_A),
+    ]
+    # UDMA: load actual_tile_oc copies of the same weight row
+    for oc_i in range(actual_tile_oc):
+        descs.append(udma_dram_to_l1_descriptor(
+            layer, ordinal + len(descs),
+            layer.wgt_off + wgt_src,
+            l1_wgt + oc_i * tile_elem_count,
+            tile_elem_count, SMF_LOAD_B,
+        ))
+
+    # CONV descriptor: L1-read, chain_out_enable=1, conv_tile_oc_count=actual_tile_oc
+    # chain_psum_data from the last iteration stays valid when CONV completes.
+    desc[2] = l1_base
+    desc[3] = (desc[3] & ~(1 << 6)) | READ_FROM_L1_FLAG | MICROBLOCK_FLAG | CONV_CHAIN_OUT_FLAG
+    desc[27] = l1_result   # dummy (chain_skip_store skips write)
+    stamp_synth_microblock_metadata(
+        desc, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    # conv_tile_oc_count in word[31][31:16] (upper 16 bits unused by non-microblock checks)
+    desc[31] = (desc[31] & 0x0000_FFFF) | ((actual_tile_oc & 0xFFFF) << 16)
+    descs.append(desc)
+
+    # Expected: REQUANT gets chain_psum_data = acc from LAST iteration.
+    # Since all iterations use the same act+wgt (copies of same row), acc is the same.
+    eq = mbqm(clamp_i32(raw_acc_oc0), params.mult[0], params.shift[0]) + params.zp_out
+    eq = max(params.act_min, min(params.act_max, eq))
+    expected_byte = bytes([eq & 0xFF])
+
+    # REQUANT: use_chain_input=1, tile_drain_count=1 (drain once from chain).
+    rq_words = [0] * WORDS_PER_COMMAND
+    rq_words[0] = OP_REQUANT
+    rq_words[1] = 1
+    rq_words[2] = l1_result
+    rq_words[3] = REQUANT_USE_CHAIN | (1 << 6)
+    # rq_words[8] = 0 (tile_drain_count=0 → 1, single drain)
+    rq_words[14] = params.mult[0] & 0xFFFF_FFFF
+    rq_words[15] = (params.shift[0] & 0xFF) | ((params.zp_out & 0xFF) << 8)
+    rq_words[16] = params.act_min & 0xFFFF_FFFF
+    rq_words[17] = params.act_max & 0xFFFF_FFFF
+    rq_words[18] = expected_byte[0] & 0xFF
+    rq_words[19] = layer.index
+    rq_words[27] = l1_result
+    descs.append(rq_words)
+
+    # L1CRC: verify the 1 byte at l1_result
+    crc_check = l1mesh_crc_probe_descriptor(
+        ordinal + len(descs), l1_result, expected_byte,
+    )
+    if crc_check is None:
+        return []
+    crc_check[3] |= MICROBLOCK_FLAG
+    stamp_synth_microblock_metadata(
+        crc_check, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_FINAL_TILE,
+    )
+    descs.append(crc_check)
+    return descs
+
+
 def closed_loop_conv_probes(
     layer: Layer,
     ordinal: int,
@@ -2280,6 +2574,28 @@ def closed_loop_conv_probes(
             break
         sampled_indices.add(valid_index)
         descs.extend(probe)
+
+    # v12 Phase 4: emit one CONV->REQUANT chain probe to exercise the psum
+    # forwarding wire. Only for INT8 CONV layers; limit to 1 per call so we
+    # don't blow the command budget.
+    CHAIN_PROBE_COMMANDS = 5   # 2 UDMA + 1 CONV + 1 REQUANT + 1 L1CRC
+    if command_budget - len(descs) >= CHAIN_PROBE_COMMANDS:
+        chain_probes = closed_loop_conv_requant_chain_probe(
+            layer, ordinal + len(descs), result_dram_off, out_elem_index=0,
+        )
+        if chain_probes and len(chain_probes) <= command_budget - len(descs):
+            descs.extend(chain_probes)
+
+    # v12 Phase 6c: emit one OC tile probe to exercise conv_tile_oc_count and
+    # requant tile_drain_count together. Only for INT8 CONV with >= 4 OC.
+    OC_TILE_PROBE_COMMANDS = 6   # 2 UDMA + 1 CONV + 1 REQUANT + 1 L1CRC + margin
+    if command_budget - len(descs) >= OC_TILE_PROBE_COMMANDS:
+        oc_tile_probes = closed_loop_conv_requant_oc_tile_probe(
+            layer, ordinal + len(descs), result_dram_off, tile_oc=4,
+        )
+        if oc_tile_probes and len(oc_tile_probes) <= command_budget - len(descs):
+            descs.extend(oc_tile_probes)
+
     return descs
 
 
