@@ -285,6 +285,25 @@ Descriptor make_softmax(const LayerMeta& L,
 // Each row of length K is reduced row-wise. The descriptor body uses
 // PoolBody/EweBody shape [in_h=rows, in_w=K, in_c=1] so PM_MAX/PM_SUM with
 // k_w=K produces one scalar per row.
+//
+// P3: softmax_pipeline_M returns the largest power-of-2 M ≤ rows such that
+// two ping-pong scratch slots for an M-row INT8 softmax chain fit in L1
+// alongside the BMM overhead.  Returns 0 if no M satisfies the constraint.
+static uint32_t softmax_pipeline_M(uint32_t rows, uint32_t K,
+                                    uint32_t bmm_overhead,
+                                    uint32_t l1_budget) {
+    const uint32_t fp_es = 2u;
+    // Per slot: fp_in + fp_out + ctr + exp (each M×K×fp_es) + max + sum (M×fp_es).
+    for (uint32_t M = rows; M >= 1; M >>= 1) {
+        const uint64_t per_slot = uint64_t(M) * K * fp_es * 4u
+                                + uint64_t(M) * fp_es * 2u;
+        const uint64_t total = uint64_t(bmm_overhead) + 2u * per_slot;
+        if (total <= uint64_t(l1_budget) && M < rows)
+            return M;
+        if (M == 1) break;
+    }
+    return 0;
+}
 Descriptor make_pool_row_reduce(const LayerMeta& L, uint32_t in_addr,
                                 uint32_t out_addr, uint32_t rows, uint32_t K,
                                 uint8_t mode, uint8_t wait_a, uint8_t signal_tag) {
@@ -1267,6 +1286,14 @@ int sc_main(int argc, char* argv[]) {
     uint32_t fuse_prev_live_o_addr = 0, fuse_prev_live_o_size = 0;
     uint32_t fuse_prev_logistic_input_addr = 0, fuse_prev_logistic_input_size = 0;
     std::vector<uint8_t> fuse_prev_mb_done_tags;
+    // P3: BMM microblock pipeline — per-mb REQUANT done tags passed to the
+    // following softmax so POOL/EWE can start on microblock k while CONV is
+    // still computing microblock k+1.
+    bool     fuse_prev_is_bmm_pipeline  = false;
+    uint32_t fuse_prev_bmm_pipeline_M   = 0;
+    uint32_t fuse_prev_bmm_l1out_slot[2] = {0, 0};  // ping-pong L1_OUT addresses
+    std::vector<uint8_t> fuse_prev_bmm_mb_done_tags;   // per-mb REQUANT done tag
+    std::vector<uint8_t> fuse_prev_bmm_mb_dq_tags;     // pre-alloc'd DQ signal tags
     auto clear_prev_binary_ewe_live = [&]() {
         fuse_prev_is_binary_ewe = false;
         fuse_prev_is_logistic_ewe = false;
@@ -2001,6 +2028,13 @@ int sc_main(int argc, char* argv[]) {
             }
         }
         const auto& L = metas[i];
+        // P3: clear BMM pipeline state for any layer that is not the immediate
+        // softmax consumer. Softmax dispatch reads and consumes this state.
+        if (L.op_kind != OK_SOFTMAX) {
+            fuse_prev_is_bmm_pipeline = false;
+            fuse_prev_bmm_mb_done_tags.clear();
+            fuse_prev_bmm_mb_dq_tags.clear();
+        }
         // v8 / v8.10: per-dtype element width.  FP layers now store FP16 in
         // DRAM/L1 (2 B/elem); compute uses FP32 internally.
         // v8.27: INT16x8 hybrid has int16 ACT/OUT (2B) but int8 WGT (1B);
@@ -8266,6 +8300,38 @@ int sc_main(int argc, char* argv[]) {
 
             uint32_t L1_PARAMS, L1_WGT, L1_IN, L1_OUT;
             uint32_t tile_oh = L.out_h;
+
+            // P3: when this BMM layer feeds a pipelined softmax, force M-row
+            // tiles so POOL/EWE can overlap with future CONV microblocks.
+            // Pre-allocate SM DQ signal tags so BMM mb(k+2) can wait on DQ mb(k)
+            // (WAR on the ping-pong L1_OUT slot).
+            std::vector<uint8_t> p3_sm_dq_pre_tags;
+            uint32_t p3_M = 0;
+            if (L.op_kind == OK_FC_BMM && softmax_decompose_enabled()
+                    && i + 1 < N && is_attention_softmax_meta(metas[i + 1])
+                    && graph_input0_is_exact_producer(i, i + 1)) {
+                const auto& SL = metas[i + 1];
+                const uint32_t sm_rows = uint32_t(SL.in_h) * SL.in_w;
+                const uint32_t sm_K    = SL.in_c;
+                // BMM per-slot output size (M rows × K cols × 1 byte INT8).
+                // Use a conservative estimate (full rows) for overhead sizing;
+                // actual slot will be M rows once tile_oh is forced below.
+                const uint32_t bm_out_slot_full = align64(
+                    uint32_t(uint64_t(sm_rows) * L.out_w * L.out_c * out_elem));
+                const uint32_t bm_overhead = uint32_t(params_blob)
+                                           + tile_wgt_max
+                                           + 2u * bm_out_slot_full + 4096u;
+                p3_M = softmax_pipeline_M(sm_rows, sm_K, bm_overhead, L1_BUDGET);
+                if (p3_M > 0) {
+                    // Pre-allocate SM DQ signal tags now (before the layout block
+                    // resets tile_oh). The forced tile_oh = p3_M is applied inside
+                    // the non-fused layout block after its own tile_oh sizing.
+                    const uint32_t num_mb = (sm_rows + p3_M - 1) / p3_M;
+                    for (uint32_t mbi = 0; mbi < num_mb; ++mbi)
+                        p3_sm_dq_pre_tags.push_back(alloc_tag());
+                }
+            }
+
             bool fused_this_layer = false;
             bool fused_used_low = false;   // which side this layer's OUT landed on
             bool pingpong_tiles = false;
@@ -8379,6 +8445,11 @@ int sc_main(int argc, char* argv[]) {
                     if (uint64_t(r.L1_OUT) + r.worst_out <= L1_BUDGET) break;
                     tile_oh -= 1;
                 }
+                // P3: enforce M-row microblock size AFTER auto-sizing so the
+                // non-fused tile_oh = L.out_h reset doesn't override it.
+                // tile_oh may already be ≤ p3_M if auto-sizing reduced it further.
+                if (p3_M > 0 && tile_oh > p3_M)
+                    tile_oh = p3_M;
                 auto layout = layout_for(tile_oh);
                 if (uint64_t(layout.L1_OUT) + layout.worst_out > L1_BUDGET) {
                     std::cerr << "layer " << i << ": cannot fit in 2 MB L1 (tile_oh=1, tile_oc="
@@ -8540,6 +8611,7 @@ int sc_main(int argc, char* argv[]) {
                 !tiled_layout_tail.valid &&
                 !pingpong_tiles &&
                 planned_tiles_h > 1 &&
+                p3_sm_dq_pre_tags.empty() &&   // P3 needs pingpong, not WS
                 ws_weight_saved > ws_act_extra + (ws_act_extra / 4);
             const bool weight_stationary_persistent_tiles =
                 pointwise_ws_candidate && pingpong_persistent_wgt;
@@ -8991,9 +9063,21 @@ int sc_main(int argc, char* argv[]) {
                                ? (layout_tail_tag ? layout_tail_tag : req_tag)
                                : store_tag;
                     if (pingpong_tiles && oc_done + this_oc == L.out_c) {
-                        slot_free_tag[tile_slot] = prev_store;
+                        // P3: override slot_free with the SM DQ pre-tag for the
+                        // microblock that last occupied this slot (tile_id - 2).
+                        // This makes BMM mb(k+2) wait on SM DQ mb(k) (WAR guard).
+                        if (!p3_sm_dq_pre_tags.empty() && tile_id >= 2) {
+                            const uint32_t prev_mb_slot = tile_id - 2;
+                            if (prev_mb_slot < p3_sm_dq_pre_tags.size())
+                                slot_free_tag[tile_slot] = p3_sm_dq_pre_tags[prev_mb_slot];
+                        } else {
+                            slot_free_tag[tile_slot] = prev_store;
+                        }
                     }
                     prev_req_tag = req_tag;
+                    // P3: collect per-microblock REQUANT done tag.
+                    if (!p3_sm_dq_pre_tags.empty() && oc_done + this_oc == L.out_c)
+                        fuse_prev_bmm_mb_done_tags.push_back(req_tag);
                     oc_done   += this_oc;
                 }
                 oh_done += this_oh;
@@ -9029,6 +9113,26 @@ int sc_main(int argc, char* argv[]) {
             fuse_prev_single_tile   = single_tile;
             fuse_prev_is_conv_class = single_tile;
             clear_prev_binary_ewe_live();
+            // P3: record BMM pipeline state for the following softmax.
+            if (!p3_sm_dq_pre_tags.empty()
+                    && fuse_prev_bmm_mb_done_tags.size() == p3_sm_dq_pre_tags.size()) {
+                fuse_prev_is_bmm_pipeline   = true;
+                fuse_prev_bmm_pipeline_M    = p3_M;
+                fuse_prev_bmm_mb_dq_tags    = p3_sm_dq_pre_tags;
+                // Capture the two ping-pong L1_OUT slot addresses from the
+                // pingpong layout (slot[s] = pp_slot_base + s*pp_slot_bytes + pp_slot_out_off).
+                if (pingpong_tiles) {
+                    fuse_prev_bmm_l1out_slot[0] = pp_slot_base + pp_slot_out_off;
+                    fuse_prev_bmm_l1out_slot[1] = pp_slot_base + pp_slot_bytes + pp_slot_out_off;
+                } else {
+                    fuse_prev_bmm_l1out_slot[0] = L1_OUT;
+                    fuse_prev_bmm_l1out_slot[1] = L1_OUT;
+                }
+            } else {
+                fuse_prev_is_bmm_pipeline = false;
+                fuse_prev_bmm_mb_done_tags.clear();
+                fuse_prev_bmm_mb_dq_tags.clear();
+            }
             // v8.21: if this layer fused, toggle chain_alt so the next fused
             // layer's OUT lands at the OPPOSITE end. Otherwise reset to 0
             // (chain restart starts with try_low first).
@@ -9516,6 +9620,191 @@ int sc_main(int argc, char* argv[]) {
                     acc[i].dram_w += L.ref_size;
                     layer_done_tag[i] = st_tag;
                 }
+            } else if (fuse_prev_is_bmm_pipeline
+                       && !fuse_prev_bmm_mb_done_tags.empty()
+                       && !fuse_prev_bmm_mb_dq_tags.empty()
+                       && fuse_prev_bmm_mb_done_tags.size() == fuse_prev_bmm_mb_dq_tags.size()
+                       && softmax_decompose_enabled()
+                       && (L.dtype == DT_FP16
+                           || L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8)) {
+                // P3: CONV/EWE/POOL microblock pipeline.
+                // BMM mb(k) wrote M rows to fuse_prev_bmm_l1out_slot[k%2].
+                // We emit 7-op (INT8) or 5-op (FP) descriptors per microblock,
+                // each waiting on the corresponding BMM REQUANT done tag.
+                // Two ping-pong scratch slots prevent WAR on shared scratch.
+                fuse_prev_is_bmm_pipeline = false;  // consume once
+
+                const bool is_int8 = (L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8);
+                const uint32_t K        = uint32_t(vec_elems);
+                const uint32_t rows_u32 = uint32_t(rows);
+                const uint32_t fp_es    = 2u;
+                const uint32_t M        = fuse_prev_bmm_pipeline_M;
+                const uint32_t num_mb   = uint32_t(fuse_prev_bmm_mb_done_tags.size());
+
+                // INT8 output: rows×K bytes stacked at addr 0.
+                // FP16 output: rows×K×2 bytes at addr 0.
+                const uint32_t addr_out_base = 0u;
+                const uint32_t fp_buf_b  = M * K * fp_es;       // per-slot, per MB
+                const uint32_t scalar_b  = M * fp_es;           // per-slot, per MB
+
+                // Slot scratch layout (two slots, each below):
+                //   fp_in  : M×K×2
+                //   fp_out : M×K×2
+                //   ctr    : M×K×2
+                //   exp    : M×K×2
+                //   max    : M×2
+                //   sum    : M×2
+                const uint32_t out_size = uint32_t(L.ref_size);
+                uint32_t scratch_base = align64(addr_out_base + out_size);
+                const uint32_t slot_stride =
+                    align64(fp_buf_b) * 4u + align64(scalar_b) * 2u;
+
+                uint32_t addr_fp_in [2], addr_fp_out[2], addr_ctr[2],
+                         addr_exp   [2], addr_max   [2], addr_sum [2];
+                for (int s = 0; s < 2; ++s) {
+                    uint32_t p = scratch_base + uint32_t(s) * slot_stride;
+                    addr_fp_in [s] = p; p = align64(p + fp_buf_b);
+                    addr_fp_out[s] = p; p = align64(p + fp_buf_b);
+                    addr_ctr   [s] = p; p = align64(p + fp_buf_b);
+                    addr_exp   [s] = p; p = align64(p + fp_buf_b);
+                    addr_max   [s] = p; p = align64(p + scalar_b);
+                    addr_sum   [s] = p;
+                }
+                const uint32_t scratch_end = scratch_base + 2u * slot_stride;
+                if (scratch_end > L1_BUDGET) {
+                    // Scratch overflows — fall through to batched path by
+                    // emitting a whole-shape softmax via the monolithic path.
+                    // (This should not happen if softmax_pipeline_M was called
+                    //  correctly, but guard defensively.)
+                    program.push_back(make_softmax(L, 0u, addr_out_base,
+                                                   fuse_prev_bmm_mb_done_tags.back(), alloc_tag()));
+                    const uint8_t st_tag = alloc_tag();
+                    if (!suppress_producer_store) {
+                        program.push_back(make_udma(addr_out_base, L.dram_out, out_size,
+                                                    1, st_tag, layer_done_tag[i]));
+                        acc[i].dram_w += out_size;
+                        acc[i].sram_r += out_size;
+                        layer_done_tag[i] = st_tag;
+                    }
+                    fuse_prev_bmm_mb_done_tags.clear();
+                    fuse_prev_bmm_mb_dq_tags.clear();
+                } else {
+                    tiles_h_per_layer[i] = uint16_t(num_mb);
+
+                    const int16_t zp_in_int8  = is_int8 ? int16_t(L.zp_in_eff) : int16_t(0);
+                    const int16_t zp_out_int8 = int16_t(-128);  // TFLite: scale=1/256, zp=-128
+                    LayerMeta chain_L = L;
+                    chain_L.dtype = DT_FP16;
+
+                    uint8_t final_done_tag = 0;
+                    const uint32_t out_elem_size = is_int8 ? 1u : 2u;
+
+                    for (uint32_t mbi = 0; mbi < num_mb; ++mbi) {
+                        const uint8_t  slot    = uint8_t(mbi & 1u);
+                        const uint32_t this_M  = std::min(M, rows_u32 - mbi * M);
+                        const uint32_t elem_off = mbi * M * K;
+                        const uint32_t mb_out_addr = addr_out_base + elem_off * out_elem_size;
+                        const bool is_last = (mbi + 1 == num_mb);
+
+                        Microblock mb{};
+                        mb.id      = uint16_t(mbi);
+                        mb.slot    = slot;
+                        mb.elem_off = elem_off;
+                        mb.rows    = this_M;
+                        mb.elems   = this_M * K;
+                        mb.bytes   = this_M * K * elem_size;
+
+                        // First-op wait: BMM mb(k)'s REQUANT done.
+                        const uint8_t bm_dep       = fuse_prev_bmm_mb_done_tags[mbi];
+                        // Pre-allocated DQ signal tag (used by BMM mb(k+2) as slot-free guard).
+                        const uint8_t dq_signal    = fuse_prev_bmm_mb_dq_tags[mbi];
+                        const uint8_t t_max = alloc_tag();
+                        const uint8_t t_sub = alloc_tag();
+                        const uint8_t t_exp = alloc_tag();
+                        const uint8_t t_sum = alloc_tag();
+                        const uint8_t t_div = is_int8 ? alloc_tag() : uint8_t(0);
+                        const uint8_t t_out = alloc_tag();
+
+                        // INT8 source is BMM's ping-pong L1_OUT slot.
+                        const uint32_t mb_in_addr   = fuse_prev_bmm_l1out_slot[slot];
+                        const uint32_t chain_in     = is_int8 ? addr_fp_in[slot] : mb_in_addr;
+                        const uint32_t chain_out    = is_int8 ? addr_fp_out[slot] : mb_out_addr;
+
+                        uint8_t chain_first_wait = bm_dep;
+                        if (is_int8) {
+                            Descriptor d_dq = make_ewe_dequant_int8(
+                                mb_in_addr, addr_fp_in[slot],
+                                this_M, K, zp_in_int8, bm_dep, dq_signal);
+                            mark_stream(d_dq, i, mb, SMF_COMPUTE);
+                            program.push_back(d_dq);
+                            chain_first_wait = dq_signal;
+                        }
+
+                        Descriptor d_max = make_pool_row_reduce(chain_L, chain_in,
+                            addr_max[slot], this_M, K, PM_MAX,
+                            chain_first_wait, t_max);
+                        mark_stream(d_max, i, mb, SMF_COMPUTE);
+                        program.push_back(d_max);
+
+                        Descriptor d_sub = make_ewe_binary_bcast(chain_L, chain_in,
+                            addr_max[slot], addr_ctr[slot], 0,
+                            this_M, K, ES_SUB, t_max, t_max, t_sub);
+                        mark_stream(d_sub, i, mb, SMF_COMPUTE);
+                        program.push_back(d_sub);
+
+                        Descriptor d_exp = make_ewe_exp(chain_L, addr_ctr[slot],
+                            addr_exp[slot], 0, this_M, K, t_sub, t_exp);
+                        mark_stream(d_exp, i, mb, SMF_COMPUTE);
+                        program.push_back(d_exp);
+
+                        Descriptor d_psum = make_pool_row_reduce(chain_L, addr_exp[slot],
+                            addr_sum[slot], this_M, K, PM_SUM, t_exp, t_sum);
+                        mark_stream(d_psum, i, mb, SMF_COMPUTE);
+                        program.push_back(d_psum);
+
+                        const uint8_t div_signal = is_int8 ? t_div : t_out;
+                        Descriptor d_div = make_ewe_binary_bcast(chain_L, addr_exp[slot],
+                            addr_sum[slot], chain_out, 0,
+                            this_M, K, ES_DIV, t_sum, t_sum, div_signal);
+                        mark_stream(d_div, i, mb,
+                                    SMF_COMPUTE | (!is_int8 && is_last ? SMF_FINAL_TILE : 0));
+                        program.push_back(d_div);
+
+                        if (is_int8) {
+                            Descriptor d_q = make_ewe_quant_to_int8(
+                                addr_fp_out[slot], mb_out_addr,
+                                this_M, K, zp_out_int8, t_div, t_out);
+                            mark_stream(d_q, i, mb,
+                                        SMF_COMPUTE | (is_last ? SMF_FINAL_TILE : 0));
+                            program.push_back(d_q);
+                        }
+
+                        final_done_tag = t_out;
+                        acc[i].sram_r += mb.bytes;
+                        acc[i].sram_w += mb.bytes;
+                    }
+
+                    fuse_prev_bmm_mb_done_tags.clear();
+                    fuse_prev_bmm_mb_dq_tags.clear();
+
+                    if (!suppress_producer_store) {
+                        const uint8_t st_tag = alloc_tag();
+                        Descriptor wd = make_udma(addr_out_base, L.dram_out, out_size,
+                                                  1, st_tag, final_done_tag);
+                        program.push_back(wd);
+                        acc[i].dram_w += out_size;
+                        acc[i].sram_r += out_size;
+                        layer_done_tag[i] = st_tag;
+                    } else {
+                        udma_w_skipped[i] = true;
+                        udma_w_streamed[i] = true;
+                        layer_done_tag[i] = final_done_tag;
+                    }
+                }
+                // Reset softmax fuse_prev state (no further fusion from softmax).
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                chain_alt = 0;
             } else if (softmax_decompose_enabled()
                        && (L.dtype == DT_FP16
                            || L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8)
