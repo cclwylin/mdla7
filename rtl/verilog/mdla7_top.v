@@ -1366,6 +1366,13 @@ module mdla7_top #(
         // per descriptor (chain vs L1/direct); chain_psum_ready feeds back to
         // CONV's chain handshake.
         .use_chain_input(requant_use_chain_input_q),
+        // v12 Phase 3: per-OC param table inputs. Default-tied so sample mode
+        // (param_load_mode=0) skips the new ST_PARAM_LOAD state and behaves
+        // exactly as before. Phase 4 generator will wire these properly.
+        .param_load_mode(1'b0),
+        .param_l1_addr({ADDR_WIDTH{1'b0}}),
+        .oc_count(16'd0),
+        .oc_index(16'd0),
         .fp_mode(requant_fp_mode_q),
         .fp_bias(32'd0),
         .fp_q(requant_fp_q_bits),
