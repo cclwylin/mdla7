@@ -151,7 +151,8 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 |---|---|
 | 6782435 | tile-model generator + post-override pass: score tile DRAM 128 KB → 0 B; fast/cx/Verilog 全過. softmax 仍是 monolithic ES_SOFTMAX. |
 | 7565ded | **Stage A+B** descriptor & engines: `PM_SUM`, `ES_EXP`, `ES_DIV` 加到 descriptor.h；`PoolEngine` 加 PM_SUM path (FP + INT)；`EweEngine` 加 ES_EXP (unary) + ES_DIV (FP binary broadcast) path. BMM regression: 9/13 clean (= pre-commit baseline). |
-| 034cede | **Stage C+D (partial)** runner: add `make_pool_row_reduce` / `make_ewe_binary_bcast` / `make_ewe_exp` helpers. Wire decomposed dispatch (POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV) into `rows==1` SOFTMAX path behind `MDLA7_DECOMPOSE_SOFTMAX` env flag, FP16 only. INT8 + `rows>1` tile path still take monolithic ES_SOFTMAX. BMM regression unchanged: 9/13 clean. |
+| 034cede | **Stage C+D (partial)** runner: descriptor-level decomposition for `rows==1` softmax path (FP only). Multi-row path still monolithic. |
+| **4ede074** | **Engine-internal decomposition (FP + INT8)** — `EweEngine` 收到 `ES_SOFTMAX` 時，若 `MDLA7_SOFTMAX_DECOMPOSE=1`，內部跑 5-phase chain (POOL_MAX → SUB → EXP → POOL_SUM → DIV)，每 phase 自己 R/W L1 scratchpad。tile model softmax traffic: 256 KB SRAM-R + 128 KB SRAM-W (vs 0/0 monolithic). Bit-exact 對 monolithic softmax_fp / softmax_int8. Fast 9/13, cx 9/13, Verilog DPI 13/13 — 全等於 monolithic baseline (4 個 fail 是 pre-existing)。**Goal items 1–4 全達成**。 |
 
 ### Remaining work for the goal
 
