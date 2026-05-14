@@ -151,6 +151,8 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 |---|---|
 | 6782435 | tile-model generator + post-override pass: score tile DRAM 128 KB → 0 B; fast/cx/Verilog 全過. softmax 仍是 monolithic ES_SOFTMAX. |
 | 7565ded | **Stage A+B** descriptor & engines: `PM_SUM`, `ES_EXP`, `ES_DIV` 加到 descriptor.h；`PoolEngine` 加 PM_SUM path (FP + INT)；`EweEngine` 加 ES_EXP (unary) + ES_DIV (FP binary broadcast) path. BMM regression: 9/13 clean (= pre-commit baseline). |
+| (Stage B.5) | **Engine-internal decomposition** in EweEngine ES_SOFTMAX path (5-phase POOL_MAX/EWE_SUB/EWE_EXP/POOL_SUM/EWE_DIV via env flag `MDLA7_SOFTMAX_DECOMPOSE=1`) + profile-split into 5 rows (sm_pmax/sm_sub/sm_exp/sm_psum/sm_div) in runner. Cosmetic/runtime-only — TFLite SOFTMAX still compiled as 1 OK_SOFTMAX descriptor. Visible in fast HTML profile. |
+| (uncommitted) | **Stage C scaffold**: `OK_EXP`/`OK_DIV`/`OK_POOL_SUM` 加到 program_image.h enum + op_name(). Builds clean. Runner dispatch cases + compile_model lowering 還沒做. |
 | 034cede | **Stage C+D (partial)** runner: descriptor-level decomposition for `rows==1` softmax path (FP only). Multi-row path still monolithic. |
 | **4ede074** | **Engine-internal decomposition (FP + INT8)** — `EweEngine` 收到 `ES_SOFTMAX` 時，若 `MDLA7_SOFTMAX_DECOMPOSE=1`，內部跑 5-phase chain (POOL_MAX → SUB → EXP → POOL_SUM → DIV)，每 phase 自己 R/W L1 scratchpad。tile model softmax traffic: 256 KB SRAM-R + 128 KB SRAM-W (vs 0/0 monolithic). Bit-exact 對 monolithic softmax_fp / softmax_int8. Fast 9/13, cx 9/13, Verilog DPI 13/13 — 全等於 monolithic baseline (4 個 fail 是 pre-existing)。**Goal items 1–4 全達成**。 |
 
@@ -217,8 +219,16 @@ POOL_MAX (PM_MAX)
 - [ ] `EweEngine::run()` dispatch: 加 `ES_EXP`, `ES_DIV` branches
 - [ ] `PoolEngine::run()` dispatch: 加 `PM_SUM` branch (or extend AVG → no-div mode)
 
-#### Stage C — compile_model.py
-- [ ] 新 helper `decompose_softmax(layer, prev_dtype)`:
+#### Stage C — compile_model.py + runner dispatch (partial scaffold uncommitted)
+- [x] program_image.h: `OK_EXP=33`, `OK_DIV=34`, `OK_POOL_SUM=35` enum + op_name() entries
+- [ ] runner make_* helpers:
+  - `make_ewe_exp(L, in, out, wait, sig)` — ES_EXP, unary
+  - `make_ewe_div(L, in_a, in_b, out, wait_a, wait_b, sig)` — ES_DIV binary, broadcast last axis (in_b 是每 row 一個 scalar)
+  - `make_pool_sum(L, in, out, ...)` — PM_SUM
+- [ ] runner dispatch switch: 加 `case OK_EXP`, `case OK_DIV`, `case OK_POOL_SUM` (可 piggyback 既有 OK_HARD_SWISH / OK_ADD / OK_AVG_POOL path, 把 mode/subtype byte 換掉就好)
+- [ ] make_ewe_unary: 加 `: (L.op_kind == OK_EXP) ? ES_EXP` mapping
+- [ ] make_pool: PM_SUM mapping
+- [ ] compile_model.py 新 helper `decompose_softmax(layer, prev_dtype)`:
   - L1: POOL_MAX (PM_MAX) → max per row (INT8/FP16)
   - L2: EWE_SUB (ES_SUB, broadcast) → centered (FP16 if input INT8)
   - L3: EWE_EXP (ES_EXP) → e_tile FP16
@@ -226,7 +236,8 @@ POOL_MAX (PM_MAX)
   - L5: EWE_DIV (ES_DIV, broadcast) → prob INT8 (用原 softmax 的 output zp/scale)
 - [ ] 在 SOFTMAX lowering 點 (compile_model.py:3259-3277) 改：emit 5 layer 而不是 1 個 OK_SOFTMAX
 - [ ] env flag `MDLA7_DECOMPOSE_SOFTMAX=1` 控制是否分解 (default off → existing regression 不影響)
-- [ ] 每個 sub-op layer metadata 正確 (out_h/out_w/out_c, dtype, op_kind)
+- [ ] 每個 sub-op layer metadata 正確 (out_h/out_w/out_c, dtype, op_kind, dram_in/out 鏈接, in_alias_layer)
+- [ ] 確認 12 個含 SOFTMAX 的 BMM model 仍能 pass
 
 #### Stage D — runner post-override pass (systemc/src/mdla7_model_runner.cpp)
 - [ ] 現有 pass (line ~1531-1558) cover "fc(bmm)→softmax"

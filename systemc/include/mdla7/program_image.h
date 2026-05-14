@@ -89,6 +89,9 @@ enum OpKindEnum : uint16_t {
     OK_FC_BMM      = 30,    // BATCH_MATMUL lowered to 1x1 CONV; same engine as OK_FC
     OK_SHAPE       = 31,    // TFLite SHAPE: compile-time constant shape vector (UDMA load)
     OK_REVERSE     = 32,    // TFLite REVERSE_V2: compile-time pre-flipped bytes (UDMA load)
+    OK_EXP         = 33,    // v13: unary exp(x) — EWE ES_EXP (softmax decomp chain)
+    OK_DIV         = 34,    // v13: binary a/b broadcast last axis — EWE ES_DIV
+    OK_POOL_SUM    = 35,    // v13: sum-reduce over last axis — POOL PM_SUM
 };
 
 inline const char* op_name(uint16_t k) {
@@ -126,6 +129,9 @@ inline const char* op_name(uint16_t k) {
         case OK_FC_BMM:     return "fc(bmm)";
         case OK_SHAPE:      return "  shape";
         case OK_REVERSE:    return "reverse";
+        case OK_EXP:        return "    exp";
+        case OK_DIV:        return "    div";
+        case OK_POOL_SUM:   return "psum";
     }
     return "??unknown";
 }
