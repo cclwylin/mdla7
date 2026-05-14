@@ -145,15 +145,21 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 
 ## Handoff — 2026-05-14 session end
 
-### 上一輪做到哪 (commit 6782435)
+### Progress so far
 
-1. ✅ `gen_bmm25_int8_tflite.py` 完成 (tile model: 32h × 64q × 64k INT8, score tile = 128 KB)
-2. ✅ runner 加 post-override pass: fc(bmm) run → softmax 全鏈 `producer_no_store=true`
-   - score tile DRAM 寫入 128 KB → 0 B
-   - fast (57,259 cy) / cx (42,923 cy) / Verilog (13/13 DPI) 全過
-3. ❌ **softmax 仍是 monolithic `ES_SOFTMAX`** — 沒做到 §Phase B 的真 EWE+POOL 分解
+| Commit | What done |
+|---|---|
+| 6782435 | tile-model generator + post-override pass: score tile DRAM 128 KB → 0 B; fast/cx/Verilog 全過. softmax 仍是 monolithic ES_SOFTMAX. |
+| 7565ded | **Stage A+B** descriptor & engines: `PM_SUM`, `ES_EXP`, `ES_DIV` 加到 descriptor.h；`PoolEngine` 加 PM_SUM path (FP + INT)；`EweEngine` 加 ES_EXP (unary) + ES_DIV (FP binary broadcast) path. BMM regression: 9/13 clean (= pre-commit baseline). |
 
-User re-set goal → 本輪 (下一個 session) 要做真分解.
+### Remaining work for the goal
+
+| Stage | File(s) | Status |
+|---|---|---|
+| **C** — SOFTMAX lowering | systemc/scripts/compile_model.py | **not started** — emit 5 layers (POOL_MAX/EWE_SUB/EWE_EXP/POOL_SUM/EWE_DIV) instead of 1 OK_SOFTMAX |
+| **D** — runner chain | systemc/src/mdla7_model_runner.cpp | **not started** — extend post-override pass to mark the new 5-layer chain `producer_no_store=true` |
+| **E** — Verilog RTL | rtl/verilog/ewe.v, rtl/verilog/pool.v, batch/gen_verilog_program.py | **not started** — subtype dispatch for ES_EXP/ES_DIV; PM_SUM mode in pool.v |
+| **F** — Verify | — | fast/cx/verilog runs + L1Mesh per-sub-op breakdown |
 
 ### 本輪 scope 確認 (Phase 1+2)
 
