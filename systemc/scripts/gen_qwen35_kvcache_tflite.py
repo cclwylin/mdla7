@@ -51,10 +51,20 @@ def build_model(n_heads: int, kv_len: int, d_k: int, d_v: int) -> tf.keras.Model
     scores = tf.keras.layers.Lambda(
         lambda xs: tf.matmul(xs[0], xs[1], transpose_b=True), name="bmm_qk"
     )([q, k])
+    scale = np.float32(1.0 / np.sqrt(d_k))
     scores = tf.keras.layers.Lambda(
-        lambda x: x * np.float32(1.0 / np.sqrt(d_k)), name="scale"
+        lambda x: x * scale, name="scale"
     )(scores)
-    probs = tf.keras.layers.Softmax(axis=-1, name="softmax")(scores)
+    # TFLite INT8 shape inference for SOFTMAX on a 4-D tensor with an inner-1
+    # dimension ([1, n_heads, 1, kv_len]) incorrectly propagates the shape as
+    # [1, n_heads, kv_len, 1] for the downstream BATCH_MATMUL, causing a
+    # accum_dim mismatch. Work-around: squeeze the position-1 dim out before
+    # SOFTMAX ([1, n_heads, kv_len]), apply softmax, then unsqueeze back.
+    # Reshape does not include the batch dim in Keras, so we reshape (n_heads, 1,
+    # kv_len) → (n_heads, kv_len) → SOFTMAX → (n_heads, 1, kv_len).
+    scores_3d = tf.keras.layers.Reshape((n_heads, kv_len),     name="pre_sm_sq")(scores)
+    probs_3d  = tf.keras.layers.Softmax(axis=-1,               name="softmax")(scores_3d)
+    probs     = tf.keras.layers.Reshape((n_heads, 1, kv_len),  name="post_sm_usq")(probs_3d)
     out   = tf.keras.layers.Lambda(
         lambda xs: tf.matmul(xs[0], xs[1]), name="bmm_pv"
     )([probs, v])

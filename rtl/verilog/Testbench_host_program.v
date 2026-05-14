@@ -186,6 +186,8 @@ module Testbench_host_program;
     wire              requant_use_act_correction; // v12 Phase 7
     wire conv_chain_out_enable;
     wire [15:0] conv_tile_oc_count;
+    wire [15:0] conv_tile_ow_count;
+    wire [21:0] conv_act_tile_col_stride;
     wire requant_sramcrc_mode;
     wire [31:0] requant_sramcrc_expected_crc;
     wire [31:0] requant_sramcrc_expected_count;
@@ -443,6 +445,8 @@ module Testbench_host_program;
         .requant_use_act_correction(requant_use_act_correction),
         .conv_chain_out_enable(conv_chain_out_enable),
         .conv_tile_oc_count(conv_tile_oc_count),
+        .conv_tile_ow_count(conv_tile_ow_count),
+        .conv_act_tile_col_stride(conv_act_tile_col_stride),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
@@ -676,6 +680,8 @@ module Testbench_host_program;
         .requant_use_act_correction(requant_use_act_correction),
         .conv_chain_out_enable(conv_chain_out_enable),
         .conv_tile_oc_count(conv_tile_oc_count),
+        .conv_tile_ow_count(conv_tile_ow_count),
+        .conv_act_tile_col_stride(conv_act_tile_col_stride),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
         .requant_out_byte_offset(requant_out_byte_offset),

@@ -370,7 +370,14 @@ module vf_conv_sample_engine #(
     // v12 Phase 6b: OC tile loop. When conv_tile_oc_count > 1, after each
     // ST_STORE the weight pointer advances by workload_sample_bytes and ST_WGT
     // re-runs while ACT stays resident. Default 0 treated as 1 (sample mode).
-    input      [15:0]             conv_tile_oc_count
+    input      [15:0]             conv_tile_oc_count,
+    // v12 Phase 6c: OW spatial tile loop. When conv_tile_ow_count > 1, after
+    // completing the OC loop for one output column the ACT base advances by
+    // act_tile_col_stride and the OC loop repeats. REQUANT receives
+    // tile_oc × tile_ow chain pulses; its tile_drain_count should equal
+    // tile_oc × tile_ow. Default 0 treated as 1 (single position).
+    input      [15:0]             conv_tile_ow_count,
+    input      [21:0]             act_tile_col_stride   // L1 bytes per OW step
 );
 `ifdef MDLA7_DPI_DATAPATH
     import "DPI-C" function void mdla7_dpi_conv_fp16(
@@ -404,6 +411,8 @@ module vf_conv_sample_engine #(
     reg [2:0] state;
     reg [15:0] tile_oc_remaining;    // v12 Phase 6b: remaining OC iterations
     reg [21:0] wgt_tile_l1_offset;   // v12 Phase 6b: byte offset into L1 for wgt
+    reg [15:0] tile_ow_remaining;    // v12 Phase 6c: remaining OW spatial iterations
+    reg [21:0] act_tile_ow_offset;   // v12 Phase 6c: cumulative ACT L1 offset per OW step
     reg [31:0] compute_remaining;
     integer fp_i;
     integer i16_i;
@@ -647,12 +656,14 @@ module vf_conv_sample_engine #(
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = req_state;
     assign l1_req_write = (state == ST_STORE);
-    // v12 Phase 6b: wgt L1 address advances by wgt_tile_l1_offset each OC iteration.
+    // v12 Phase 6b/6c: wgt address adds wgt_tile_l1_offset (OC loop); ACT address
+    // adds act_tile_ow_offset (OW spatial loop).
     assign l1_req_addr =
         ((state == ST_STORE) && conv_partial_final && !read_sample_from_l1) ?
         conv_read_output_byte_offset[ADDR_WIDTH-1:0] :
         (state == ST_WGT) ? (l1_req_base_addr + workload_sample_bytes[ADDR_WIDTH-1:0] +
                               {{(ADDR_WIDTH-22){1'b0}}, wgt_tile_l1_offset}) :
+        (state == ST_ACT) ? (l1_req_base_addr + {{(ADDR_WIDTH-22){1'b0}}, act_tile_ow_offset}) :
         l1_req_base_addr;
     assign l1_req_bytes = conv_refcrc_mode ? conv_refcrc_expected_count :
                           (state == ST_STORE) ? store_bytes :
@@ -1039,6 +1050,8 @@ module vf_conv_sample_engine #(
             state <= ST_IDLE;
             tile_oc_remaining <= 16'd1;
             wgt_tile_l1_offset <= 22'd0;
+            tile_ow_remaining <= 16'd1;
+            act_tile_ow_offset <= 22'd0;
             compute_remaining <= 32'd0;
             active_act_vec <= {MAX_ELEMS*8{1'b0}};
             active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
@@ -1072,6 +1085,9 @@ module vf_conv_sample_engine #(
                     // v12 Phase 6b: latch OC tile count; 0 treated as 1.
                     tile_oc_remaining <= (conv_tile_oc_count == 16'd0) ? 16'd1 : conv_tile_oc_count;
                     wgt_tile_l1_offset <= 22'd0;
+                    // v12 Phase 6c: latch OW tile count; 0 treated as 1.
+                    tile_ow_remaining <= (conv_tile_ow_count == 16'd0) ? 16'd1 : conv_tile_ow_count;
+                    act_tile_ow_offset <= 22'd0;
                     // v12 Phase 4: keep chain_psum_valid sticky across IDLE
                     // until REQUANT handshakes; only clear on real ready ack.
                     if (chain_psum_valid && chain_psum_ready)
@@ -1228,15 +1244,28 @@ module vf_conv_sample_engine #(
                                              :              {conv_sum_act_out, acc_out};
                             chain_psum_valid <= 1'b1;
                         end
-                        // v12 Phase 6b: OC tile loop — if more OC iterations
-                        // remain, advance wgt pointer and re-run ST_WGT.
-                        // ACT remains loaded; only wgt is re-fetched.
+                        // v12 Phase 6b/6c: nested OC × OW tile loop.
+                        // Inner loop (OC): advance wgt, re-run ST_WGT, ACT stays.
+                        // Outer loop (OW): when OC exhausted, advance ACT base by
+                        // act_tile_col_stride, reset OC/wgt, re-run ST_ACT.
                         if (tile_oc_remaining > 16'd1) begin
                             tile_oc_remaining <= tile_oc_remaining - 16'd1;
                             wgt_tile_l1_offset <= wgt_tile_l1_offset +
                                                   workload_sample_bytes[21:0];
                             wgt_req_sent <= 1'b0;
                             state <= ST_WGT;
+                        end else if (tile_ow_remaining > 16'd1) begin
+                            // OC done for this OW position — advance to next column.
+                            tile_ow_remaining    <= tile_ow_remaining - 16'd1;
+                            act_tile_ow_offset   <= act_tile_ow_offset +
+                                                    act_tile_col_stride;
+                            // Reset OC loop and wgt pointer for the new column.
+                            tile_oc_remaining    <= (conv_tile_oc_count == 16'd0)
+                                                    ? 16'd1 : conv_tile_oc_count;
+                            wgt_tile_l1_offset   <= 22'd0;
+                            act_req_sent         <= 1'b0;
+                            wgt_req_sent         <= 1'b0;
+                            state <= ST_ACT;
                         end else begin
                             state <= ST_DONE;
                         end

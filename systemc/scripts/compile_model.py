@@ -138,6 +138,7 @@ OP_RSQRT      = 28       # 1/sqrt(x) INT8 LUT EWE (LayerNorm/RMSNorm normaliser)
 OP_TANH       = 29       # tanh(x)   INT8 LUT EWE (RNN/transformer activation)
 OP_FC_BMM     = 30       # BATCH_MATMUL lowered to 1x1 CONV; same engine as OP_FC
 OP_SHAPE      = 31       # TFLite SHAPE: compile-time constant shape vector
+OP_REVERSE    = 32       # TFLite REVERSE_V2: compile-time pre-flipped bytes (UDMA load)
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -177,7 +178,8 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_RSQRT:     " rsqrt",
            OP_TANH:      "  tanh",
            OP_FC_BMM:    "fc(bmm)",
-           OP_SHAPE:     "  shape"}
+           OP_SHAPE:     "  shape",
+           OP_REVERSE:   "reverse"}
 
 
 def _load_interpreter(path: str):
@@ -1493,7 +1495,14 @@ def main():
                                 _b_sl.astype(np.int32),
                             ).reshape(_M_bmm, 1, _N_bmm)   # [M, 1, N]
                             _sum_w_sl = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))  # [N]
-                            # bias_eff[n] = -zp_A*sum_b[n] + K*zp_A*zp_B (compile-time)
+                            # bias_eff[n] = -zp_A*sum_b[n] + K*zp_A*zp_B
+                            # ArcSim regression: B is compile-time static → correct.
+                            # Production (dynamic KV cache): B changes each inference; the
+                            # chip driver must recompute sum_b[n] from the actual B tile
+                            # and overwrite bias_eff[n] in the params DRAM blob before
+                            # dispatching CONV+REQUANT. The zp_A / K / zp_B values needed
+                            # are the constants below. Alternatively the CONV engine can
+                            # accumulate sum_b per-OC and pass it via a separate L1 buffer.
                             _bias_eff_sl = (
                                 -np.int64(_zp_in_eff_bmm) * _sum_w_sl
                                 + np.int64(_K_bmm) * np.int64(_zp_in_eff_bmm) * np.int64(_zp_b_bmm)
@@ -1690,6 +1699,78 @@ def main():
                 tensor_values[_output_tensor] = _shape_arr.copy()
             last_output_arr = _shape_arr
             last_output_tensor = _output_tensor
+            continue   # skip materialize path
+
+        # ---- v12 REVERSE_V2 → OK_REVERSE constant-load lowering ---------------
+        # TFLite REVERSE_V2 flips a tensor along given axes. In fixed-topology
+        # ArcSim the input is always a compile-time constant (RoPE sinusoid
+        # encodings materialised upstream). Pre-compute the flipped bytes at
+        # compile time, store in the wgt area, and emit a single UDMA load —
+        # identical runtime path to OK_SHAPE.
+        if opname == "REVERSE_V2" and in_arr is not None:
+            axes_t = sg.Tensors(int(op.Inputs(1))) if op.InputsLength() > 1 else None
+            axes_a = _tensor_array(axes_t).astype(np.int32) if axes_t is not None else None
+            axes = ([int(x) for x in axes_a.reshape(-1).tolist()]
+                    if axes_a is not None else [])
+            src = np.asarray(in_arr)
+            if src.ndim > 0 and axes:
+                for ax in sorted({int(x) % src.ndim for x in axes}, reverse=True):
+                    src = np.flip(src, axis=ax)
+            # Re-quantise through the output tensor's scale/zp so bytes match
+            # what downstream consumers expect.
+            flipped_ref = np.asarray(
+                _quantize_real_to_tensor(src.reshape(int(OH), int(OW), int(OC)), out_t)
+            )
+            rev_bytes   = flipped_ref.tobytes()
+            _rev_dtype  = TYPE_TO_DTYPE.get(out_t.Type(), DT_INT8x8)
+            _rev_nelem  = int(OH) * int(OW) * int(OC)
+            elem_label  = ("FP16" if _rev_dtype == DT_FP16
+                           else f"INT8" if _rev_dtype in (DT_INT8x4, DT_INT8x8) else "INT16")
+            print(f"  layer {li:>2d}  {OP_NAME[OP_REVERSE]}  "
+                  f"in={int(H)}x{int(W)}x{int(Cin)}  k=1x1  s=1x1  g=1  "
+                  f"out={int(OH)}x{int(OW)}x{int(OC)}  ({_rev_nelem} {elem_label})  ready")
+            budget_error_rev = _program_budget_error(0, len(rev_bytes), len(rev_bytes))
+            if budget_error_rev:
+                print(f"  layer {li:>2d}  {OP_NAME[OP_REVERSE]}  skipped ({budget_error_rev})")
+                last_output_arr = None
+                continue
+            _rev_out_tensor = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
+            layers.append(dict(
+                in_h=int(H), in_w=int(W), in_c=int(Cin),
+                out_h=int(OH), out_w=int(OW), out_c=int(OC),
+                k_h=1, k_w=1, s_h=1, s_w=1,
+                p_t=0, p_b=0, p_l=0, p_r=0,
+                dram_in=DRAM_IN  + cur_i,
+                dram_wgt=DRAM_WGT + cur_w,
+                dram_out=DRAM_OUT + cur_o,
+                in_size=0,
+                wgt_size=len(rev_bytes),
+                ref_size=len(rev_bytes),
+                in_off=in_off,
+                wgt_off=wgt_off,
+                ref_off=ref_off,
+                in_alias_layer=-1,
+                group=1,
+                op_kind=OP_REVERSE,
+                dtype=_rev_dtype,
+                zp_in_eff=0,
+                orig_op_index=orig_op_index,
+                input0_tensor=int(op.Inputs(0)),
+                input1_tensor=-1,
+                output_tensor=_rev_out_tensor,
+            ))
+            op_to_compiled[orig_op_index] = len(layers) - 1
+            cur_w   += len(rev_bytes)
+            cur_o   += len(rev_bytes)
+            wgt_off += len(rev_bytes)
+            ref_off += len(rev_bytes)
+            wgt_blobs.append(rev_bytes)
+            ref_blobs.append(rev_bytes)
+            _rev_out_arr = flipped_ref.reshape(int(OH), int(OW), int(OC))
+            if _rev_out_tensor >= 0:
+                tensor_values[_rev_out_tensor] = _rev_out_arr.copy()
+            last_output_arr   = _rev_out_arr
+            last_output_tensor = _rev_out_tensor
             continue   # skip materialize path
 
         if materialize_op:

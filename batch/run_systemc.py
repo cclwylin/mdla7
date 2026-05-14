@@ -909,11 +909,13 @@ def _write_html_report(model: Path, paths: dict[str, Path],
     # movement op the runtime routes through the TNPS engine codepath.
     _OP_TO_ENGINE = {
         "conv": "conv+requant", "dwconv": "conv+requant", "fc": "conv+requant",
+        "fc(bmm)": "conv+requant",
         "add": "ewe", "mul": "ewe", "sub": "ewe",
         "h_swsh": "ewe", "relu": "ewe", "gelu": "ewe", "softmax": "ewe",
         "logist": "ewe", "rsqrt": "ewe", "tanh": "ewe",
         "avgpool": "pool", "maxpool": "pool", "mean": "pool",
         "shape": "—",   # constant fill, no engine — wgt UDMA load only
+        "reverse": "—", # pre-flipped constant, same UDMA load path as shape
     }
     for _tnps_op in TNPS_OPS:
         _OP_TO_ENGINE[_tnps_op] = "tnps"
@@ -981,7 +983,8 @@ def _write_html_report(model: Path, paths: dict[str, Path],
                     " style='color:#a06000'" if tag == "folded" else "")
             op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
         elif op_label == "fc(bmm)":
-            op_cell_layer = "<td style='color:#1a7ab0;font-weight:600'>fc(bmm)</td>"
+            kv_label = f", {ic}→{oc}" if (ic > 0 or oc > 0) else ""
+            op_cell_layer = f"<td style='color:#1a7ab0;font-weight:600'>fc(bmm{kv_label})</td>"
         else:
             op_cell_layer = f"<td>{html.escape(op_label)}</td>"
         return ("<tr>" +

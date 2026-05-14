@@ -616,6 +616,8 @@ module mdla7_top #(
     input                       conv_fp_mode,
     input                       conv_chain_out_enable,
     input      [15:0]           conv_tile_oc_count,
+    input      [15:0]           conv_tile_ow_count,
+    input      [21:0]           conv_act_tile_col_stride,
     input                       conv_int16_mode,
     // v12 Phase 2/3: REQUANT FP bias + per-OC param-table descriptor inputs.
     // host.v decodes these from REQUANT descriptors; Phase 4 generator will
@@ -861,6 +863,8 @@ module mdla7_top #(
     reg conv_fp_mode_q;
     reg conv_chain_out_enable_q;
     reg [15:0] conv_tile_oc_count_q;
+    reg [15:0] conv_tile_ow_count_q;
+    reg [21:0] conv_act_tile_col_stride_q;
     reg conv_int16_mode_q;
     reg signed [15:0] conv_zp_in_q;
     reg signed [31:0] conv_bias_q;
@@ -1380,7 +1384,9 @@ module mdla7_top #(
         .chain_psum_valid(conv_chain_psum_valid),
         .chain_psum_data(conv_chain_psum_data),
         .chain_psum_ready(conv_chain_psum_ready),
-        .conv_tile_oc_count(conv_tile_oc_count_q)
+        .conv_tile_oc_count(conv_tile_oc_count_q),
+        .conv_tile_ow_count(conv_tile_ow_count_q),
+        .act_tile_col_stride(conv_act_tile_col_stride_q)
     );
 
     vf_requant_sample_engine u_requant (
@@ -1801,6 +1807,8 @@ module mdla7_top #(
             conv_fp_mode_q <= 1'b0;
             conv_chain_out_enable_q <= 1'b0;
             conv_tile_oc_count_q <= 16'd0;
+            conv_tile_ow_count_q <= 16'd0;
+            conv_act_tile_col_stride_q <= 22'd0;
             conv_int16_mode_q <= 1'b0;
             conv_zp_in_q <= 16'sd0;
             conv_bias_q <= 32'sd0;
@@ -1960,6 +1968,8 @@ module mdla7_top #(
                         conv_fp_mode_q <= conv_fp_mode;
                         conv_chain_out_enable_q <= conv_chain_out_enable;
                         conv_tile_oc_count_q <= conv_tile_oc_count;
+                        conv_tile_ow_count_q <= conv_tile_ow_count;
+                        conv_act_tile_col_stride_q <= conv_act_tile_col_stride;
                         conv_int16_mode_q <= conv_int16_mode;
                         conv_zp_in_q <= conv_zp_in;
                         conv_bias_q <= conv_bias;

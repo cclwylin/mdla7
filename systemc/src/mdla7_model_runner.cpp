@@ -1765,7 +1765,8 @@ int sc_main(int argc, char* argv[]) {
 
     for (uint32_t k = 0; k < N; ++k) {
         if (metas[k].op_kind == OK_MATERIALIZE ||
-            metas[k].op_kind == OK_SHAPE) {
+            metas[k].op_kind == OK_SHAPE        ||
+            metas[k].op_kind == OK_REVERSE) {
             // MATERIALIZE / SHAPE are explicit compiler boundaries, not
             // transparent metadata views.  Suppressing their store can replace
             // the reference/constant bytes with an unrelated streamed tensor.
@@ -10753,9 +10754,10 @@ int sc_main(int argc, char* argv[]) {
             chain_alt = 0;
             break;
         }
+        case OK_REVERSE:    // pre-flipped bytes; same UDMA-load path as OK_SHAPE
         case OK_SHAPE: {
             flush_pending();
-            // Constant fill: shape INT32 bytes live in the program's wgt area.
+            // Constant fill: shape / pre-flipped bytes live in the wgt area.
             // UDMA-load from wgt into L1, then stage to dram_out for verification.
             if (producer_no_store[i]) {
                 udma_w_skipped[i]  = true;

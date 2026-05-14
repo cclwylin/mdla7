@@ -60,8 +60,12 @@ module host #(
     // chain-mode descriptors to push the per-sample psum onto the CONV->REQUANT
     // chain; sample-mode descriptors leave 0 so chain pulse stays low.
     output reg         conv_chain_out_enable,
-    // v12 Phase 6b: CONV OC tile loop count (cmd_mem[base+3][31:16]). 0 = 1.
+    // v12 Phase 6b: CONV OC tile loop count (cmd_mem[base+31][31:16]). 0 = 1.
     output reg [15:0]  conv_tile_oc_count,
+    // v12 Phase 6c: CONV OW spatial tile count (cmd_mem[base+8][31:16]). 0 = 1.
+    output reg [15:0]  conv_tile_ow_count,
+    // v12 Phase 6c: ACT L1 byte stride per OW step (cmd_mem[base+10][21:0]).
+    output reg [21:0]  conv_act_tile_col_stride,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -397,9 +401,14 @@ module host #(
             // descriptors use word[3][12]+[13] for chain/fp). Decoded for all
             // op_classes -- non-CONV descriptors will hold 0.
             conv_chain_out_enable <= cmd_mem[base + 3][15];
-            // v12 Phase 6b: OC tile loop count from word[31] upper 16 bits
-            // (bits [31:17] were unused before). Default 0 = 1 iteration.
+            // v12 Phase 6b: OC tile loop count from word[31] upper 16 bits.
             conv_tile_oc_count <= cmd_mem[base + 31][31:16];
+            // v12 Phase 6c: OW tile count from word[8] upper 16 bits (REQUANT
+            // uses word[8][15:0] for tile_drain_count; upper bits were unused).
+            conv_tile_ow_count <= cmd_mem[base + 8][31:16];
+            // v12 Phase 6c: ACT col stride from word[10] lower 22 bits (safe in
+            // L1-mode descriptors where wgt_vec word[10]/[11] is ignored).
+            conv_act_tile_col_stride <= cmd_mem[base + 10][21:0];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
@@ -733,6 +742,8 @@ module host #(
             conv_int16_mode <= 1'b0;
             conv_chain_out_enable <= 1'b0;
             conv_tile_oc_count <= 16'd0;
+            conv_tile_ow_count <= 16'd0;
+            conv_act_tile_col_stride <= 22'd0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;

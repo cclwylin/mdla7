@@ -92,6 +92,10 @@ READ_FROM_L1_FLAG = 1 << 11
 MICROBLOCK_FLAG = 1 << 13
 CONV_CHAIN_OUT_FLAG = 1 << 15   # word[3] bit 15 — CONV chain output enable
 REQUANT_USE_CHAIN   = 1 << 12   # word[3] bit 12 — REQUANT pull from chain
+# v12 Phase 6c: OW tile loop constants
+CONV_OW_COUNT_SHIFT   = 16      # conv_tile_ow_count → word[8][31:16]
+CONV_OW_COUNT_MASK    = 0xFFFF  # 16-bit field
+# act_tile_col_stride → word[10][21:0]; safe in L1-mode (wgt_vec ignored)
 DEFAULT_MAX_COMMANDS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
 DEFAULT_CONV_SRAM_WINDOW_COMMANDS = 512
@@ -2518,6 +2522,154 @@ def closed_loop_conv_requant_oc_tile_probe(
     return descs
 
 
+def closed_loop_conv_requant_ow_tile_probe(
+    layer: Layer,
+    ordinal: int,
+    result_dram_off: int,
+    tile_ow: int = 2,
+) -> list[list[int]]:
+    """OW spatial tile probe: CONV iterates tile_ow output columns, re-loading ACT
+    from a different L1 address each time while keeping the weight resident.
+    Both iterations push one psum to chain (OC=1 per column). REQUANT drains
+    tile_ow times (tile_drain_count=tile_ow). L1CRC verifies both output bytes.
+
+    Tests v12 Phase 6c: the OW spatial tile loop and the act_tile_col_stride
+    pointer advancement.
+
+    Simplification: both OW positions load the SAME data (two identical copies
+    of the ACT vector) so both drains produce the same expected output byte.
+    """
+    if layer.op_kind not in OK_CONV or elem_bytes(layer.dtype) != 1:
+        return []
+    data = descriptor_for_layer.program_bytes
+    params = int8_conv_params(layer, data)
+    if params is None:
+        return []
+    if layer.in_size <= 0 or layer.wgt_size <= 0:
+        return []
+
+    # Build base CONV descriptor for OC=0, ow=0
+    oc0 = 0
+    oh, ow = 0, 0
+    final_bias_oc0 = params.bias[oc0] + int8_conv_corr(params, layer, oh, ow, oc0)
+    sample = int8_conv_real_descriptor(
+        layer, params, ordinal, start_lane=0, max_count=8,
+        out_elem_index=0, psum_flag=0, final_bias=final_bias_oc0,
+    )
+    if sample is None:
+        return []
+    desc, raw_acc_oc0 = sample
+
+    sample_elem_count = desc[12] & 0xFF
+    if sample_elem_count == 0:
+        return []
+    if (desc[3] & (1 << 3)) == 0 or (desc[30] & 0xFF) != sample_elem_count:
+        return []
+
+    act_src = desc[28]
+    wgt_src = desc[29]
+    if data[layer.in_off + act_src:layer.in_off + act_src + sample_elem_count] != \
+       descriptor_payload_bytes(desc, 4, sample_elem_count):
+        return []
+    if data[layer.wgt_off + wgt_src:layer.wgt_off + wgt_src + sample_elem_count] != \
+       descriptor_payload_bytes(desc, 8, sample_elem_count):
+        return []
+
+    tile_elem_count = sample_elem_count
+
+    # L1 layout: tile_ow copies of ACT (stride = tile_elem_count), then WGT
+    l1_base = 0x58000 + ((layer.index * 0x100 + ordinal * 0x20) & 0x7FF0)
+    l1_act = l1_base
+    l1_wgt = l1_act + tile_ow * tile_elem_count
+    l1_result = l1_wgt + tile_elem_count
+
+    if l1_result + tile_ow >= (1 << 22):
+        return []
+
+    desc[1] = tile_elem_count
+    desc[30] = (desc[30] & ~0xFF) | sample_elem_count
+    desc[31] = min(layer.ref_size // max(elem_bytes(layer.dtype), 1), CONV_TILE_MAX_OUTPUTS)
+
+    # UDMA: load tile_ow identical copies of ACT into consecutive L1 slots
+    descs: list[list[int]] = []
+    for ow_i in range(tile_ow):
+        descs.append(udma_dram_to_l1_descriptor(
+            layer, ordinal + len(descs),
+            layer.in_off + act_src,
+            l1_act + ow_i * tile_elem_count,
+            tile_elem_count, SMF_LOAD_A,
+        ))
+    # UDMA: load WGT (one weight row, shared by all OW positions)
+    descs.append(udma_dram_to_l1_descriptor(
+        layer, ordinal + len(descs),
+        layer.wgt_off + wgt_src,
+        l1_wgt,
+        tile_elem_count, SMF_LOAD_B,
+    ))
+
+    # CONV descriptor: L1-read, chain_out_enable=1,
+    # conv_tile_ow_count=tile_ow in word[8][31:16],
+    # act_tile_col_stride=tile_elem_count in word[10][21:0].
+    desc[2] = l1_base         # L1 base addr (ACT starts here)
+    desc[3] = (desc[3] & ~(1 << 6)) | READ_FROM_L1_FLAG | MICROBLOCK_FLAG | CONV_CHAIN_OUT_FLAG
+    # word[8][31:16] = conv_tile_ow_count; word[8][15:0] = 0 (no single-descriptor
+    # drain — drain is handled by the separate REQUANT descriptor below).
+    desc[8] = (tile_ow & CONV_OW_COUNT_MASK) << CONV_OW_COUNT_SHIFT
+    # word[10][21:0] = act_col_stride = tile_elem_count (bytes between ACT copies)
+    desc[10] = tile_elem_count & 0x3FFFFF
+    # WGT starts at l1_wgt = l1_act + tile_ow * tile_elem_count; encode in
+    # the standard wgt-relative-to-base field (workload_sample_bytes offset).
+    # The RTL adds l1_req_base_addr + workload_sample_bytes + wgt_tile_l1_offset.
+    # wgt_tile_l1_offset=0, so wgt addr = l1_base + workload_sample_bytes.
+    # We need l1_wgt = l1_base + tile_ow * tile_elem_count, so set workload_bytes
+    # such that workload_sample_bytes = tile_ow * tile_elem_count.
+    desc[1] = tile_ow * tile_elem_count   # workload_bytes → wgt offset from base
+    desc[27] = l1_result  # output slot (chain_skip_store skips write anyway)
+    stamp_synth_microblock_metadata(
+        desc, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    # conv_tile_oc_count=0 (=1, single OC per OW position) in word[31][31:16]
+    desc[31] = (desc[31] & 0x0000_FFFF) | (0 << 16)
+    descs.append(desc)
+
+    # Expected: same ACT + same WGT → same acc for every OW position
+    eq = mbqm(clamp_i32(raw_acc_oc0), params.mult[0], params.shift[0]) + params.zp_out
+    eq = max(params.act_min, min(params.act_max, eq))
+    expected_byte = bytes([eq & 0xFF])
+    expected_bytes = expected_byte * tile_ow
+
+    # REQUANT: tile_drain_count=tile_ow drains consecutive bytes
+    rq_words = [0] * WORDS_PER_COMMAND
+    rq_words[0] = OP_REQUANT
+    rq_words[1] = 1
+    rq_words[2] = l1_result
+    rq_words[3] = REQUANT_USE_CHAIN | (1 << 6)
+    rq_words[8] = tile_ow & 0xFFFF   # tile_drain_count in word[8][15:0]
+    rq_words[14] = params.mult[0] & 0xFFFF_FFFF
+    rq_words[15] = (params.shift[0] & 0xFF) | ((params.zp_out & 0xFF) << 8)
+    rq_words[16] = params.act_min & 0xFFFF_FFFF
+    rq_words[17] = params.act_max & 0xFFFF_FFFF
+    rq_words[18] = expected_byte[0] & 0xFF
+    rq_words[19] = layer.index
+    rq_words[27] = l1_result
+    descs.append(rq_words)
+
+    # L1CRC: verify tile_ow bytes starting at l1_result
+    crc_check = l1mesh_crc_probe_descriptor(
+        ordinal + len(descs), l1_result, expected_bytes,
+    )
+    if crc_check is None:
+        return []
+    crc_check[3] |= MICROBLOCK_FLAG
+    stamp_synth_microblock_metadata(
+        crc_check, layer.index, ordinal + len(descs), ordinal + len(descs),
+        SMF_FINAL_TILE,
+    )
+    descs.append(crc_check)
+    return descs
+
+
 def closed_loop_conv_probes(
     layer: Layer,
     ordinal: int,
@@ -2596,6 +2748,17 @@ def closed_loop_conv_probes(
         )
         if oc_tile_probes and len(oc_tile_probes) <= command_budget - len(descs):
             descs.extend(oc_tile_probes)
+
+    # v12 Phase 6c (OW spatial): emit one OW tile probe to exercise the outer
+    # OW spatial loop in CONV (act_tile_col_stride, conv_tile_ow_count) and
+    # multi-element drain in REQUANT.
+    OW_TILE_PROBE_COMMANDS = 8   # tile_ow UDMAs + 1 WGT UDMA + CONV + REQUANT + L1CRC + margin
+    if command_budget - len(descs) >= OW_TILE_PROBE_COMMANDS:
+        ow_tile_probes = closed_loop_conv_requant_ow_tile_probe(
+            layer, ordinal + len(descs), result_dram_off, tile_ow=2,
+        )
+        if ow_tile_probes and len(ow_tile_probes) <= command_budget - len(descs):
+            descs.extend(ow_tile_probes)
 
     return descs
 
