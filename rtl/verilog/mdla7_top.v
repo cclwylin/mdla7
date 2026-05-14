@@ -626,6 +626,8 @@ module mdla7_top #(
     input      [15:0]           requant_oc_count,
     input      [15:0]           requant_oc_index,
     input      [15:0]           requant_tile_drain_count,
+    input signed [7:0]          requant_chain_zp_b,          // v12 Phase 7
+    input                       requant_use_act_correction,   // v12 Phase 7
     input signed [15:0]         conv_zp_in,
     input signed [31:0]         conv_bias,
     input signed [31:0]         conv_multiplier,
@@ -905,6 +907,8 @@ module mdla7_top #(
     reg [15:0] requant_oc_count_q;
     reg [15:0] requant_oc_index_q;
     reg [15:0] requant_tile_drain_count_q;
+    reg signed [7:0] requant_chain_zp_b_q;         // v12 Phase 7
+    reg              requant_use_act_correction_q;  // v12 Phase 7
     wire [15:0] requant_fp_q_bits;
     reg requant_sramcrc_mode_q;
     reg [31:0] requant_sramcrc_expected_count_q;
@@ -954,7 +958,7 @@ module mdla7_top #(
     wire [31:0] conv_remaining_cycles;
     // v12 Phase 1: CONV->REQUANT chain wires (1-deep direct handshake).
     wire conv_chain_psum_valid;
-    wire signed [31:0] conv_chain_psum_data;
+    wire signed [63:0] conv_chain_psum_data;  // v12 Phase 7: [63:32]=sum_a [31:0]=psum
     wire conv_chain_psum_ready;
     wire conv_l1_req_valid;
     wire conv_l1_req_ready;
@@ -1402,6 +1406,8 @@ module mdla7_top #(
         .chain_psum_valid(conv_chain_psum_valid),
         .chain_psum_data(conv_chain_psum_data),
         .chain_psum_ready(conv_chain_psum_ready),
+        .chain_zp_b(requant_chain_zp_b_q),
+        .use_act_correction(requant_use_act_correction_q),
         .multiplier(conv_multiplier_q),
         .shift(conv_shift_q),
         .zp_out(conv_zp_out_q),
@@ -1841,6 +1847,8 @@ module mdla7_top #(
             requant_oc_count_q <= 16'd0;
             requant_oc_index_q <= 16'd0;
             requant_tile_drain_count_q <= 16'd0;
+            requant_chain_zp_b_q        <= 8'sd0;
+            requant_use_act_correction_q <= 1'b0;
             requant_sramcrc_mode_q <= 1'b0;
             requant_sramcrc_expected_count_q <= 32'd0;
             requant_out_byte_offset_q <= 32'd0;
@@ -1998,6 +2006,8 @@ module mdla7_top #(
                         requant_oc_count_q <= requant_oc_count;
                         requant_oc_index_q <= requant_oc_index;
                         requant_tile_drain_count_q <= requant_tile_drain_count;
+                        requant_chain_zp_b_q        <= requant_chain_zp_b;
+                        requant_use_act_correction_q <= requant_use_act_correction;
                         requant_sramcrc_mode_q <= requant_sramcrc_mode;
                         requant_sramcrc_expected_count_q <= requant_sramcrc_expected_count;
                         requant_out_byte_offset_q <= requant_out_byte_offset;

@@ -182,6 +182,8 @@ module Testbench_host_program;
     wire [15:0] requant_oc_count;
     wire [15:0] requant_oc_index;
     wire [15:0] requant_tile_drain_count;
+    wire signed [7:0] requant_chain_zp_b;        // v12 Phase 7
+    wire              requant_use_act_correction; // v12 Phase 7
     wire conv_chain_out_enable;
     wire [15:0] conv_tile_oc_count;
     wire requant_sramcrc_mode;
@@ -437,6 +439,8 @@ module Testbench_host_program;
         .requant_oc_count(requant_oc_count),
         .requant_oc_index(requant_oc_index),
         .requant_tile_drain_count(requant_tile_drain_count),
+        .requant_chain_zp_b(requant_chain_zp_b),
+        .requant_use_act_correction(requant_use_act_correction),
         .conv_chain_out_enable(conv_chain_out_enable),
         .conv_tile_oc_count(conv_tile_oc_count),
         .requant_sramcrc_mode(requant_sramcrc_mode),
@@ -668,6 +672,8 @@ module Testbench_host_program;
         .requant_oc_count(requant_oc_count),
         .requant_oc_index(requant_oc_index),
         .requant_tile_drain_count(requant_tile_drain_count),
+        .requant_chain_zp_b(requant_chain_zp_b),
+        .requant_use_act_correction(requant_use_act_correction),
         .conv_chain_out_enable(conv_chain_out_enable),
         .conv_tile_oc_count(conv_tile_oc_count),
         .requant_sramcrc_mode(requant_sramcrc_mode),

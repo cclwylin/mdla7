@@ -116,6 +116,9 @@ module host #(
     output reg [15:0]  requant_oc_index,
     // v12 Phase 6a: OC tile drain count (cmd_mem[base+8][15:0]). 0 = single.
     output reg [15:0]  requant_tile_drain_count,
+    // v12 Phase 7: per-sample correction for BATCH_MATMUL INT8.
+    output reg signed [7:0]  requant_chain_zp_b,        // word[9][7:0]
+    output reg               requant_use_act_correction, // word[3][17]
     output reg         requant_sramcrc_mode,
     output reg [31:0]  requant_sramcrc_expected_crc,
     output reg [31:0]  requant_sramcrc_expected_count,
@@ -451,6 +454,9 @@ module host #(
             requant_oc_index <= cmd_mem[base + 7][31:16];
             // v12 Phase 6a: tile drain count from word[8] low 16 bits.
             requant_tile_drain_count <= cmd_mem[base + 8][15:0];
+            // v12 Phase 7: activation-sum ZP correction for BATCH_MATMUL INT8.
+            requant_chain_zp_b        <= $signed(cmd_mem[base + 9][7:0]);
+            requant_use_act_correction <= cmd_mem[base + 3][17];
             requant_sramcrc_mode <= cmd_mem[base + 3][10];
             requant_sramcrc_expected_crc <= cmd_mem[base + 28];
             requant_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -772,6 +778,8 @@ module host #(
             requant_oc_count <= 16'd0;
             requant_oc_index <= 16'd0;
             requant_tile_drain_count <= 16'd0;
+            requant_chain_zp_b        <= 8'sd0;
+            requant_use_act_correction <= 1'b0;
             requant_sramcrc_mode <= 1'b0;
             requant_sramcrc_expected_crc <= 32'd0;
             requant_sramcrc_expected_count <= 32'd0;

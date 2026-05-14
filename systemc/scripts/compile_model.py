@@ -1366,12 +1366,11 @@ def main():
             _is_fp_bmm = _a_t_bmm.Type() in FP_TFLITE_TYPES
 
             def _bmm_can_lower(a_t, b_t):
+                # v12 Phase 7: always lower INT8 BATCH_MATMUL to CONV; non-zero
+                # ZPs are handled at runtime via per-sample activation-sum correction.
                 if a_t.Type() in FP_TFLITE_TYPES:
                     return True
-                aq = a_t.Quantization(); bq = b_t.Quantization()
-                zp_a = int(aq.ZeroPoint(0)) if aq and aq.ZeroPointLength() > 0 else 0
-                zp_b = int(bq.ZeroPoint(0)) if bq and bq.ZeroPointLength() > 0 else 0
-                return zp_a == 0 and zp_b == 0
+                return True  # INT8: removed zp_a/zp_b==0 guard
 
             _b_arr_raw = _tensor_original_array(_b_idx_bmm)
             if _bmm_can_lower(_a_t_bmm, _b_t_bmm) and _b_arr_raw is not None:
@@ -1446,6 +1445,10 @@ def main():
                         _zp_in_eff_bmm = (int(_in_q_bmm.ZeroPoint(0))
                                           if _in_q_bmm and _in_q_bmm.ZeroPointLength() > 0
                                           else 0)
+                        # v12 Phase 7: zp_B for per-sample activation-sum correction.
+                        _zp_b_bmm = (int(_b_t_q_bmm.ZeroPoint(0))
+                                     if _b_t_q_bmm and _b_t_q_bmm.ZeroPointLength() > 0
+                                     else 0)
                     _out_tensor_bmm = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
                     _in0_tensor_bmm = _a_idx_bmm
                     _in1_tensor_bmm = _b_idx_bmm
@@ -1467,15 +1470,27 @@ def main():
                             _ref_f32 = np.matmul(_a_f32, _b_f32)   # [M, N]
                             _ref_sl  = _ref_f32.astype(np.float16).reshape(_M_bmm, 1, _N_bmm)
                         else:
-                            # INT8: accumulate in int32, then MBQM-requantise
+                            # v12 Phase 7: INT8 with full ZP correction.
+                            # true_acc = Σ(a_q*b_q) - zp_A*Σb_q[n] - zp_B*Σa_q[m] + K*zp_A*zp_B
                             _psum = np.matmul(
                                 _a_sl.astype(np.int32),
                                 _b_sl.astype(np.int32),
                             ).reshape(_M_bmm, 1, _N_bmm)   # [M, 1, N]
-                            _sum_w_sl = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))
-                            _bias_eff_sl = (-_zp_in_eff_bmm * _sum_w_sl).astype(np.int32)
+                            _sum_w_sl = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))  # [N]
+                            # bias_eff[n] = -zp_A*sum_b[n] + K*zp_A*zp_B (compile-time)
+                            _bias_eff_sl = (
+                                -np.int64(_zp_in_eff_bmm) * _sum_w_sl
+                                + np.int64(_K_bmm) * np.int64(_zp_in_eff_bmm) * np.int64(_zp_b_bmm)
+                            ).astype(np.int64)
+                            _be_i32_sl = np.clip(_bias_eff_sl, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                            # sum_a[m] = Σ_k a_q[m, k] (per-row, runtime correction)
+                            _sum_a_sl = _a_sl.astype(np.int64).sum(axis=-1)  # [M]
+                            # per-row correction: -zp_B * sum_a[m]
+                            _corr_sl = (-np.int64(_zp_b_bmm) * _sum_a_sl).astype(np.int32)  # [M]
+                            # Reference: apply bias_eff + corr
                             _pb = (_psum.astype(np.int64)
-                                   + _bias_eff_sl.reshape(1, 1, _N_bmm).astype(np.int64))
+                                   + _be_i32_sl.reshape(1, 1, _N_bmm).astype(np.int64)
+                                   + _corr_sl.reshape(_M_bmm, 1, 1).astype(np.int64))
                             _pb = np.clip(_pb, -(1 << 31), (1 << 31) - 1).astype(np.int32)
                             _sc = multiply_by_quantized_multiplier_np(
                                 _pb,
@@ -1496,13 +1511,24 @@ def main():
                             _in_b_sl  = _act_sl.astype(np.float16).tobytes(order="C")
                             _ref_b_sl = _ref_sl.astype(np.float16).tobytes(order="C")
                         else:
+                            # v12 Phase 7: params include bias_eff with ZP cross-term;
+                            # append corr array (shape [M, 1]) for SystemC requant engine.
+                            # corr_per_oc=0 (A.op_kind==OP_FC, not DWCONV) → shape [OH, OW]=[M, 1].
                             _sum_w_sl2 = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))
-                            _be_sl = (-_zp_in_eff_bmm * _sum_w_sl2).astype(np.int64)
-                            _be_i32_sl = np.clip(_be_sl, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                            _be_sl2 = (
+                                -np.int64(_zp_in_eff_bmm) * _sum_w_sl2
+                                + np.int64(_K_bmm) * np.int64(_zp_in_eff_bmm) * np.int64(_zp_b_bmm)
+                            ).astype(np.int64)
+                            _be_i32_sl2 = np.clip(_be_sl2, -(1 << 31), (1 << 31) - 1).astype(np.int32)
                             _params_b_sl = (struct.pack("<iii", _zp_out_bmm, -128, 127)
                                             + _mult_arr_bmm.astype("<i4").tobytes()
                                             + _shift_arr_bmm.astype(np.int8).tobytes()
-                                            + _be_i32_sl.tobytes())
+                                            + _be_i32_sl2.tobytes())
+                            if _zp_b_bmm != 0:
+                                # Append corr map [M, 1] = -zp_B * sum_a for SystemC requant.
+                                _sum_a_sl2 = _a_sl.astype(np.int64).sum(axis=-1)  # [M]
+                                _corr_sl2 = (-np.int64(_zp_b_bmm) * _sum_a_sl2).astype(np.int32)
+                                _params_b_sl += _corr_sl2.reshape(_M_bmm, 1).astype("<i4").tobytes(order="C")
                             _wgt_payload_sl = (_wgt_sl.astype(np.int8).tobytes(order="C")
                                                + _params_b_sl)
                             _in_b_sl  = _act_sl.astype(np.int8).tobytes(order="C")

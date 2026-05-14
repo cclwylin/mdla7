@@ -20,8 +20,11 @@ module vf_requant_sample_engine #(
     // mode keeps the existing input_value path untouched.
     input                  use_chain_input,
     input                  chain_psum_valid,
-    input signed [31:0]    chain_psum_data,
+    input signed [63:0]    chain_psum_data,  // v12 Phase 7: [63:32]=sum_a [31:0]=psum
     output                 chain_psum_ready,
+    // v12 Phase 7: per-sample activation-sum ZP correction for INT8 BATCH_MATMUL.
+    input signed [7:0]     chain_zp_b,          // zp_B of the "weight" tensor
+    input                  use_act_correction,   // 1 = apply correction, 0 = passthrough
     // v12 Phase 2: FP mode. When fp_mode=1, REQUANT skips MBQM and instead
     // interprets active_input_value as FP32 bits, clamps against fp32 act_min/
     // act_max bit patterns, casts down to FP16, and writes 2 bytes to L1.
@@ -514,7 +517,12 @@ module vf_requant_sample_engine #(
                 end
                 ST_CHAIN_WAIT: begin
                     if (chain_psum_valid) begin
-                        active_input_value <= chain_psum_data;
+                        // v12 Phase 7: corrected_psum = psum - zp_B * sum_a
+                        if (use_act_correction)
+                            active_input_value <= $signed(chain_psum_data[31:0])
+                                                  - $signed(chain_zp_b) * $signed(chain_psum_data[63:32]);
+                        else
+                            active_input_value <= $signed(chain_psum_data[31:0]);
                         pipe_remaining <= 32'd2;
                         state <= ST_PIPE;
                     end

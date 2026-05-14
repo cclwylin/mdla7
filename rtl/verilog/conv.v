@@ -365,7 +365,7 @@ module vf_conv_sample_engine #(
     // descriptors set 1 to actually push the psum.
     input                         chain_out_enable,
     output reg                    chain_psum_valid,
-    output reg signed [31:0]      chain_psum_data,
+    output reg signed [63:0]      chain_psum_data,  // v12 Phase 7: [63:32]=sum_a [31:0]=psum
     input                         chain_psum_ready,
     // v12 Phase 6b: OC tile loop. When conv_tile_oc_count > 1, after each
     // ST_STORE the weight pointer advances by workload_sample_bytes and ST_WGT
@@ -407,6 +407,8 @@ module vf_conv_sample_engine #(
     reg [31:0] compute_remaining;
     integer fp_i;
     integer i16_i;
+    integer sum_i;                    // v12 Phase 7: loop var for sum_a computation
+    reg signed [31:0] conv_sum_act_out; // v12 Phase 7: Σ a_q[k] over active lanes
     real fp_sum;
     reg signed [31:0] i16_av;
     reg signed [31:0] i16_wv;
@@ -977,6 +979,15 @@ module vf_conv_sample_engine #(
         end
         i16_acc = clamp_i32(i16_acc64);
 
+        // v12 Phase 7: sum of raw activation bytes for per-sample ZP correction.
+        // Computed from active_act_vec over safe_int_count lanes (no ZP subtraction).
+        conv_sum_act_out = 32'sd0;
+        for (sum_i = 0; sum_i < MAX_ELEMS; sum_i = sum_i + 1) begin
+            if (sum_i < safe_int_count)
+                conv_sum_act_out = conv_sum_act_out +
+                    {{24{conv_mac_act_vec[sum_i*8+7]}}, conv_mac_act_vec[sum_i*8 +: 8]};
+        end
+
         case (state)
             ST_ACT: begin
                 phase_id = PH_ACT_READ;
@@ -1034,7 +1045,7 @@ module vf_conv_sample_engine #(
             act_req_sent <= 1'b0;
             wgt_req_sent <= 1'b0;
             chain_psum_valid <= 1'b0;
-            chain_psum_data <= 32'sd0;
+            chain_psum_data <= 64'sd0;
             conv_psum_valid_mask <= 4'd0;
             conv_psum_acc_values <= 128'd0;
             conv_shadow_valid_mask <= 4'd0;
@@ -1210,9 +1221,11 @@ module vf_conv_sample_engine #(
                         // half of an fp64 pattern, which is meaningless to a
                         // downstream fp32 consumer.
                         if (chain_out_enable) begin
-                            chain_psum_data <= fp_mode    ? $signed($shortrealtobits(fp_sum))
-                                             : int16_mode ? int16_acc_out
-                                             :              acc_out;
+                            // v12 Phase 7: high word = sum_a; low word = psum.
+                            // FP/INT16 paths: sum_a field unused (correction disabled in REQUANT).
+                            chain_psum_data <= fp_mode    ? {32'sd0, $signed($shortrealtobits(fp_sum))}
+                                             : int16_mode ? {32'sd0, int16_acc_out}
+                                             :              {conv_sum_act_out, acc_out};
                             chain_psum_valid <= 1'b1;
                         end
                         // v12 Phase 6b: OC tile loop — if more OC iterations
