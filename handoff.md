@@ -199,3 +199,100 @@ ST_STORE:
 1. **compile_model.py OH/OW 연동**: 실제 conv layer를 OH×OW tile descriptor로 lower하는 코드 추가 (현재는 probe만 존재, compiler는 미구현)
 2. **DRAM multi-beat**: vf_dram_model burst 지원 (Phase 6 tile engine weight load)
 3. **Producer INT8 BMM**: sum_b dynamic correction driver-side
+
+---
+
+## Session 4 (2026-05-15) — Softmax decomposition: Pool bottleneck 重新校準
+
+### 初始錯誤診斷（已校正）
+
+最初判斷「Pool bottleneck = decomposition 全在 EWE thread 內 inline 跑完，沒真的丟給 PoolEngine」— **這是錯的**。
+
+校正後事實：跨引擎 dispatch **早就完整實作在 [mdla7_model_runner.cpp](systemc/src/mdla7_model_runner.cpp) 內**：
+- FP16（任意 rows）：[9462-9499](systemc/src/mdla7_model_runner.cpp#L9462-L9499) (rows==1) + [9519-9682](systemc/src/mdla7_model_runner.cpp#L9519-L9682) (rows>1) 已發 POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV 5 條 descriptor
+- INT8 rows>1：已 dequant→FP16 chain→quant 走同一路
+- `make_pool_row_reduce` ([mdla7_model_runner.cpp:288-310](systemc/src/mdla7_model_runner.cpp#L288-L310)) 用形狀慣例 `[in_h=rows, in_w=K, in_c=1, k_w=K]` — PoolEngine 現有三層迴圈直接處理，**不需改 PoolEngine**
+
+[ewe_pool.h](systemc/include/mdla7/ewe_pool.h) 的 `run_softmax_decomposed_*` inline 路徑只在邊角情況 fire：
+1. INT8 + rows==1（[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件 `L.dtype == DT_FP16` 排除）
+2. `MDLA7_SOFTMAX_DECOMPOSE=0`
+3. L1 容量檢查失敗
+
+### 真正的 Pool bottleneck 來源
+
+每個 row 的 POOL_MAX 都**顯式等前一個 row 的 EWE_DIV done**（[mdla7_model_runner.cpp:9591](systemc/src/mdla7_model_runner.cpp#L9591) `load_done_wait = (row == 0) ? fuse_prev_done_tag : prev_req_tag`）。
+
+原因：scratches `addr_max / addr_ctr / addr_exp / addr_sum`（[9574-9577](systemc/src/mdla7_model_runner.cpp#L9574-L9577)）**跨所有 row 共用一塊**，有 WAR/WAW hazard，只能串。
+
+→ Critical path 上有 `2 × rows` 個 POOL ops 全部串行；看起來 Pool 是 bottleneck，**真因是 scratch 沒 double-buffer**，不是 Pool 本身。
+
+### Phase 表重新對齊現況
+
+| 原 Phase | 校正後現況 |
+|---|---|
+| A: PoolEngine row-reduce mode | ✅ 已用 shape convention，PoolEngine 不需動 |
+| B: FP 5-descriptor chain | ✅ [mdla7_model_runner.cpp:9462+](systemc/src/mdla7_model_runner.cpp#L9462) 已實作 |
+| C: L1Mesh 報告驗證 POOL 流量歸屬 | ❓ 沒驗過 — 待跑 |
+| D: INT8 widening | ❌ 不需要 — INT8 已走 dequant→FP16→quant，PoolBody 不需動 |
+| E: Microblock overlap (scratch ping-pong) | ❌ **真正未做的工** |
+
+### 真正的下一步候選
+
+1. **Phase E（微塊 overlap，本來該做的）**：
+   - `addr_max[2] / addr_ctr[2] / addr_exp[2] / addr_sum[2]` 雙緩衝
+   - 移除 `load_done_wait = prev_req_tag` 強制依賴（改成 row r 只需 wait row r-2 的 div done）
+   - 預期：POOL/EWE 可以 row 級 overlap，critical path 從 `O(rows × 5)` 降到 `O(rows × max(per-op))`
+   - 風險：L1 scratch 用量 2x；要重看 L1_BUDGET fit check
+   - 影響：[mdla7_model_runner.cpp:9519-9682](systemc/src/mdla7_model_runner.cpp#L9519-L9682) 內，pure compiler-side
+
+2. **Phase C（先驗證後改）**：
+   - 跑 model + [L1Mesh_report.md](L1Mesh_report.md) 生成器，確認 POOL 流量歸 PoolEngine 帳上
+   - 確認 user 觀察是「2 × rows POOL ops 在 critical path」的現象本身（→ 走 E），還是報告歸屬錯（→ 修報告）
+   - 純讀，沒改動
+
+3. **邊角清理（低優先）**：INT8 rows==1 改走 chain（[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件加 INT8），消除 inline path
+
+### 建議起點
+
+**Phase C 先做** — 讀 L1Mesh 報告，先確認 bottleneck 真因再決定 E 怎麼動。Phase E 是 compiler-side 大改，先驗報告再下手較穩。
+
+### 教訓 / 自我修正
+
+下次接手相同主題：**先讀 model_runner 的 softmax 段才開診斷**，不要光看 ewe_pool.h 就推結論。EweEngine 內的 inline path 是 fallback，不是主路徑。
+
+### 修法落地：批量化（whole-shape chain）
+
+User 確認觀察到的具體 regression 是 `bmm_softmax_bmm_tiled_2.5ms_int8.tflite` fast mode 從 **7ms → 72ms**。stored profile 確認 baseline = 137 ms（POOL 117 ms / 56,576 tasks）。
+
+選的方案：**批量化** — per-row 5-descriptor loop 改成 per-softmax 1 套 5/7 descriptor 操作整個 `[rows, K]` shape。PoolEngine row-reduce shape convention 跟 EweEngine 末軸 broadcast 本來就支援 rows>1。
+
+**改動位置**：[mdla7_model_runner.cpp:9519-9694](systemc/src/mdla7_model_runner.cpp#L9519-L9694)
+- L1 fit check scratch 大小從 `K*2` 改 `rows*K*2`（ctr/exp/fp_in/fp_out）+ `rows*2`（max/sum 改 row-vector）
+- 移除 `for (uint64_t row = 0; row < rows; ++row)` 迴圈
+- 一條 UDMA 載入整塊 `in_size` (non-fused)
+- 一套 5/7 descriptor，rows 參數從 1 改 actual rows
+- `tiles_h_per_layer[i] = 1`（whole softmax = 1 microblock）
+- acc accounting 改 in_size/ref_size 整批
+
+**測試結果**：`./batch/run_systemc.py --filter bmm --model-filter tiled_2.5ms_int8 --rerun-all`
+
+| 指標 | Before (per-row) | After (batched) | 改善 |
+|---|---|---|---|
+| Fast latency | 72 ms | **11.18 ms** | 6.4x ↓ |
+| Sim total | 137 ms | 21.25 ms | 6.5x ↓ |
+| POOL tasks | 56,576 | 884 (= 442×2) | 64x ↓ |
+| POOL busy | 117 ms | 4.95 ms | 24x ↓ |
+| EWE tasks | 141,440 | 2,210 (= 442×5) | 64x ↓ |
+| EWE busy | 13.3 ms | 13.2 ms | 同 (compute floor) |
+| Cmd dispatches | 228,514 | 5,746 | 40x ↓ |
+| Correctness | 1358/1358 PASS | **1358/1358 PASS** | ✓ |
+
+新 bottleneck = EWE (util_peak 62.1%)，是真實 compute floor，不是 dispatch overhead。
+
+### 後續可選工作
+
+1. **其他 softmax model 全掃**：跑整個 bmm corpus（不只 tiled_2.5ms_int8）確認沒有別的 regression / L1 fit 失敗
+2. **rows==1 INT8 inline path 邊角清理**：[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件目前還排除 INT8，加入 INT8 後 EweEngine 的 inline `run_softmax_decomposed_int8` 就完全用不到
+3. **`compile-skipped:1` 含義**：CSV 寫 `bmm_softmax_bmm_tiled_2.5ms_int8,11.184,compile-skipped:1`，看 [run_systemc.py:187](batch/run_systemc.py#L187) `_compile_skipped_rows` 是 compile 階段有 1 row 沒 ready；correctness 還是 1358/1358 PASS，要不要修看實際 model 需求
+4. **Phase E (scratch ping-pong)**：目前已不是 critical path，可保留為未來工程
+
