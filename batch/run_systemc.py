@@ -914,6 +914,11 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         "h_swsh": "ewe", "relu": "ewe", "gelu": "ewe", "softmax": "ewe",
         "logist": "ewe", "rsqrt": "ewe", "tanh": "ewe",
         "avgpool": "pool", "maxpool": "pool", "mean": "pool",
+        # v13: softmax decomposition sub-op rows (emitted by the runner when
+        # MDLA7_SOFTMAX_DECOMPOSE is on — now default). Each sub-row maps to
+        # the engine that actually runs that phase of the chain.
+        "sm_pmax": "pool", "sm_sub": "ewe", "sm_exp": "ewe",
+        "sm_psum": "pool", "sm_div": "ewe",
         "shape": "—",   # constant fill, no engine — wgt UDMA load only
         "reverse": "—", # pre-flipped constant, same UDMA load path as shape
     }
