@@ -495,6 +495,8 @@ SC_MODULE(EweEngine) {
                 y = 0.5f * x * (1.0f + std::tanh(u));
             } else if (subtype == ES_LOGISTIC) {
                 y = 1.0f / (1.0f + std::exp(-x));
+            } else if (subtype == ES_EXP) {
+                y = std::exp(x);
             } else {                                    // ES_HARD_SWISH
                 float r = x + 3.0f;
                 if (r < 0.0f) r = 0.0f;
@@ -550,15 +552,47 @@ SC_MODULE(EweEngine) {
                     rtl_run_binary(elems, lanes);
                 else
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+            } else if (e.subtype == ES_DIV) {
+                // v13: softmax decomposition — element-wise divide a/b with
+                // broadcast on the last axis. b has shape [n, h, w, 1] (one
+                // scalar per row); a has shape [n, h, w, c]. FP-only path
+                // (intermediates are FP16 in the softmax chain). Compute in
+                // FP32; storage FP16.
+                std::cout << "[EWE] div " << e.h << "x" << e.w << "x" << e.c
+                          << "  dtype=" << (fp ? "fp" : "int") << "\n";
+                if (elems > 0 && fp) {
+                    const uint64_t rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+                    const uint64_t vec  = e.c;
+                    std::vector<uint16_t> a16(elems), b16(rows), out16(elems);
+                    l1mgr.read(e.in_a_addr, a16.data(), elems * sizeof(uint16_t));
+                    l1mgr.read(e.in_b_addr, b16.data(), rows * sizeof(uint16_t));
+                    for (uint64_t r = 0; r < rows; ++r) {
+                        float denom = fp16_to_fp32(b16[r]);
+                        if (denom == 0.0f) denom = 1.0f;
+                        for (uint64_t k = 0; k < vec; ++k) {
+                            const float a = fp16_to_fp32(a16[r * vec + k]);
+                            out16[r * vec + k] = fp32_to_fp16(a / denom);
+                        }
+                    }
+                    l1mgr.write(e.out_addr, out16.data(), elems * sizeof(uint16_t));
+                }
+                if (is_synth_style(engine_model))
+                    synth_run_binary(elems, lanes);
+                else if (is_rtl_style(engine_model))
+                    rtl_run_binary(elems, lanes);
+                else
+                    wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH ||
                        e.subtype == ES_GELU ||
                        e.subtype == ES_LOGISTIC ||
                        e.subtype == ES_RSQRT ||
-                       e.subtype == ES_TANH) {
+                       e.subtype == ES_TANH ||
+                       e.subtype == ES_EXP) {
                 const char* nm = (e.subtype == ES_GELU)     ? "gelu"
                                : (e.subtype == ES_LOGISTIC) ? "logist"
                                : (e.subtype == ES_RSQRT)    ? "rsqrt"
                                : (e.subtype == ES_TANH)     ? "tanh"
+                               : (e.subtype == ES_EXP)      ? "exp"
                                :                              "h_swsh";
                 std::cout << "[EWE] " << nm << " " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
@@ -791,6 +825,17 @@ SC_MODULE(PoolEngine) {
                     if (v > best) best = v;
                 }
                 out16[(oh * p.out_w + ow) * p.out_c + c] = fp32_to_fp16(best);
+            } else if (p.mode == PM_SUM) {              // v13: sum-reduce, no divide
+                float s = 0.0f;
+                for (uint32_t kh = 0; kh < k_h; ++kh)
+                for (uint32_t kw = 0; kw < k_w; ++kw) {
+                    int ih = int(oh)*int(s_h) + int(kh) - int(pT);
+                    int iw = int(ow)*int(s_w) + int(kw) - int(pL);
+                    if (ih < 0 || ih >= int(p.in_h)) continue;
+                    if (iw < 0 || iw >= int(p.in_w)) continue;
+                    s += fp16_to_fp32(in16[(ih * p.in_w + iw) * p.in_c + c]);
+                }
+                out16[(oh * p.out_w + ow) * p.out_c + c] = fp32_to_fp16(s);
             } else {                            // AVG / GLOBAL via avg
                 float s = 0.0f; uint32_t n = 0;
                 for (uint32_t kh = 0; kh < k_h; ++kh)
@@ -848,6 +893,19 @@ SC_MODULE(PoolEngine) {
                     if (v > best) best = v;
                 }
                 out_buf[(oh * p.out_w + ow) * p.out_c + c] = T(best);
+            } else if (p.mode == PM_SUM) {              // v13: sum-reduce, saturating cast
+                int32_t s = 0;
+                for (uint32_t kh = 0; kh < k_h; ++kh)
+                for (uint32_t kw = 0; kw < k_w; ++kw) {
+                    int ih = int(oh)*int(s_h) + int(kh) - int(pT);
+                    int iw = int(ow)*int(s_w) + int(kw) - int(pL);
+                    if (ih < 0 || ih >= int(p.in_h)) continue;
+                    if (iw < 0 || iw >= int(p.in_w)) continue;
+                    s += int32_t(in_buf[(ih * p.in_w + iw) * p.in_c + c]);
+                }
+                if (s > max_v) s = max_v;
+                if (s < min_v) s = min_v;
+                out_buf[(oh * p.out_w + ow) * p.out_c + c] = T(s);
             } else {                            // AVG (or GLOBAL via avg)
                 int32_t s = 0; uint32_t n = 0;
                 for (uint32_t kh = 0; kh < k_h; ++kh)
@@ -881,7 +939,8 @@ SC_MODULE(PoolEngine) {
             const uint32_t k_h = (p.k_h == 255) ? uint32_t(p.in_h) : uint32_t(p.k_h);
             const uint32_t k_w = (p.k_w == 255) ? uint32_t(p.in_w) : uint32_t(p.k_w);
             const char*    mode = (p.mode == PM_MAX) ? "max"
-                                : (p.mode == PM_AVG) ? "avg" : "global";
+                                : (p.mode == PM_AVG) ? "avg"
+                                : (p.mode == PM_SUM) ? "sum" : "global";
             const bool fp = is_fp_dtype(last_dtype);
             const bool int16 = (last_dtype == DT_INT16x4
                              || last_dtype == DT_INT16x8

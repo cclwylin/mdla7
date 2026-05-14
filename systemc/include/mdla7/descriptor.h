@@ -60,6 +60,7 @@ enum PoolMode : uint8_t {
     PM_MAX    = 0,
     PM_AVG    = 1,
     PM_GLOBAL = 2,
+    PM_SUM    = 3,   // v13: sum-reduce without division (softmax decomposition)
 };
 
 enum EngineId : uint8_t {
@@ -124,6 +125,8 @@ enum EweSubtype : uint8_t {
     ES_LOGISTIC   = 6,    // unary: sigmoid(x); INT8 path uses 256-byte LUT
     ES_RSQRT      = 7,    // unary: 1/sqrt(x), INT8 LUT-based
     ES_TANH       = 8,    // unary: tanh(x), INT8 LUT-based
+    ES_EXP        = 9,    // v13: unary exp(x), INT8 LUT-based / FP analytical
+    ES_DIV        = 10,   // v13: binary a/b, broadcast over last axis; FP-only
 };
 
 // Descriptor flags.
