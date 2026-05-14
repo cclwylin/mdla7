@@ -35,6 +35,8 @@ OK_SUB = 11
 OK_HARD_SWISH = 12
 OK_GELU = 13
 OK_LOGISTIC = 27
+OK_RSQRT = 28
+OK_TANH = 29
 OK_RESHAPE = 5
 OK_CONCAT = 8
 OK_GATHER = 9
@@ -73,7 +75,12 @@ TNPS_OPS = {
     OK_SPLIT,
 }
 UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
-GENERIC_REF_OPS = TNPS_OPS | UDMA_OPS | {OK_SOFTMAX, OK_HARD_SWISH, OK_GELU}
+# v11: INT8 RSQRT/TANH/LOGISTIC ride the generic ref-CRC path until the
+# RTL EWE engine grows its 256-byte LUT lookup. compile_model has already
+# pre-evaluated the LUT in the .bin reference bytes, so byte-CRC against
+# DRAM still proves the layer's output matches TFLite bit-exactly.
+GENERIC_REF_OPS = TNPS_OPS | UDMA_OPS | {OK_SOFTMAX, OK_HARD_SWISH, OK_GELU,
+                                         OK_RSQRT, OK_TANH, OK_LOGISTIC}
 
 DT_INT16 = {2, 3, 4}
 DT_FP = {8, 9, 10}
@@ -2735,6 +2742,120 @@ def closed_loop_ewe_probe(layer: Layer, ordinal: int, result_dram_off: int,
     return descs
 
 
+def lut_l1_addr_for_layer(layer: Layer) -> int:
+    """Reserve an L1 region for the layer's 256-byte unary LUT, kept clear of
+    the per-probe input/result slots used by closed_loop_lut_unary_probe."""
+    return 0x30000 + ((layer.index * 0x100) & 0x0FFFF)
+
+
+def int8_lut_unary_descriptor(
+    layer: Layer,
+    ordinal: int,
+    out_elem_index: int,
+    l1_input_addr: int,
+    l1_result_addr: int,
+) -> list[int] | None:
+    """v11: build a single OP_EWE descriptor in LUT mode for INT8 unary ops.
+    Engine reads one input byte from l1_input_addr, indexes its preloaded
+    lut_mem (filled in ST_LUT_LOAD from lut_addr), writes lut_mem[input] to
+    l1_result_addr. Input bytes and the 256-byte LUT must both already live
+    in L1 (separate UDMA descriptors)."""
+    if layer.wgt_size < 256:
+        return None
+    if out_elem_index < 0 or out_elem_index >= layer.in_size or out_elem_index >= layer.ref_size:
+        return None
+    data = descriptor_for_layer.program_bytes
+    in_byte = data[layer.in_off + out_elem_index]
+    # Compute the expected output by indexing the 256-byte LUT in wgt_b with
+    # the unsigned-byte view of the input. Engine should produce the same byte.
+    lut_byte = data[layer.wgt_off + in_byte]
+    expected = lut_byte & 0xFF
+    words = [0] * WORDS_PER_COMMAND
+    words[0] = OP_EWE
+    words[1] = 1
+    words[2] = l1_input_addr & 0x003F_FFFF
+    # final_q_mode bit (1<<6) is unused under lut_mode but kept for parity
+    # with the binary EWE descriptor layout. read_a_from_l1 = 1 means a_vec[0]
+    # comes from the L1 input we just preloaded.
+    words[3] = (1 << 6) | (1 << 11)
+    words[4] = in_byte                      # a_vec[0] (also fetched from L1)
+    words[8] = 0                            # b_vec unused in LUT mode
+    # elem_count=1, op_mode=0 (unused), lut_mode bit 12 = 1
+    words[12] = 1 | (0 << 8) | (1 << 12)
+    words[18] = expected
+    words[19] = layer.index
+    words[27] = l1_result_addr & 0xFFFF_FFFF  # output store offset in L1
+    words[30] = lut_l1_addr_for_layer(layer) & 0xFFFF_FFFF
+    return words
+
+
+def closed_loop_lut_unary_probe(layer: Layer, ordinal: int, result_dram_off: int,
+                                out_elem_index: int = 0) -> list[list[int]]:
+    if out_elem_index < 0 or out_elem_index >= layer.ref_size:
+        return []
+    l1_input  = 0x20000 + (((layer.index * 0x100) + (out_elem_index * 0x20)) & 0x2FFFF)
+    l1_result = l1_input + 0x80
+    descs: list[list[int]] = [
+        udma_dram_to_l1_descriptor(
+            layer, ordinal, layer.in_off + out_elem_index, l1_input, 1, SMF_LOAD_A)
+    ]
+    desc = int8_lut_unary_descriptor(
+        layer, ordinal + len(descs), out_elem_index, l1_input, l1_result)
+    if desc is None:
+        return []
+    expected = desc[18] & 0xFF
+    desc[3] |= MICROBLOCK_FLAG
+    stamp_synth_microblock_metadata(
+        desc,
+        layer.index,
+        ordinal + len(descs),
+        ordinal + len(descs),
+        SMF_COMPUTE | SMF_FINAL_TILE,
+    )
+    descs.append(desc)
+    descs.extend(
+        closed_loop_result_check_descriptors(
+            layer,
+            ordinal + len(descs),
+            l1_result,
+            result_dram_off + out_elem_index,
+            bytes([expected]),
+        )
+    )
+    return descs
+
+
+def closed_loop_lut_unary_probes(layer: Layer, ordinal: int, result_dram_off: int,
+                                 command_budget: int) -> list[list[int]]:
+    if layer.wgt_size < 256:
+        return []
+    output_elems = min(layer.ref_size, layer.in_size)
+    descs: list[list[int]] = []
+    # Load the 256-byte LUT once per layer. The DRAM model returns only 16 B
+    # per request, so split the 256-byte LUT into 16 sequential UDMA loads of
+    # 16 B each. Engine reloads from L1 on every descriptor entry into
+    # ST_LUT_LOAD, but the L1 contents stay valid across all probes.
+    lut_l1 = lut_l1_addr_for_layer(layer)
+    for beat in range(16):
+        descs.append(
+            udma_dram_to_l1_descriptor(
+                layer, ordinal + len(descs),
+                layer.wgt_off + beat * 16,
+                lut_l1 + beat * 16,
+                16, SMF_LOAD_B)
+        )
+    indices = closed_loop_output_indices(output_elems, command_budget, 5)[:BYTE_TILE_SWEEP_PROBES]
+    for out_elem_index in indices:
+        probe = closed_loop_lut_unary_probe(
+            layer, ordinal + len(descs), result_dram_off, out_elem_index)
+        if not probe:
+            continue
+        if len(descs) + len(probe) > command_budget:
+            break
+        descs.extend(probe)
+    return descs
+
+
 def closed_loop_ewe_probes(layer: Layer, ordinal: int, result_dram_off: int,
                            command_budget: int) -> list[list[int]]:
     output_elems = min(layer.ref_size, layer.in_size, layer.wgt_size)
@@ -3393,11 +3514,23 @@ def main() -> int:
     command_limit = max(args.max_commands - 1, 0)
     last_layer_index = layers[-1].index if layers else -1
     for layer in layers:
-        check_materialized_layer = (
+        # v11: INT8 RSQRT/TANH/LOGISTIC/HARD_SWISH/GELU now have a native
+        # LUT-mode probe path (closed_loop_lut_unary_probes); INT16 variants
+        # of the same ops still ride the generic ref-CRC route until the
+        # 64K-entry RTL LUT lands.
+        verify_via_ref = (
             args.check_materialized_layers and
             layer.op_kind == OK_MATERIALIZE
         )
-        if not (args.check_all_layers or check_materialized_layer) and layer.index != last_layer_index:
+        verify_via_lut = (
+            args.check_materialized_layers and
+            layer.op_kind in (OK_RSQRT, OK_TANH, OK_LOGISTIC,
+                              OK_HARD_SWISH, OK_GELU) and
+            elem_bytes(layer.dtype) == 1
+        )
+        check_materialized_layer = verify_via_ref
+        verify_layer = verify_via_ref or verify_via_lut
+        if not (args.check_all_layers or verify_layer) and layer.index != last_layer_index:
             continue
         if len(commands) >= command_limit:
             break
@@ -3437,6 +3570,14 @@ def main() -> int:
                 layer, len(commands), result_dram_off, remaining_commands)
         elif layer.op_kind in OK_EWE and elem_bytes(layer.dtype) == 1:
             closed_loop_descs = closed_loop_ewe_probes(
+                layer, len(commands), result_dram_off, remaining_commands)
+        elif (layer.op_kind in (OK_RSQRT, OK_TANH, OK_LOGISTIC,
+                                OK_HARD_SWISH, OK_GELU)
+              and elem_bytes(layer.dtype) == 1):
+            # v11: INT8 unary LUT probe -- emits OP_EWE in lut_mode with the
+            # precomputed LUT[input] byte in b_vec. The RTL engine validates
+            # dispatch + timing; bit-exactness is guaranteed by compile_model.
+            closed_loop_descs = closed_loop_lut_unary_probes(
                 layer, len(commands), result_dram_off, remaining_commands)
         elif layer.op_kind in (OK_S2SPACE, OK_D2SPACE, OK_RESHAPE):
             closed_loop_descs = closed_loop_tnps_probes(

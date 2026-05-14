@@ -318,9 +318,11 @@ Descriptor make_ewe_unary(const LayerMeta& L,
     e.in_a_addr = in_addr;  e.in_b_addr = 0;  e.out_addr = out_addr;
     e.n = 1;  e.h = L.in_h;  e.w = L.in_w;  e.c = L.in_c;
     e.lut_addr = params_addr;
-    e.subtype = (L.op_kind == OK_GELU) ? ES_GELU
+    e.subtype = (L.op_kind == OK_GELU)     ? ES_GELU
               : (L.op_kind == OK_LOGISTIC) ? ES_LOGISTIC
-              : ES_HARD_SWISH;
+              : (L.op_kind == OK_RSQRT)    ? ES_RSQRT
+              : (L.op_kind == OK_TANH)     ? ES_TANH
+              :                              ES_HARD_SWISH;
     return d;
 }
 
@@ -1661,7 +1663,8 @@ int sc_main(int argc, char* argv[]) {
             const bool transient_compute =
                 (is_conv_class_meta(L) ||
                  L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU ||
-                 L.op_kind == OK_LOGISTIC) &&
+                 L.op_kind == OK_LOGISTIC ||
+                 L.op_kind == OK_RSQRT || L.op_kind == OK_TANH) &&
                 G.consumer_count > 0 &&
                 G.last_consumer_layer > int32_t(k);
             if (transient_compute)
@@ -1680,7 +1683,9 @@ int sc_main(int argc, char* argv[]) {
                 is_conv_class_meta(P) ||
                 P.op_kind == OK_HARD_SWISH ||
                 P.op_kind == OK_GELU ||
-                P.op_kind == OK_LOGISTIC;
+                P.op_kind == OK_LOGISTIC ||
+                P.op_kind == OK_RSQRT ||
+                P.op_kind == OK_TANH;
             const bool metadata_consumer =
                 (S.op_kind == OK_RESHAPE || S.op_kind == OK_MATERIALIZE) &&
                 producer_no_store[k + 1] &&
@@ -1695,7 +1700,8 @@ int sc_main(int argc, char* argv[]) {
         const auto& S = metas[k + 1];
         if ((is_conv_class_meta(P) || is_binary_meta(P) ||
              P.op_kind == OK_HARD_SWISH || P.op_kind == OK_GELU ||
-             P.op_kind == OK_LOGISTIC) &&
+             P.op_kind == OK_LOGISTIC ||
+             P.op_kind == OK_RSQRT || P.op_kind == OK_TANH) &&
             graph_metas[k].consumer_count > 1) {
             // Fanout producers must keep their DRAM checkpoint. One branch
             // may be fused through L1, while another later consumer reloads
@@ -1709,6 +1715,7 @@ int sc_main(int argc, char* argv[]) {
               S.op_kind == OK_ADD || S.op_kind == OK_MUL || S.op_kind == OK_SUB ||
               S.op_kind == OK_HARD_SWISH || S.op_kind == OK_GELU ||
               S.op_kind == OK_LOGISTIC ||
+              S.op_kind == OK_RSQRT || S.op_kind == OK_TANH ||
               S.op_kind == OK_AVG_POOL || S.op_kind == OK_MAX_POOL ||
               S.op_kind == OK_MATERIALIZE || S.op_kind == OK_RESHAPE ||
               S.op_kind == OK_D2SPACE));
@@ -3500,7 +3507,8 @@ int sc_main(int argc, char* argv[]) {
             };
             auto is_unary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU ||
-                       L.op_kind == OK_LOGISTIC;
+                       L.op_kind == OK_LOGISTIC ||
+                       L.op_kind == OK_RSQRT || L.op_kind == OK_TANH;
             };
             auto is_pool = [](const LayerMeta& L) {
                 return L.op_kind == OK_AVG_POOL || L.op_kind == OK_MAX_POOL;
@@ -4708,7 +4716,8 @@ int sc_main(int argc, char* argv[]) {
             };
             auto is_unary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU ||
-                       L.op_kind == OK_LOGISTIC;
+                       L.op_kind == OK_LOGISTIC ||
+                       L.op_kind == OK_RSQRT || L.op_kind == OK_TANH;
             };
             if (!graph_metas || !is_binary_ewe(metas[i])) return false;
             const auto& first = metas[i];
@@ -5471,7 +5480,8 @@ int sc_main(int argc, char* argv[]) {
             };
             auto is_unary_ewe = [](const LayerMeta& L) {
                 return L.op_kind == OK_HARD_SWISH || L.op_kind == OK_GELU ||
-                       L.op_kind == OK_LOGISTIC;
+                       L.op_kind == OK_LOGISTIC ||
+                       L.op_kind == OK_RSQRT || L.op_kind == OK_TANH;
             };
             const bool binary_tail = is_binary_ewe(C0);
             const bool unary_tail = is_unary_ewe(C0);
@@ -9409,12 +9419,16 @@ int sc_main(int argc, char* argv[]) {
             }
             break;
         }
-        case OK_HARD_SWISH: case OK_GELU: case OK_LOGISTIC: {
+        case OK_HARD_SWISH: case OK_GELU: case OK_LOGISTIC:
+        case OK_RSQRT:      case OK_TANH: {
             // v8.30: unary element-wise activation (mobilenet_v3 has 21
             // HARD_SWISH; transformers use GELU). wgt_b is an 8-byte params
             // blob: [f32 act_min | f32 act_max] sentinels (typically ±3.4e38
             // since these activations have no fused clamp range — kept for
             // layout parity with run_add_fp).
+            // v11: INT8 RSQRT/TANH/LOGISTIC use the same dispatch but wgt_b is
+            // a 256-byte LUT instead of clamp params; EWE engine selects the
+            // path by inspecting subtype + dtype.
             const bool fuse_eligible =
                 fuse_prev_is_conv_class && fuse_prev_single_tile
                 && previous_layer_is_graph_producer(i)
@@ -9560,7 +9574,10 @@ int sc_main(int argc, char* argv[]) {
                 if (tile_elems < 1) {
                     std::cerr << "layer " << i << ": "
                               << (L.op_kind == OK_GELU ? "gelu"
-                                  : (L.op_kind == OK_LOGISTIC ? "logistic" : "hard_swish"))
+                                  : L.op_kind == OK_LOGISTIC ? "logistic"
+                                  : L.op_kind == OK_RSQRT    ? "rsqrt"
+                                  : L.op_kind == OK_TANH     ? "tanh"
+                                  : "hard_swish")
                               << " no room for one double-buffered tiled element\n";
                     return 4;
                 }
@@ -9576,7 +9593,10 @@ int sc_main(int argc, char* argv[]) {
                 if (slot_top(uint64_t(tile_elems) * elem_size) + safety > L1_BUDGET) {
                     std::cerr << "layer " << i << ": "
                               << (L.op_kind == OK_GELU ? "gelu"
-                                  : (L.op_kind == OK_LOGISTIC ? "logistic" : "hard_swish"))
+                                  : L.op_kind == OK_LOGISTIC ? "logistic"
+                                  : L.op_kind == OK_RSQRT    ? "rsqrt"
+                                  : L.op_kind == OK_TANH     ? "tanh"
+                                  : "hard_swish")
                               << " no room for double-buffered tiled IO\n";
                     return 4;
                 }

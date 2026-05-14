@@ -174,6 +174,8 @@ module Testbench_host_program;
     wire [15:0] conv_sample_ic;
     wire signed [31:0] requant_input_value;
     wire requant_read_input_from_l1;
+    wire requant_use_chain_input;
+    wire requant_fp_mode;
     wire requant_sramcrc_mode;
     wire [31:0] requant_sramcrc_expected_crc;
     wire [31:0] requant_sramcrc_expected_count;
@@ -194,6 +196,8 @@ module Testbench_host_program;
     wire [1:0] ewe_op_mode;
     wire ewe_fp_mode;
     wire ewe_int16_mode;
+    wire ewe_lut_mode;
+    wire [31:0] ewe_lut_addr;
     wire ewe_final_q_mode;
     wire ewe_read_a_from_l1;
     wire ewe_sramcrc_mode;
@@ -417,6 +421,8 @@ module Testbench_host_program;
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
         .requant_read_input_from_l1(requant_read_input_from_l1),
+        .requant_use_chain_input(requant_use_chain_input),
+        .requant_fp_mode(requant_fp_mode),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
@@ -437,6 +443,8 @@ module Testbench_host_program;
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
+        .ewe_lut_mode(ewe_lut_mode),
+        .ewe_lut_addr(ewe_lut_addr),
         .ewe_final_q_mode(ewe_final_q_mode),
         .ewe_read_a_from_l1(ewe_read_a_from_l1),
         .ewe_sramcrc_mode(ewe_sramcrc_mode),
@@ -636,6 +644,8 @@ module Testbench_host_program;
         .conv_sample_ic(conv_sample_ic),
         .requant_input_value(requant_input_value),
         .requant_read_input_from_l1(requant_read_input_from_l1),
+        .requant_use_chain_input(requant_use_chain_input),
+        .requant_fp_mode(requant_fp_mode),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
         .requant_out_byte_offset(requant_out_byte_offset),
@@ -654,6 +664,8 @@ module Testbench_host_program;
         .ewe_op_mode(ewe_op_mode),
         .ewe_fp_mode(ewe_fp_mode),
         .ewe_int16_mode(ewe_int16_mode),
+        .ewe_lut_mode(ewe_lut_mode),
+        .ewe_lut_addr(ewe_lut_addr),
         .ewe_final_q_mode(ewe_final_q_mode),
         .ewe_read_a_from_l1(ewe_read_a_from_l1),
         .ewe_sramcrc_mode(ewe_sramcrc_mode),

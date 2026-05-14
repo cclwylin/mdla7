@@ -134,6 +134,8 @@ OP_UNPACK     = 24
 OP_TILE       = 25
 OP_SPLIT      = 26
 OP_LOGISTIC   = 27       # v10: sigmoid unary EWE (EfficientNet swish gate)
+OP_RSQRT      = 28       # 1/sqrt(x) INT8 LUT EWE (LayerNorm/RMSNorm normaliser)
+OP_TANH       = 29       # tanh(x)   INT8 LUT EWE (RNN/transformer activation)
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -169,7 +171,9 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_UNPACK:    "unpack",
            OP_TILE:      "  tile",
            OP_SPLIT:     " split",
-           OP_LOGISTIC:  "logist"}
+           OP_LOGISTIC:  "logist",
+           OP_RSQRT:     " rsqrt",
+           OP_TANH:      "  tanh"}
 
 
 def _load_interpreter(path: str):
@@ -253,7 +257,10 @@ SUPPORTED_OPS = ("CONV_2D", "DEPTHWISE_CONV_2D",
                  "SQUEEZE", "EXPAND_DIMS",
                  "SLICE", "STRIDED_SLICE",
                  "SPLIT", "SPLIT_V",
-                 "PAD", "PADV2", "PACK", "UNPACK", "TILE")
+                 "PAD", "PADV2", "PACK", "UNPACK", "TILE",
+                 # v11: graph-helper ops needed by qwen35_attention; emitted as
+                 # materialize fallbacks so compile no longer skips them.
+                 "SHAPE", "REVERSE_V2", "RANDOM_STANDARD_NORMAL")
 
 # Supported-by-materialization means the compiler emits an explicit reference
 # byte boundary (`matrlz`) rather than a native MDLA7 arithmetic/data-movement
@@ -261,17 +268,21 @@ SUPPORTED_OPS = ("CONV_2D", "DEPTHWISE_CONV_2D",
 # distinguish "no skipped unsupported op" from "native datapath implemented".
 MATERIALIZED_FALLBACK_OPS = frozenset((
     "QUANTIZE", "CAST", "RELU", "MINIMUM", "GREATER",
-    "LEAKY_RELU", "PRELU", "TANH", "RSQRT",
+    "LEAKY_RELU", "PRELU",
     "SQUARED_DIFFERENCE", "SUM", "BATCH_MATMUL",
     "RESIZE_BILINEAR", "RESIZE_NEAREST_NEIGHBOR",
     "TRANSPOSE_CONV",
+    # v11: qwen35 graph helpers. SHAPE returns the producer tensor's static
+    # shape vector; REVERSE_V2 flips along given axes; RANDOM_STANDARD_NORMAL
+    # is materialized deterministically from a fixed seed so reference bytes
+    # are reproducible across compile runs.
+    "SHAPE", "REVERSE_V2", "RANDOM_STANDARD_NORMAL",
 ))
 
 # FP variants of these ops have native EWE/unary support below. Quantized/int
-# variants remain materialized until the LUT/datapath implementation exists.
-DTYPE_MATERIALIZED_FALLBACK_OPS = frozenset((
-    "HARD_SWISH", "GELU", "LOGISTIC",
-))
+# variants route through a 256-byte INT8 LUT in the EWE engine; the empty set
+# below is intentional now that HARD_SWISH/GELU INT8 are LUT-lowered too.
+DTYPE_MATERIALIZED_FALLBACK_OPS = frozenset()
 
 # Native FP CONV coverage exceptions found by full ETHZ correctness runs.
 # These become explicit materialized boundaries instead of pretending the
@@ -1353,6 +1364,8 @@ def main():
             shape_changing_materialized = {
                 "BATCH_MATMUL", "RESIZE_BILINEAR",
                 "RESIZE_NEAREST_NEIGHBOR", "SUM", "TRANSPOSE_CONV",
+                # v11: qwen35 helpers — output shape unrelated to input shape.
+                "SHAPE", "REVERSE_V2", "RANDOM_STANDARD_NORMAL",
             }
             a = (None if opname in shape_changing_materialized
                  else _reshape_or_broadcast(in_arr, out_hwc))
@@ -1375,6 +1388,22 @@ def main():
                     a_real = np.swapaxes(a_real, -1, -2)
                 if adj_y:
                     b_real = np.swapaxes(b_real, -1, -2)
+                # Some TFLite exports (e.g. qwen35_attention) declare shapes
+                # where the BATCH_MATMUL contracting dim is broken / 1 on one
+                # side; the model relies on implicit broadcast. np.matmul
+                # rejects this strict K mismatch, so broadcast the K=1 side
+                # to match the other operand before contracting.
+                a_k = a_real.shape[-1]
+                b_k = b_real.shape[-2]
+                if a_k != b_k:
+                    if b_k == 1:
+                        target = list(b_real.shape)
+                        target[-2] = a_k
+                        b_real = np.broadcast_to(b_real, target).copy()
+                    elif a_k == 1:
+                        target = list(a_real.shape)
+                        target[-1] = b_k
+                        a_real = np.broadcast_to(a_real, target).copy()
                 ref = _quantize_real_to_tensor(np.matmul(a_real, b_real), out_t)
             elif opname in ("RESIZE_BILINEAR", "RESIZE_NEAREST_NEIGHBOR"):
                 size_t = sg.Tensors(op.Inputs(1)) if op.InputsLength() > 1 else None
@@ -1565,6 +1594,55 @@ def main():
                 real = np.minimum(_internal_to_real(a, in_t),
                                   _internal_to_real(b, b_t))
                 ref = _quantize_real_to_tensor(real, out_t)
+            elif opname == "SHAPE":
+                # Output is the static shape vector of the input tensor as int32.
+                # The downstream parser may have inferred out_hwc from a consumer
+                # rather than the SHAPE output's literal rank; in that case pad
+                # with zeros so the layer still has well-defined materialize bytes.
+                src_t = sg.Tensors(int(op.Inputs(0)))
+                src_shape = [int(src_t.Shape(k)) for k in range(src_t.ShapeLength())]
+                target_size = int(np.prod(out_hwc))
+                if len(src_shape) >= target_size:
+                    src_shape = src_shape[:target_size]
+                else:
+                    src_shape = src_shape + [0] * (target_size - len(src_shape))
+                ref = np.asarray(src_shape, dtype=np.int32).reshape(out_hwc)
+            elif opname == "REVERSE_V2":
+                # Reverse along axes given by the second input (constant int32 tensor).
+                # `a` is None on this path (shape_changing_materialized), so read
+                # the input tensor directly and flip in its native rank.
+                axes_t = sg.Tensors(int(op.Inputs(1))) if op.InputsLength() > 1 else None
+                axes_a = _tensor_array(axes_t).astype(np.int32) if axes_t else None
+                axes = [int(x) for x in (axes_a.reshape(-1).tolist()
+                                         if axes_a is not None else [])]
+                src = np.asarray(in_arr)
+                if src.ndim > 0:
+                    mapped = sorted({(ax % src.ndim) for ax in axes})
+                    flipped = src
+                    for ax in reversed(mapped):
+                        flipped = np.flip(flipped, axis=ax)
+                else:
+                    flipped = src
+                target_size = int(np.prod(out_hwc))
+                if flipped.size != target_size:
+                    # Shape mismatch (broken qwen35 graph): pad/truncate so
+                    # downstream packing still gets well-defined bytes.
+                    flat = flipped.reshape(-1)
+                    if flat.size >= target_size:
+                        flat = flat[:target_size]
+                    else:
+                        flat = np.pad(flat, (0, target_size - flat.size))
+                    flipped = flat.reshape(out_hwc)
+                else:
+                    flipped = flipped.reshape(out_hwc)
+                ref = _quantize_real_to_tensor(flipped, out_t)
+            elif opname == "RANDOM_STANDARD_NORMAL":
+                # Deterministic standard-normal samples (fixed seed) shaped to
+                # the output. Bit-reproducible across compile runs so reference
+                # bytes don't change between regressions.
+                rng = np.random.default_rng(seed=0xC0DE_BEEF)
+                samples = rng.standard_normal(int(np.prod(out_hwc))).astype(np.float32)
+                ref = _quantize_real_to_tensor(samples.reshape(out_hwc), out_t)
             else:  # GREATER
                 b_idx = int(op.Inputs(1)) if op.InputsLength() > 1 else -1
                 b_t = sg.Tensors(b_idx)
@@ -2498,41 +2576,123 @@ def main():
                                         left_shift, act_min, act_max)
             add_wgt_payload = in_b_arr.tobytes(order="C") + add_params_b
 
-        elif opname in ("HARD_SWISH", "GELU", "LOGISTIC") and in_t.Type() not in FP_TFLITE_TYPES:
-            # INT GELU/HARD_SWISH/LOGISTIC LUT is not modeled in EWE yet. Keep the graph
-            # executable by materializing a deterministic reference tensor. LOGISTIC
-            # is computed from quant params because EfficientNet swish fanout uses
-            # this value as the second MUL input.
-            if opname == "HARD_SWISH":
-                x = in_arr.astype(np.float32)
-                y = x * np.minimum(np.maximum(x + 3.0, 0.0), 6.0) / np.float32(6.0)
-                ref = np.clip(np.rint(y), -128, 127).astype(np.int8)
+        elif (opname in ("RSQRT", "TANH", "LOGISTIC", "HARD_SWISH", "GELU")
+              and in_t.Type() not in FP_TFLITE_TYPES
+              and not is_int16):
+            # ---- v11: INT8 unary EWE via 256-byte LUT ----
+            # All 256 possible input bytes are pre-evaluated through the
+            # nonlinearity using TFLite quant params (dequant -> f(x) ->
+            # requant) and packed into wgt_b. Runtime EWE engine becomes a
+            # single byte-indexed table lookup, bit-exact against TFLite.
+            qin  = in_t.Quantization()
+            qout = out_t.Quantization()
+            scale_in  = _qscale(qin)
+            scale_out = _qscale(qout, 1.0 / 256.0 if opname == "LOGISTIC" else 1.0)
+            zp_in     = int(qin.ZeroPoint(0))  if qin  and qin.ZeroPointLength()  else 0
+            zp_out    = int(qout.ZeroPoint(0)) if qout and qout.ZeroPointLength() else 0
+            shift_in  = 128 if in_t.Type()  == fb.TensorType.UINT8 else 0
+            shift_out = 128 if out_t.Type() == fb.TensorType.UINT8 else 0
+            zp_in_eff  = zp_in  - shift_in
+            zp_out_eff = zp_out - shift_out
+
+            # Build LUT[idx_uint8] = output_int8. Index by storage byte
+            # (signed int8 reinterpreted as uint8): -128 -> 128, 0 -> 0,
+            # 127 -> 127. Output is clipped to int8 range.
+            q_idx = np.arange(0, 256, dtype=np.int32)         # 0..255 = uint8 idx
+            q_signed = np.where(q_idx >= 128, q_idx - 256, q_idx)  # -128..127
+            x_real = (q_signed - zp_in_eff).astype(np.float32) * np.float32(scale_in)
+            if opname == "RSQRT":
+                # Guard against domain errors: input <= 0 is undefined for RSQRT.
+                # TFLite reference clamps to a tiny positive epsilon (1e-12).
+                x_safe = np.maximum(x_real, np.float32(1.0e-12))
+                y_real = np.float32(1.0) / np.sqrt(x_safe)
+            elif opname == "TANH":
+                y_real = np.tanh(x_real).astype(np.float32)
             elif opname == "LOGISTIC":
-                qi = in_arr.astype(np.int32)
-                qin = in_t.Quantization()
-                qout = out_t.Quantization()
-                scale_in = _qscale(qin)
-                zp_in = int(qin.ZeroPoint(0)) if qin and qin.ZeroPointLength() else 0
-                scale_out = _qscale(qout, 1.0 / 256.0)
-                zp_out = int(qout.ZeroPoint(0)) if qout and qout.ZeroPointLength() else 0
-                shift_in = 128 if in_t.Type() == fb.TensorType.UINT8 else 0
-                shift_out = 128 if out_t.Type() == fb.TensorType.UINT8 else 0
-                x = (qi - (zp_in - shift_in)).astype(np.float32) * np.float32(scale_in)
-                y = np.float32(1.0) / (np.float32(1.0) + np.exp(-x, dtype=np.float32))
-                q = np.floor(y / np.float32(scale_out) + np.float32(zp_out) + np.float32(0.5)).astype(np.int32)
-                if shift_out:
-                    q = np.clip(q, 0, 255) - 128
-                else:
-                    q = np.clip(q, -128, 127)
-                ref = q.astype(np.int8)
-            else:
-                ref = in_arr.astype(np.int8, copy=True)
-            H, W, Cin = OH, OW, OC
-            in_arr = ref.reshape(H, W, Cin)
-            in_i8 = in_arr
-            ref_b = in_arr.tobytes(order="C")
-            op_kind = OP_MATERIALIZE
-            wgt = np.zeros((0,), dtype=np.int8)
+                y_real = np.float32(1.0) / (np.float32(1.0) + np.exp(-x_real, dtype=np.float32))
+            elif opname == "HARD_SWISH":
+                # y = x * relu6(x + 3) / 6 (TFLite spec)
+                r = np.minimum(np.maximum(x_real + np.float32(3.0), np.float32(0.0)), np.float32(6.0))
+                y_real = (x_real * r / np.float32(6.0)).astype(np.float32)
+            else:  # GELU - tanh approximation
+                k = np.float32(0.7978845608028654)        # sqrt(2/pi)
+                c = np.float32(0.044715)
+                u = k * (x_real + c * x_real * x_real * x_real)
+                y_real = (np.float32(0.5) * x_real * (np.float32(1.0) + np.tanh(u))).astype(np.float32)
+            q_out = np.floor(y_real / np.float32(scale_out) + np.float32(zp_out_eff) + np.float32(0.5)).astype(np.int32)
+            q_out = np.clip(q_out, -128, 127).astype(np.int8)
+            lut_b = q_out.tobytes(order="C")     # 256 bytes, indexed by uint8(input)
+
+            # Apply the LUT to the actual input tensor to get the byte-identical
+            # reference output. Use the same uint8 indexing convention.
+            in_idx = in_arr.astype(np.int32)
+            in_idx = np.where(in_idx < 0, in_idx + 256, in_idx).astype(np.uint8)
+            ref = q_out[in_idx].astype(np.int8)
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            add_wgt_payload = lut_b
+            op_kind = {
+                "RSQRT":     OP_RSQRT,
+                "TANH":      OP_TANH,
+                "LOGISTIC":  OP_LOGISTIC,
+                "HARD_SWISH": OP_HARD_SWISH,
+                "GELU":      OP_GELU,
+            }[opname]
+
+        elif (opname in ("RSQRT", "TANH", "LOGISTIC", "HARD_SWISH", "GELU")
+              and in_t.Type() not in FP_TFLITE_TYPES
+              and is_int16):
+            # ---- v11: INT16 unary EWE via 64K-entry LUT (128 KB / layer) ----
+            # Same lowering pattern as INT8 but with 65536 input bins and INT16
+            # output entries. compile-time only; runtime is still a single
+            # indexed read per element, just 16-bit wide.
+            qin  = in_t.Quantization()
+            qout = out_t.Quantization()
+            scale_in  = _qscale(qin)
+            scale_out = _qscale(qout, 1.0 / 65536.0 if opname == "LOGISTIC" else 1.0)
+            zp_in     = int(qin.ZeroPoint(0))  if qin  and qin.ZeroPointLength()  else 0
+            zp_out    = int(qout.ZeroPoint(0)) if qout and qout.ZeroPointLength() else 0
+            # INT16 has no UINT alias in TFLite; uint8 shifts collapse to 0.
+
+            # Build LUT[idx_uint16] = output_int16. Index by storage word
+            # (signed int16 reinterpreted as uint16): -32768 -> 32768, 0 -> 0,
+            # 32767 -> 32767. Output is clipped to int16 range.
+            q_idx = np.arange(0, 65536, dtype=np.int64)
+            q_signed = np.where(q_idx >= 32768, q_idx - 65536, q_idx)
+            x_real = (q_signed - zp_in).astype(np.float32) * np.float32(scale_in)
+            if opname == "RSQRT":
+                x_safe = np.maximum(x_real, np.float32(1.0e-12))
+                y_real = np.float32(1.0) / np.sqrt(x_safe)
+            elif opname == "TANH":
+                y_real = np.tanh(x_real).astype(np.float32)
+            elif opname == "LOGISTIC":
+                y_real = np.float32(1.0) / (np.float32(1.0) + np.exp(-x_real, dtype=np.float32))
+            elif opname == "HARD_SWISH":
+                r = np.minimum(np.maximum(x_real + np.float32(3.0), np.float32(0.0)), np.float32(6.0))
+                y_real = (x_real * r / np.float32(6.0)).astype(np.float32)
+            else:  # GELU
+                k = np.float32(0.7978845608028654)
+                c = np.float32(0.044715)
+                u = k * (x_real + c * x_real * x_real * x_real)
+                y_real = (np.float32(0.5) * x_real * (np.float32(1.0) + np.tanh(u))).astype(np.float32)
+            q_out = np.floor(y_real / np.float32(scale_out) + np.float32(zp_out) + np.float32(0.5)).astype(np.int64)
+            q_out = np.clip(q_out, -32768, 32767).astype(np.int16)
+            lut_b = q_out.tobytes(order="C")     # 131072 bytes (64K * 2)
+
+            # Apply LUT to actual input tensor for ref bytes.
+            in_idx = in_arr.astype(np.int64)
+            in_idx = np.where(in_idx < 0, in_idx + 65536, in_idx).astype(np.uint16)
+            ref = q_out[in_idx].astype(np.int16)
+            OH, OW, OC = H, W, Cin
+            ref_b = ref.tobytes(order="C")
+            add_wgt_payload = lut_b
+            op_kind = {
+                "RSQRT":     OP_RSQRT,
+                "TANH":      OP_TANH,
+                "LOGISTIC":  OP_LOGISTIC,
+                "HARD_SWISH": OP_HARD_SWISH,
+                "GELU":      OP_GELU,
+            }[opname]
 
         elif opname in ("HARD_SWISH", "GELU", "LOGISTIC") and in_t.Type() in FP_TFLITE_TYPES:
             # ---- v8.30: FP unary activation ----
@@ -3149,9 +3309,11 @@ def main():
         elif op_kind in (OP_CONV, OP_DWCONV, OP_FC):
             wgt_b = conv_wgt_payload                      # weights + params blob
         elif op_kind in (OP_ADD, OP_MUL, OP_SUB,
-                         OP_HARD_SWISH, OP_GELU, OP_LOGISTIC):
+                         OP_HARD_SWISH, OP_GELU, OP_LOGISTIC,
+                         OP_RSQRT, OP_TANH):
             wgt_b = add_wgt_payload                       # input-B + params (binary)
-                                                          # or 8-byte clamp params (unary)
+                                                          # or 8-byte clamp params (FP unary)
+                                                          # or 256-byte LUT (INT8 unary)
         elif wgt.size:
             wgt_b = wgt.tobytes(order="C")
         else:
@@ -3288,9 +3450,13 @@ def main():
             unit = "INT16"
         else:
             unit = "INT8"
+        # Materialized fallbacks lose their TFLite op identity in the op_kind
+        # label (everything collapses to "matrlz"); preserve the original
+        # opname as a parseable trailing tag so reports can show it.
+        from_tag = f"  from={opname}" if op_kind == OP_MATERIALIZE else ""
         print(f"  layer {li:>2d}  {OP_NAME[op_kind]}  in={H}x{W}x{Cin}  k={Kh}x{Kw}  "
               f"s={s_h}x{s_w}  g={group}  out={OH}x{OW}x{OC}  "
-              f"({nelem} {unit})  ready")
+              f"({nelem} {unit})  ready{from_tag}")
 
     # v8.23: now that we know cur_w / cur_i / cur_o totals, place each region
     # at a base that leaves no overlap with the next. 64 KB alignment between

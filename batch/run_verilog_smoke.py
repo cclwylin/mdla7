@@ -371,6 +371,9 @@ def main(argv: list[str]) -> int:
             ]
             if use_dpi:
                 cmd.append("+define+MDLA7_DPI_DATAPATH")
+            # Optional debug instrumentation, controlled by env var
+            if os.environ.get("MDLA7_DEBUG_EWE_LUT"):
+                cmd.append("+define+MDLA7_DEBUG_EWE_LUT")
             if cxx_include is not None:
                 cmd.extend(["-CFLAGS", f"-isystem {cxx_include}"])
             cmd.extend([

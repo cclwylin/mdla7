@@ -355,7 +355,13 @@ module vf_conv_sample_engine #(
     output reg [31:0]             conv_shadow_crc,
     output reg [31:0]             conv_shadow_byte_count,
     output reg [3:0]              conv_psum_valid_mask,
-    output reg [127:0]            conv_psum_acc_values
+    output reg [127:0]            conv_psum_acc_values,
+    // v12 Phase 1: CONV->REQUANT chain. One INT32 psum per completed sample
+    // (acc_out for INT path, FP32-bit-cast for FP path). Pulse one cycle when
+    // entering ST_DONE. Receiver back-pressures via chain_psum_ready.
+    output reg                    chain_psum_valid,
+    output reg signed [31:0]      chain_psum_data,
+    input                         chain_psum_ready
 );
 `ifdef MDLA7_DPI_DATAPATH
     import "DPI-C" function void mdla7_dpi_conv_fp16(
@@ -1004,6 +1010,8 @@ module vf_conv_sample_engine #(
             active_wgt_vec <= {MAX_ELEMS*8{1'b0}};
             act_req_sent <= 1'b0;
             wgt_req_sent <= 1'b0;
+            chain_psum_valid <= 1'b0;
+            chain_psum_data <= 32'sd0;
             conv_psum_valid_mask <= 4'd0;
             conv_psum_acc_values <= 128'd0;
             conv_shadow_valid_mask <= 4'd0;
@@ -1027,6 +1035,7 @@ module vf_conv_sample_engine #(
                     compute_remaining <= 32'd0;
                     act_req_sent <= 1'b0;
                     wgt_req_sent <= 1'b0;
+                    chain_psum_valid <= 1'b0;
                     if (start_valid && start_ready) begin
                         active_act_vec <= act_vec;
                         active_wgt_vec <= wgt_vec;
@@ -1158,6 +1167,18 @@ module vf_conv_sample_engine #(
                             conv_shadow_crc <= writeback_crc_value;
                             conv_shadow_byte_count <= writeback_byte_count_value;
                         end
+                        // v12 Phase 1: latch one psum onto the CONV->REQUANT
+                        // chain at sample completion. INT path: raw acc_out
+                        // (int32). INT16 path: int16_acc_out widened. FP path:
+                        // bit-cast FP32 portion of fp_sum_bits. Standard
+                        // valid/ready: hold valid+data until consumer asserts
+                        // chain_psum_ready, then clear in ST_DONE. When the
+                        // chain is unconnected the receiver ties ready=1 so
+                        // the pulse drains harmlessly.
+                        chain_psum_data <= fp_mode    ? $signed(fp_sum_bits[31:0])
+                                         : int16_mode ? int16_acc_out
+                                         :              acc_out;
+                        chain_psum_valid <= 1'b1;
                         state <= ST_DONE;
                     end
                 end
@@ -1219,12 +1240,16 @@ module vf_conv_sample_engine #(
                     end
                 end
                 ST_DONE: begin
+                    // Drain the chain handshake while we wait for done_ready.
+                    if (chain_psum_valid && chain_psum_ready)
+                        chain_psum_valid <= 1'b0;
                     if (done_ready)
                         state <= ST_IDLE;
                 end
                 default: begin
                     state <= ST_IDLE;
                     compute_remaining <= 32'd0;
+                    chain_psum_valid <= 1'b0;
                 end
             endcase
         end

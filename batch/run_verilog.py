@@ -679,18 +679,25 @@ def write_verilog_report_html(path: Path, *, title: str, mode: str,
         "</tr>"
         for name, cycles in ((name, engine_cycles.get(name, 0)) for name in engine_order)
     )
+    # Map descriptor op_name to the engine lane label used in the timeline.
+    OP_NAME_TO_ENGINE = {
+        "CONV": "conv", "REQUANT": "requant", "EWE": "ewe",
+        "POOL": "pool", "TNPS": "tnps",
+        "UDMA": "udma", "L1CRC": "cmd",
+    }
     layer_rows = []
     cum = 0
     for layer, stats in sorted(layer_stats.items()):
         cyc = int(stats["cycles"])
         cum += cyc
-        ops = ",".join(sorted(stats["ops"]))  # type: ignore[arg-type]
+        ops_sorted = sorted(stats["ops"])  # type: ignore[arg-type]
+        ops = ",".join(ops_sorted)
+        engines = sorted({OP_NAME_TO_ENGINE.get(op, op.lower()) for op in ops_sorted})
+        engine_cell = ",".join(engines) if engines else "—"
         layer_rows.append(
             "<tr>"
             f"<td>{layer}</td><td>{html.escape(ops)}</td><td>{int(stats['commands'])}</td>"
-            "<td></td><td></td><td></td><td></td><td></td><td></td>"
-            "<td></td><td></td><td></td><td></td><td></td>"
-            f"<td>{int(stats['commands'])}</td>"
+            f"<td>{html.escape(engine_cell)}</td>"
             f"<td style='text-align:right'>{cyc:,}</td>"
             f"<td style='text-align:right'>{cum:,}</td>"
             "<td></td><td></td><td></td><td></td>"
@@ -698,6 +705,9 @@ def write_verilog_report_html(path: Path, *, title: str, mode: str,
             f"<td style='text-align:right'>{int(stats['dram_w']) / 1024:.1f}</td>"
             f"<td style='text-align:right'>{int(stats['sram_r']) / 1024:.1f}</td>"
             f"<td style='text-align:right'>{int(stats['sram_w']) / 1024:.1f}</td>"
+            "<td></td><td></td><td></td><td></td><td></td><td></td>"
+            "<td></td><td></td><td></td><td></td><td></td>"
+            f"<td>{int(stats['commands'])}</td>"
             f"<td style='text-align:right'>{int(stats['verify']) / 1024:.1f}</td>"
             "</tr>"
         )
@@ -789,13 +799,15 @@ a:hover {{ text-decoration:underline; }}
 
 <h2>Per-layer profile (sizes in KB)</h2>
 <table id="profile-tbl" class="sortable"><thead><tr>
-<th>id</th><th>flow</th><th>op</th><th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
-<th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
-<th>tiles<br>(HxOC)</th>
+<th>id</th><th>flow</th><th>op</th><th>engine</th>
 <th>cyc/layer</th><th>cyc/cum</th>
 <th>ideal<br>cyc/layer</th><th>ideal<br>cyc/cum</th>
 <th>conv<br>MAC util</th><th>conv<br>occupancy</th>
-<th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th><th>verify</th>
+<th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th>
+<th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
+<th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
+<th>tiles<br>(HxOC)</th>
+<th>verify</th>
 </tr></thead>
 <tbody>{''.join(layer_rows)}</tbody></table>
 

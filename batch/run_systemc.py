@@ -136,18 +136,30 @@ _COMPILE_SKIP_RE = re.compile(
     r'skipped\s*\((.*)\)\s*$'
 )
 
+_COMPILE_FROM_RE = re.compile(r'\s+from=(\S+)\s*$')
+
 def _parse_compile_log(log_lines: list[str]) -> list[dict]:
     """Extract the per-layer compile_model.py lines (canonical "ready" line +
     early-skip line) into structured records. Returns one entry per compile-
     stage layer, including layers the simulator never sees because compile
-    skipped them (e.g., FP ADD)."""
+    skipped them (e.g., FP ADD).
+
+    Materialized fallbacks carry a ` from=<TFLITE_OP>` trailing tag so the
+    original op name survives the collapse to op_kind="matrlz"."""
     rows: list[dict] = []
     for ln in log_lines:
         m = _COMPILE_FULL_RE.match(ln)
         if m:
+            status = m.group(16).strip()
+            tflite_op = ""
+            fm = _COMPILE_FROM_RE.search(status)
+            if fm:
+                tflite_op = fm.group(1)
+                status = _COMPILE_FROM_RE.sub("", status).strip()
             rows.append({
                 "id":     int(m.group(1)),
                 "op":     m.group(2),
+                "tflite_op": tflite_op,
                 "in":     (int(m.group(3)), int(m.group(4)), int(m.group(5))),
                 "k":      (int(m.group(6)), int(m.group(7))),
                 "s":      (int(m.group(8)), int(m.group(9))),
@@ -155,7 +167,7 @@ def _parse_compile_log(log_lines: list[str]) -> list[dict]:
                 "out":    (int(m.group(11)), int(m.group(12)), int(m.group(13))),
                 "nelem":  int(m.group(14)),
                 "dtype":  m.group(15),
-                "status": m.group(16).strip(),
+                "status": status,
             })
             continue
         m = _COMPILE_SKIP_RE.match(ln)
@@ -163,6 +175,7 @@ def _parse_compile_log(log_lines: list[str]) -> list[dict]:
             rows.append({
                 "id":     int(m.group(1)),
                 "op":     m.group(2),
+                "tflite_op": "",
                 "in":     (int(m.group(3)), int(m.group(4)), int(m.group(5))),
                 "k":      None, "s": None, "group": None, "out": None,
                 "nelem":  None, "dtype": "",
@@ -805,8 +818,28 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             return 64
         return 64
 
+    def _dtype_elem_bytes(dtype: str) -> int:
+        d = (dtype or "").upper()
+        if "INT16" in d or "FP16" in d or "BFP16" in d or "BF16" in d:
+            return 2
+        return 1   # INT8 / FP8 / unknown -> assume single byte per element
+
     def _ceil_div(a: int, b: int) -> int:
         return (a + b - 1) // b if b > 0 else 0
+
+    # TNPS architectural target: 8 lanes x 16B R + 8 lanes x 16B W through
+    # L1Manager (memory.md). 128 B/cycle is the L1<->L1 sustained throughput
+    # ceiling; setup overhead is small (a single descriptor wakes the engine).
+    TNPS_BYTES_PER_CYCLE = 128
+    TNPS_SETUP_CYC = 16
+
+    # Layer ops that go through TNPS-class data movement (matches the
+    # _OP_TO_ENGINE "tnps" partition plus folding-eligible variants).
+    TNPS_OPS = frozenset((
+        "reshape", "trnps", "d2spac", "s2spac", "concat",
+        "squeez", "expand", "slice", "sslice", "split",
+        "pad", "pack", "unpack", "tile",
+    ))
 
     def _ideal_layer_cycles(L: dict, compile_row: dict | None) -> int:
         op = str(L.get("op", "")).strip().lower()
@@ -830,10 +863,27 @@ def _write_html_report(model: Path, paths: dict[str, Path],
             return _conv_model_cycles(macs, dtype, tile_count)
         if op in ("avgpool", "maxpool"):
             return _ceil_div(out_elems * int(kh) * int(kw), _dtype_elem_lanes(dtype))
-        if op in ("add", "mul", "sub", "h_swsh", "gelu"):
+        if op in ("add", "mul", "sub", "h_swsh", "gelu",
+                  "logist", "rsqrt", "tanh"):
+            # INT8 RSQRT/TANH/LOGISTIC use a single-pass LUT lookup; same
+            # throughput model as binary EWE since the lookup retires one
+            # output byte per lane per cycle.
             return _ceil_div(out_elems, _dtype_elem_lanes(dtype))
         if op == "softmax":
             return 3 * _ceil_div(out_elems, _dtype_elem_lanes(dtype))
+        if op in TNPS_OPS or op == "matrlz":
+            # Pure data-movement floor: bytes / TNPS B-per-cyc + per-tile setup.
+            # Even if the runtime folded the layer (view passthrough or layout
+            # tail), this is what TNPS WOULD spend if it actually ran the copy.
+            # Materialized fallbacks issue an explicit TNPS self-copy of
+            # ref_size bytes (see runner OK_MATERIALIZE case), so they share
+            # the same throughput floor as the native TNPS-class ops.
+            ref_bytes = 0
+            if compile_row and compile_row.get("nelem"):
+                ref_bytes = int(compile_row["nelem"]) * _dtype_elem_bytes(dtype)
+            else:
+                ref_bytes = out_elems * _dtype_elem_bytes(dtype)
+            return _ceil_div(ref_bytes, TNPS_BYTES_PER_CYCLE) + TNPS_SETUP_CYC * tile_count
         return 0
 
     ideal_rows: list[tuple[int, int]] = []
@@ -843,6 +893,47 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         ideal = _ideal_layer_cycles(L, c)
         ideal_cum += ideal
         ideal_rows.append((ideal, ideal_cum))
+
+    # Materialized fallback layers carry their original TFLite op as a
+    # ` from=<OPNAME>` tag in the compile log; surface it inline beside the
+    # matrlz label so the per-layer profile shows e.g. matrlz(BATCH_MATMUL).
+    tflite_op_by_layer: dict[int, str] = {
+        int(c["id"]): str(c.get("tflite_op", "") or "").strip()
+        for c in ready_compile_rows
+        if c.get("tflite_op")
+    }
+
+    # Map layer op to the HW engine that runs it. Mirrors the
+    # assign_dense_engine() partition above; conv-class layers go through
+    # both CONV and REQUANT, so list both. TNPS group covers every layout-
+    # movement op the runtime routes through the TNPS engine codepath.
+    _OP_TO_ENGINE = {
+        "conv": "conv+requant", "dwconv": "conv+requant", "fc": "conv+requant",
+        "add": "ewe", "mul": "ewe", "sub": "ewe",
+        "h_swsh": "ewe", "relu": "ewe", "gelu": "ewe", "softmax": "ewe",
+        "logist": "ewe", "rsqrt": "ewe", "tanh": "ewe",
+        "avgpool": "pool", "maxpool": "pool", "mean": "pool",
+    }
+    for _tnps_op in TNPS_OPS:
+        _OP_TO_ENGINE[_tnps_op] = "tnps"
+
+    def _tnps_fold_tag(L: dict) -> str:
+        """Classify how the runtime scheduled a TNPS-class layer using the
+        per-layer counters in profile.json:
+            view   - no descriptor emitted (L1 view passthrough); zero traffic
+            folded - layout tail emitted but absorbed into the prior chain;
+                     SRAM/DRAM accounted but the wall window is ~0
+            copy   - real engine work, non-zero wall cycles"""
+        cyc    = int(L.get("cycles_layer", 0) or 0)
+        sram_r = int(L.get("sram_r", 0) or 0)
+        sram_w = int(L.get("sram_w", 0) or 0)
+        dram_r = int(L.get("dram_r", 0) or 0)
+        dram_w = int(L.get("dram_w", 0) or 0)
+        if cyc == 0 and sram_r == 0 and sram_w == 0 and dram_r == 0 and dram_w == 0:
+            return "view"
+        if cyc == 0 and (sram_r > 0 or sram_w > 0 or dram_w > 0):
+            return "folded"
+        return "copy"
 
     def _layer_row(L: dict) -> str:
         layer_idx = int(L.get("id", 0) or 0)
@@ -858,6 +949,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         )
         cycles_layer = int(L.get('cycles_layer', 0) or 0)
         op_norm = str(L.get("op", "")).strip().lower()
+        engine_name = _OP_TO_ENGINE.get(op_norm, "—")
         conv_task = conv_task_cycles[layer_idx] if 0 <= layer_idx < len(conv_task_cycles) else 0
         mac_util = (
             100.0 * ideal_layer / conv_task
@@ -871,15 +963,31 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         passed = L.get("pass", False)
         pass_cell = ('<td style="color:#0a7d23">PASS</td>' if passed
                      else '<td style="color:#b00020">FAIL</td>')
+        op_label = str(L.get('op', '')).strip()
+        if op_label == "matrlz":
+            tflite_op = tflite_op_by_layer.get(layer_idx, "")
+            label = f"matrlz({tflite_op})" if tflite_op else "matrlz"
+            op_cell_layer = (f"<td style='color:#b00020;font-weight:600'>"
+                             f"{html.escape(label)}</td>")
+        elif op_norm in TNPS_OPS:
+            tag = _tnps_fold_tag(L)
+            label = f"{op_label}({tag})"
+            # Colour by fold state: view = grey (free), folded = orange (hidden
+            # in chain), copy = default (real work charged to TNPS).
+            if tag == "view":
+                style = " style='color:#888'"
+            elif tag == "folded":
+                style = " style='color:#a06000'"
+            else:
+                style = ""
+            op_cell_layer = f"<td{style}>{html.escape(label)}</td>"
+        else:
+            op_cell_layer = f"<td>{html.escape(op_label)}</td>"
         return ("<tr>" +
             f"<td>{layer_idx}</td>" +
             f"<td>F{flow_idx}</td>" +
-            f"<td>{html.escape(str(L.get('op','')).strip())}</td>" +
-            f"<td>{ih}</td><td>{iw}</td><td>{ic}</td>" +
-            f"<td>{oh}</td><td>{ow}</td><td>{oc}</td>" +
-            f"<td>{kh}</td><td>{kw}</td><td>{sh}</td><td>{sw}</td>" +
-            f"<td>{L.get('group','')}</td>" +
-            f"<td>{th}×{toc}</td>" +
+            op_cell_layer +
+            f"<td>{html.escape(engine_name)}</td>" +
             f"<td style='text-align:right'>{cycles_layer:,}</td>" +
             f"<td style='text-align:right'>{int(L.get('cycles_cum',0)):,}</td>" +
             f"<td style='text-align:right'>{ideal_layer:,}</td>" +
@@ -892,6 +1000,11 @@ def _write_html_report(model: Path, paths: dict[str, Path],
              else f"<td style='text-align:right'>{_kb(L.get('dram_w',0))}</td>") +
             f"<td style='text-align:right'>{_kb(L.get('sram_r',0))}</td>" +
             f"<td style='text-align:right'>{_kb(L.get('sram_w',0))}</td>" +
+            f"<td>{ih}</td><td>{iw}</td><td>{ic}</td>" +
+            f"<td>{oh}</td><td>{ow}</td><td>{oc}</td>" +
+            f"<td>{kh}</td><td>{kw}</td><td>{sh}</td><td>{sw}</td>" +
+            f"<td>{L.get('group','')}</td>" +
+            f"<td>{th}×{toc}</td>" +
             pass_cell + "</tr>")
     layer_rows = "".join(_layer_row(L) for L in layers)
 
@@ -936,9 +1049,17 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         else:
             status_cell = (f"<td style='color:#a06000'>"
                            f"{html.escape(status)}</td>")
+        op_str = c['op'].strip()
+        tflite_op = (c.get("tflite_op", "") or "").strip()
+        if op_str == "matrlz":
+            label = f"matrlz({tflite_op})" if tflite_op else "matrlz"
+            op_cell = (f"<td style='color:#b00020;font-weight:600'>"
+                       f"{html.escape(label)}</td>")
+        else:
+            op_cell = f"<td>{html.escape(op_str)}</td>"
         return ("<tr>" +
                 f"<td>{c['id']}</td>" +
-                f"<td>{html.escape(c['op'])}</td>" +
+                op_cell +
                 shape_cells +
                 f"<td style='text-align:right'>{nelem}</td>" +
                 f"<td>{html.escape(dtype)}</td>" +
@@ -1857,13 +1978,15 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
 <input class="filter" data-target="profile-tbl" type="search" placeholder="filter rows… (substring match)" autocomplete="off"/>
 <span class="filter-info" data-info="profile-tbl"></span>
 <table id="profile-tbl" class="sortable"><thead><tr>
-<th>id</th><th>flow</th><th>op</th><th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
-<th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
-<th>tiles<br>(H×OC)</th>
+<th>id</th><th>flow</th><th>op</th><th>engine</th>
 <th>cyc/layer</th><th>cyc/cum</th>
 <th>ideal<br>cyc/layer</th><th>ideal<br>cyc/cum</th>
 <th>conv<br>MAC util</th><th>conv<br>occupancy</th>
-<th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th><th>verify</th>
+<th>DRAM r</th><th>DRAM w</th><th>SRAM r</th><th>SRAM w</th>
+<th>iH</th><th>iW</th><th>iC</th><th>oH</th><th>oW</th><th>oC</th>
+<th>kH</th><th>kW</th><th>sH</th><th>sW</th><th>group</th>
+<th>tiles<br>(H×OC)</th>
+<th>verify</th>
 </tr></thead>
 <tbody>{layer_rows}</tbody></table>
 

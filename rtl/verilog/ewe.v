@@ -18,6 +18,16 @@ module vf_ewe_sample_engine #(
     input      [1:0]              op_mode,
     input                         fp_mode,
     input                         int16_mode,
+    // v11: when high, this descriptor is a unary INT8 LUT lookup. b_vec
+    // carries the precomputed LUT[a_vec] bytes (one per active lane); the
+    // engine's role is to validate dispatch and timing -- the actual LUT
+    // memory + L1 load belong to a future full-vector engine block.
+    // v11: when high, this descriptor is a unary INT8 LUT lookup. The 256-byte
+    // LUT lives in L1 at lut_addr; the engine loads it on entry (16 beats x
+    // 16B reads), then for each sampled input byte does lut_mem[uint8(av)]
+    // and writes the result back. Generator no longer pre-stuffs b_vec.
+    input                         lut_mode,
+    input      [ADDR_WIDTH-1:0]   lut_addr,
     input                         final_q_mode,
     input                         read_a_from_l1,
     input                         sramcrc_mode,
@@ -67,21 +77,29 @@ module vf_ewe_sample_engine #(
     localparam [3:0] PH_OUT_WRITE  = 4'd5;
     localparam [3:0] PH_RETIRE     = 4'd6;
 
-    localparam [2:0] ST_IDLE  = 3'd0;
-    localparam [2:0] ST_A     = 3'd1;
-    localparam [2:0] ST_B     = 3'd2;
-    localparam [2:0] ST_PIPE  = 3'd3;
-    localparam [2:0] ST_STORE = 3'd4;
-    localparam [2:0] ST_DONE  = 3'd5;
-    localparam [2:0] ST_SRAMCRC = 3'd6;
+    localparam [3:0] ST_IDLE     = 4'd0;
+    localparam [3:0] ST_A        = 4'd1;
+    localparam [3:0] ST_B        = 4'd2;
+    localparam [3:0] ST_PIPE     = 4'd3;
+    localparam [3:0] ST_STORE    = 4'd4;
+    localparam [3:0] ST_DONE     = 4'd5;
+    localparam [3:0] ST_SRAMCRC  = 4'd6;
+    localparam [3:0] ST_LUT_LOAD = 4'd7;   // v11: pre-load 256B LUT from L1
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
     localparam [31:0] FNV_PRIME = 32'd16777619;
     localparam integer MAX_EWE_OUTPUT_SRAM_BYTES = 16777216;
     localparam [7:0] MAX_COUNT = MAX_ELEMS;
     localparam [7:0] MAX_FP_COUNT = MAX_ELEMS / 2;
 
-    reg [2:0] state;
+    reg [3:0] state;
     reg [31:0] pipe_remaining;
+    // v11: 256-byte unary LUT preloaded from L1 in 16 beats of 16 B each.
+    // Indexed by uint8(input_byte); compile_model precomputes the table from
+    // TFLite quant params so a lookup is bit-exact against the reference.
+    reg [7:0] lut_mem [0:255];
+    reg [4:0] lut_load_beat;          // 0..16; 16 = load done
+    reg       lut_beat_req_sent;      // request fired, awaiting response
+    integer   lut_byte;
     reg signed [31:0] av;
     reg signed [31:0] bv;
     reg signed [31:0] raw;
@@ -327,6 +345,12 @@ module vf_ewe_sample_engine #(
         begin
             av = {{24{active_a_vec[lane_idx*8 + 7]}}, active_a_vec[lane_idx*8 +: 8]};
             bv = {{24{b_vec[lane_idx*8 + 7]}}, b_vec[lane_idx*8 +: 8]};
+            if (lut_mode) begin
+                // INT8 unary LUT lookup. lut_mem was preloaded from L1 in
+                // ST_LUT_LOAD; index by uint8(av) and sign-extend the result.
+                lane_value = clamp_i8($signed({{24{lut_mem[av[7:0]][7]}},
+                                                lut_mem[av[7:0]]}));
+            end else begin
             case (op_mode)
                 2'd1: raw = av * bv;
                 2'd2: raw = av - bv;
@@ -363,6 +387,7 @@ module vf_ewe_sample_engine #(
             end else begin
                 lane_value = clamp_i8(raw);
             end
+            end  // !lut_mode
         end
     endtask
 
@@ -391,13 +416,22 @@ module vf_ewe_sample_engine #(
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = ((state == ST_A) && (!read_a_from_l1 || !a_req_sent)) ||
-                          (state == ST_B) || (state == ST_STORE);
+                          (state == ST_B) || (state == ST_STORE) ||
+                          ((state == ST_LUT_LOAD) && !lut_beat_req_sent);
     assign l1_req_write = (state == ST_STORE);
-    assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
-    assign l1_req_bytes = (state == ST_STORE) ? store_byte_count_value : ewe_read_bytes;
+    assign l1_req_addr =
+        (state == ST_STORE)    ? out_byte_offset[ADDR_WIDTH-1:0] :
+        (state == ST_LUT_LOAD) ? (lut_addr +
+                                  {{(ADDR_WIDTH-9){1'b0}}, lut_load_beat[3:0], 4'd0}) :
+                                 l1_req_base_addr;
+    assign l1_req_bytes =
+        (state == ST_STORE)    ? store_byte_count_value :
+        (state == ST_LUT_LOAD) ? 32'd16 :
+                                 ewe_read_bytes;
     assign l1_req_payload_cycles =
         (state == ST_STORE) ? ((store_byte_count_value + WRITE_BYTES_PER_CYCLE - 32'd1) /
                                WRITE_BYTES_PER_CYCLE + 32'd1) :
+        (state == ST_LUT_LOAD) ? 32'd2 :
         ((ewe_read_bytes + READ_BYTES_PER_CYCLE - 32'd1) /
          READ_BYTES_PER_CYCLE + 32'd1);
     assign l1_req_wdata = l1_req_write ? store_wdata_value : {DATA_WIDTH{1'b0}};
@@ -493,6 +527,7 @@ module vf_ewe_sample_engine #(
             ST_PIPE: begin phase_id = PH_LANE_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
             ST_SRAMCRC: begin phase_id = PH_LANE_PIPE; remaining_cycles = sramcrc_remaining; end
+            ST_LUT_LOAD: begin phase_id = PH_A_READ; remaining_cycles = {27'd0, 5'd16} - {27'd0, lut_load_beat}; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -508,11 +543,15 @@ module vf_ewe_sample_engine #(
             sramcrc_count <= 32'd0;
             a_req_sent <= 1'b0;
             active_a_vec <= {MAX_ELEMS*8{1'b0}};
+            lut_load_beat <= 5'd0;
+            lut_beat_req_sent <= 1'b0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pipe_remaining <= 32'd0;
                     a_req_sent <= 1'b0;
+                    lut_load_beat <= 5'd0;
+                    lut_beat_req_sent <= 1'b0;
                     if (start_valid && start_ready) begin
                         if (sramcrc_mode) begin
                             sramcrc_crc <= FNV_OFFSET;
@@ -522,7 +561,33 @@ module vf_ewe_sample_engine #(
                             state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
                         end else begin
                             active_a_vec <= a_vec;
+                            // v11: lut_mode pre-loads the 256-byte table from
+                            // L1 before reading the input; non-lut modes go
+                            // straight to ST_A.
+                            state <= lut_mode ? ST_LUT_LOAD : ST_A;
+                        end
+                    end
+                end
+                ST_LUT_LOAD: begin
+                    if (!lut_beat_req_sent && l1_req_ready) begin
+                        lut_beat_req_sent <= 1'b1;
+`ifdef MDLA7_DEBUG_EWE_LUT
+                        $display("[EWE_LUT] beat=%0d issue addr=0x%h", lut_load_beat, l1_req_addr);
+`endif
+                    end
+                    if (lut_beat_req_sent && l1_resp_valid) begin
+                        for (lut_byte = 0; lut_byte < 16; lut_byte = lut_byte + 1)
+                            lut_mem[{lut_load_beat[3:0], 4'd0} + lut_byte[3:0]] <=
+                                l1_resp_rdata[lut_byte*8 +: 8];
+                        lut_beat_req_sent <= 1'b0;
+`ifdef MDLA7_DEBUG_EWE_LUT
+                        $display("[EWE_LUT] beat=%0d recv data=0x%h", lut_load_beat, l1_resp_rdata);
+`endif
+                        if (lut_load_beat == 5'd15) begin
+                            lut_load_beat <= 5'd0;
                             state <= ST_A;
+                        end else begin
+                            lut_load_beat <= lut_load_beat + 5'd1;
                         end
                     end
                 end
@@ -538,10 +603,21 @@ module vf_ewe_sample_engine #(
                                 );
                             else
                                 active_a_vec[7:0] <= l1_resp_byte;
-                            state <= ST_B;
+                            // lut_mode is unary -> skip B and go straight to PIPE.
+                            if (lut_mode) begin
+                                pipe_remaining <= {24'd0, safe_count} + 32'd1;
+                                state <= ST_PIPE;
+                            end else begin
+                                state <= ST_B;
+                            end
                         end
                     end else if (l1_req_ready) begin
-                        state <= ST_B;
+                        if (lut_mode) begin
+                            pipe_remaining <= {24'd0, safe_count} + 32'd1;
+                            state <= ST_PIPE;
+                        end else begin
+                            state <= ST_B;
+                        end
                     end
                 end
                 ST_B: begin

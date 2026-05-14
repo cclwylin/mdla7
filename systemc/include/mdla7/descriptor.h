@@ -121,7 +121,9 @@ enum EweSubtype : uint8_t {
     ES_SUB        = 3,    // element-wise binary subtract
     ES_HARD_SWISH = 4,    // unary: x * relu6(x+3) / 6
     ES_GELU       = 5,    // unary: x * Φ(x), tanh-approximation
-    ES_LOGISTIC   = 6,    // unary: sigmoid(x)
+    ES_LOGISTIC   = 6,    // unary: sigmoid(x); INT8 path uses 256-byte LUT
+    ES_RSQRT      = 7,    // unary: 1/sqrt(x), INT8 LUT-based
+    ES_TANH       = 8,    // unary: tanh(x), INT8 LUT-based
 };
 
 // Descriptor flags.

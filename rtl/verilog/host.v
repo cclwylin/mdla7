@@ -93,6 +93,11 @@ module host #(
     output reg [15:0]  conv_sample_ic,
     output reg signed [31:0] requant_input_value,
     output reg         requant_read_input_from_l1,
+    // v12 Phase 1: REQUANT input source select. 1 = pull psum from
+    // CONV->REQUANT chain handshake (skip ST_PARAM); 0 = sample/L1 path.
+    output reg         requant_use_chain_input,
+    // v12 Phase 2: REQUANT FP mode select (cmd_mem[base+3][13]).
+    output reg         requant_fp_mode,
     output reg         requant_sramcrc_mode,
     output reg [31:0]  requant_sramcrc_expected_crc,
     output reg [31:0]  requant_sramcrc_expected_count,
@@ -113,6 +118,8 @@ module host #(
     output reg [1:0]   ewe_op_mode,
     output reg         ewe_fp_mode,
     output reg         ewe_int16_mode,
+    output reg         ewe_lut_mode,
+    output reg [31:0]  ewe_lut_addr,
     output reg         ewe_final_q_mode,
     output reg         ewe_read_a_from_l1,
     output reg         ewe_sramcrc_mode,
@@ -404,6 +411,9 @@ module host #(
             conv_sample_ic <= cmd_mem[base + 24][15:0];
             requant_input_value <= cmd_mem[base + 4];
             requant_read_input_from_l1 <= cmd_mem[base + 3][11];
+            // v12 Phase 1: word[3] bit 12 selects chain input.
+            requant_use_chain_input <= cmd_mem[base + 3][12];
+            requant_fp_mode <= cmd_mem[base + 3][13];
             requant_sramcrc_mode <= cmd_mem[base + 3][10];
             requant_sramcrc_expected_crc <= cmd_mem[base + 28];
             requant_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -430,6 +440,9 @@ module host #(
             ewe_op_mode <= cmd_mem[base + 12][9:8];
             ewe_fp_mode <= cmd_mem[base + 12][10];
             ewe_int16_mode <= cmd_mem[base + 12][11];
+            ewe_lut_mode <= cmd_mem[base + 12][12];
+            // v11: word[30] holds the L1 byte offset of the 256-byte LUT.
+            ewe_lut_addr <= cmd_mem[base + 30];
             ewe_final_q_mode <= cmd_mem[base + 3][6];
             ewe_read_a_from_l1 <= cmd_mem[base + 3][11];
             ewe_sramcrc_mode <= cmd_mem[base + 3][10];
@@ -712,6 +725,8 @@ module host #(
             conv_sample_ic <= 16'd0;
             requant_input_value <= 32'sd0;
             requant_read_input_from_l1 <= 1'b0;
+            requant_use_chain_input <= 1'b0;
+            requant_fp_mode <= 1'b0;
             requant_sramcrc_mode <= 1'b0;
             requant_sramcrc_expected_crc <= 32'd0;
             requant_sramcrc_expected_count <= 32'd0;
@@ -732,6 +747,8 @@ module host #(
             ewe_op_mode <= 2'd0;
             ewe_fp_mode <= 1'b0;
             ewe_int16_mode <= 1'b0;
+            ewe_lut_mode <= 1'b0;
+            ewe_lut_addr <= 32'd0;
             ewe_final_q_mode <= 1'b0;
             ewe_read_a_from_l1 <= 1'b0;
             ewe_sramcrc_mode <= 1'b0;

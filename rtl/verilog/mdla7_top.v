@@ -652,6 +652,8 @@ module mdla7_top #(
     input      [15:0]           conv_sample_ic,
     input signed [31:0]         requant_input_value,
     input                       requant_read_input_from_l1,
+    input                       requant_use_chain_input,
+    input                       requant_fp_mode,
     input                       requant_sramcrc_mode,
     input      [31:0]           requant_sramcrc_expected_count,
     input      [31:0]           requant_out_byte_offset,
@@ -670,6 +672,8 @@ module mdla7_top #(
     input      [1:0]            ewe_op_mode,
     input                       ewe_fp_mode,
     input                       ewe_int16_mode,
+    input                       ewe_lut_mode,
+    input      [31:0]           ewe_lut_addr,
     input                       ewe_final_q_mode,
     input                       ewe_read_a_from_l1,
     input                       ewe_sramcrc_mode,
@@ -880,6 +884,9 @@ module mdla7_top #(
     reg [15:0] conv_sample_ic_q;
     reg signed [31:0] requant_input_value_q;
     reg requant_read_input_from_l1_q;
+    reg requant_use_chain_input_q;
+    reg requant_fp_mode_q;
+    wire [15:0] requant_fp_q_bits;
     reg requant_sramcrc_mode_q;
     reg [31:0] requant_sramcrc_expected_count_q;
     reg [31:0] requant_out_byte_offset_q;
@@ -898,6 +905,8 @@ module mdla7_top #(
     reg [1:0] ewe_op_mode_q;
     reg ewe_fp_mode_q;
     reg ewe_int16_mode_q;
+    reg ewe_lut_mode_q;
+    reg [31:0] ewe_lut_addr_q;
     reg ewe_final_q_mode_q;
     reg ewe_read_a_from_l1_q;
     reg ewe_sramcrc_mode_q;
@@ -924,6 +933,10 @@ module mdla7_top #(
     wire conv_done_valid;
     wire [3:0] conv_phase_id;
     wire [31:0] conv_remaining_cycles;
+    // v12 Phase 1: CONV->REQUANT chain wires (1-deep direct handshake).
+    wire conv_chain_psum_valid;
+    wire signed [31:0] conv_chain_psum_data;
+    wire conv_chain_psum_ready;
     wire conv_l1_req_valid;
     wire conv_l1_req_ready;
     wire conv_l1_req_write;
@@ -935,6 +948,9 @@ module mdla7_top #(
     wire requant_start_ready;
     wire requant_busy;
     wire requant_done_valid;
+    // v12 Phase 2: REQUANT FP16 result. Unused at top level for now (no FP
+    // chain consumer wired); Phase 5 will route this to a UDMA store path.
+    wire [15:0] requant_fp_q;
     wire [3:0] requant_phase_id;
     wire [31:0] requant_remaining_cycles;
     wire requant_l1_req_valid;
@@ -1331,7 +1347,13 @@ module mdla7_top #(
         .conv_shadow_crc(conv_shadow_crc),
         .conv_shadow_byte_count(conv_shadow_byte_count),
         .conv_psum_valid_mask(conv_psum_valid_mask),
-        .conv_psum_acc_values(conv_psum_acc_values)
+        .conv_psum_acc_values(conv_psum_acc_values),
+        // v12 Phase 1: CONV->REQUANT chain. Direct valid/ready handshake
+        // (1-deep). Tile mode in Phase 6 will swap this for a real FIFO with
+        // multiple OC lanes.
+        .chain_psum_valid(conv_chain_psum_valid),
+        .chain_psum_data(conv_chain_psum_data),
+        .chain_psum_ready(conv_chain_psum_ready)
     );
 
     vf_requant_sample_engine u_requant (
@@ -1340,6 +1362,16 @@ module mdla7_top #(
         .start_valid(requant_start),
         .start_ready(requant_start_ready),
         .input_value(requant_input_value_q),
+        // v12 Phase 1: CONV->REQUANT chain. use_chain_input picks input source
+        // per descriptor (chain vs L1/direct); chain_psum_ready feeds back to
+        // CONV's chain handshake.
+        .use_chain_input(requant_use_chain_input_q),
+        .fp_mode(requant_fp_mode_q),
+        .fp_bias(32'd0),
+        .fp_q(requant_fp_q_bits),
+        .chain_psum_valid(conv_chain_psum_valid),
+        .chain_psum_data(conv_chain_psum_data),
+        .chain_psum_ready(conv_chain_psum_ready),
         .multiplier(conv_multiplier_q),
         .shift(conv_shift_q),
         .zp_out(conv_zp_out_q),
@@ -1423,6 +1455,8 @@ module mdla7_top #(
         .op_mode(ewe_op_mode_q),
         .fp_mode(ewe_fp_mode_q),
         .int16_mode(ewe_int16_mode_q),
+        .lut_mode(ewe_lut_mode_q),
+        .lut_addr(ewe_lut_addr_q[ADDR_WIDTH-1:0]),
         .final_q_mode(ewe_final_q_mode_q),
         .read_a_from_l1(ewe_read_a_from_l1_q),
         .sramcrc_mode(ewe_sramcrc_mode_q),
@@ -1767,6 +1801,8 @@ module mdla7_top #(
             conv_sample_ic_q <= 16'd0;
             requant_input_value_q <= 32'sd0;
             requant_read_input_from_l1_q <= 1'b0;
+            requant_use_chain_input_q <= 1'b0;
+            requant_fp_mode_q <= 1'b0;
             requant_sramcrc_mode_q <= 1'b0;
             requant_sramcrc_expected_count_q <= 32'd0;
             requant_out_byte_offset_q <= 32'd0;
@@ -1785,6 +1821,8 @@ module mdla7_top #(
             ewe_op_mode_q <= 2'd0;
             ewe_fp_mode_q <= 1'b0;
             ewe_int16_mode_q <= 1'b0;
+            ewe_lut_mode_q <= 1'b0;
+            ewe_lut_addr_q <= 32'd0;
             ewe_final_q_mode_q <= 1'b0;
             ewe_read_a_from_l1_q <= 1'b0;
             ewe_sramcrc_mode_q <= 1'b0;
@@ -1912,6 +1950,8 @@ module mdla7_top #(
                         conv_sample_ic_q <= conv_sample_ic;
                         requant_input_value_q <= requant_input_value;
                         requant_read_input_from_l1_q <= requant_read_input_from_l1;
+                        requant_use_chain_input_q <= requant_use_chain_input;
+                        requant_fp_mode_q <= requant_fp_mode;
                         requant_sramcrc_mode_q <= requant_sramcrc_mode;
                         requant_sramcrc_expected_count_q <= requant_sramcrc_expected_count;
                         requant_out_byte_offset_q <= requant_out_byte_offset;
@@ -1930,6 +1970,8 @@ module mdla7_top #(
                         ewe_op_mode_q <= ewe_op_mode;
                         ewe_fp_mode_q <= ewe_fp_mode;
                         ewe_int16_mode_q <= ewe_int16_mode;
+                        ewe_lut_mode_q <= ewe_lut_mode;
+                        ewe_lut_addr_q <= ewe_lut_addr;
                         ewe_final_q_mode_q <= ewe_final_q_mode;
                         ewe_read_a_from_l1_q <= ewe_read_a_from_l1;
                         ewe_sramcrc_mode_q <= ewe_sramcrc_mode;

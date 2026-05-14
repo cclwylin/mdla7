@@ -440,6 +440,37 @@ SC_MODULE(EweEngine) {
         });
     }
 
+    // v11: INT8 unary EWE via 256-byte LUT (RSQRT / TANH / LOGISTIC).  wgt_b
+    // is a 256-entry int8 table indexed by uint8(input_byte); compile_model
+    // pre-evaluates the nonlinearity through TFLite quant params so this is
+    // a pure byte lookup -- bit-exact against the TFLite reference output.
+    void run_unary_int8_lut(const EweBody& e, uint64_t elems) {
+        std::vector<int8_t> in_q(elems), out_q(elems);
+        l1mgr.read(e.in_a_addr, in_q.data(), elems);
+        int8_t lut[256];
+        l1mgr.read(e.lut_addr, lut, sizeof(lut));
+        for (uint64_t i = 0; i < elems; ++i) {
+            // signed int8 -> uint8 index without sign extension.
+            const uint8_t idx = static_cast<uint8_t>(in_q[i]);
+            out_q[i] = lut[idx];
+        }
+        l1mgr.write(e.out_addr, out_q.data(), elems);
+    }
+
+    // v11: INT16 unary EWE via 64K-entry LUT (128 KB). Same shape as the
+    // int8 path but indexed by uint16(input_word) with int16 outputs.
+    void run_unary_int16_lut(const EweBody& e, uint64_t elems) {
+        std::vector<int16_t> in_q(elems), out_q(elems);
+        l1mgr.read(e.in_a_addr, in_q.data(), elems * sizeof(int16_t));
+        std::vector<int16_t> lut(65536);
+        l1mgr.read(e.lut_addr, lut.data(), lut.size() * sizeof(int16_t));
+        for (uint64_t i = 0; i < elems; ++i) {
+            const uint16_t idx = static_cast<uint16_t>(in_q[i]);
+            out_q[i] = lut[idx];
+        }
+        l1mgr.write(e.out_addr, out_q.data(), elems * sizeof(int16_t));
+    }
+
     // v8.30: FP unary activations (HARD_SWISH / GELU). Storage FP16; compute FP32.
     // v10: LOGISTIC joins the same unary EWE datapath for EfficientNet-style
     // x * sigmoid(x) fanout blocks.
@@ -521,19 +552,40 @@ SC_MODULE(EweEngine) {
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH ||
                        e.subtype == ES_GELU ||
-                       e.subtype == ES_LOGISTIC) {
-                const char* nm = (e.subtype == ES_GELU) ? "gelu"
+                       e.subtype == ES_LOGISTIC ||
+                       e.subtype == ES_RSQRT ||
+                       e.subtype == ES_TANH) {
+                const char* nm = (e.subtype == ES_GELU)     ? "gelu"
                                : (e.subtype == ES_LOGISTIC) ? "logist"
-                               : "h_swsh";
+                               : (e.subtype == ES_RSQRT)    ? "rsqrt"
+                               : (e.subtype == ES_TANH)     ? "tanh"
+                               :                              "h_swsh";
                 std::cout << "[EWE] " << nm << " " << e.h << "x" << e.w << "x" << e.c
                           << "  dtype=" << (fp ? "fp" : "int") << "\n";
-                if (elems > 0 && fp) {
-                    run_unary_fp(e, elems, e.subtype);
+                if (elems > 0) {
+                    if (fp) {
+                        run_unary_fp(e, elems, e.subtype);
+                    } else if (!int16) {
+                        // INT8 LUT path: single byte-indexed table lookup.
+                        // All 5 INT8 unary subtypes share the same datapath
+                        // (HARD_SWISH/GELU/LOGISTIC/RSQRT/TANH); the math is
+                        // already baked into the 256-byte LUT at compile time.
+                        run_unary_int8_lut(e, elems);
+                    } else {
+                        // INT16 LUT path: same shape, 16-bit indices and 16-bit
+                        // outputs. wgt_b is a 128 KB table.
+                        run_unary_int16_lut(e, elems);
+                    }
                 }
                 if (is_rtl_style(engine_model)) {
-                    const uint64_t passes = (e.subtype == ES_GELU) ? 6
-                                          : (e.subtype == ES_LOGISTIC) ? 4
-                                          : 1;
+                    // LUT lookup is one pass for both INT8 and INT16; only
+                    // analytical FP unaries keep their multi-pass cost models.
+                    const bool int_lut_path = !fp;
+                    const uint64_t passes =
+                        int_lut_path             ? 1
+                      : (e.subtype == ES_GELU)    ? 6
+                      : (e.subtype == ES_LOGISTIC) ? 4
+                      :                              1;
                     if (is_synth_style(engine_model))
                         synth_run_unary(elems, lanes, passes);
                     else

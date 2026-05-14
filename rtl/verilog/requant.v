@@ -15,11 +15,27 @@ module vf_requant_sample_engine #(
     input                  start_valid,
     output                 start_ready,
     input signed [31:0]    input_value,
+    // v12 Phase 1: CONV->REQUANT chain input. When use_chain_input=1, ignore
+    // input_value/L1 and pull psum from the chain handshake instead. Sample
+    // mode keeps the existing input_value path untouched.
+    input                  use_chain_input,
+    input                  chain_psum_valid,
+    input signed [31:0]    chain_psum_data,
+    output                 chain_psum_ready,
+    // v12 Phase 2: FP mode. When fp_mode=1, REQUANT skips MBQM and instead
+    // interprets active_input_value as FP32 bits, clamps against fp32 act_min/
+    // act_max bit patterns, casts down to FP16, and writes 2 bytes to L1.
     input signed [31:0]    multiplier,
     input signed [7:0]     shift,
     input signed [31:0]    zp_out,
     input signed [31:0]    act_min,
     input signed [31:0]    act_max,
+    // v12 Phase 2: FP mode. When fp_mode=1, REQUANT skips MBQM and instead
+    // does FP32(active_input_value bit-cast) + fp_bias -> clamp -> FP16.
+    // act_min/act_max are reinterpreted as FP32 bit patterns. Output is 2 B
+    // (FP16 lane) instead of 1 B (INT8). Sample-mode INT path unchanged.
+    input                  fp_mode,
+    input      [31:0]      fp_bias,
     input                  read_input_from_l1,
     input                  sramcrc_mode,
     input      [31:0]      sramcrc_expected_count,
@@ -43,7 +59,9 @@ module vf_requant_sample_engine #(
     output reg [31:0]      sramcrc_crc,
     output reg [31:0]      sramcrc_count,
     output signed [31:0]   scaled_out,
-    output signed [7:0]    out_q
+    output signed [7:0]    out_q,
+    // v12 Phase 2: FP16 result. 0 in INT mode.
+    output     [15:0]      fp_q
 );
     localparam [3:0] PH_CFG_DECODE  = 4'd1;
     localparam [3:0] PH_PARAM_FETCH = 4'd2;
@@ -51,17 +69,18 @@ module vf_requant_sample_engine #(
     localparam [3:0] PH_OUT_WRITE   = 4'd4;
     localparam [3:0] PH_RETIRE      = 4'd5;
 
-    localparam [2:0] ST_IDLE  = 3'd0;
-    localparam [2:0] ST_PARAM = 3'd1;
-    localparam [2:0] ST_PIPE  = 3'd2;
-    localparam [2:0] ST_STORE = 3'd3;
-    localparam [2:0] ST_DONE  = 3'd4;
-    localparam [2:0] ST_SRAMCRC = 3'd5;
+    localparam [3:0] ST_IDLE       = 4'd0;
+    localparam [3:0] ST_PARAM      = 4'd1;
+    localparam [3:0] ST_PIPE       = 4'd2;
+    localparam [3:0] ST_STORE      = 4'd3;
+    localparam [3:0] ST_DONE       = 4'd4;
+    localparam [3:0] ST_SRAMCRC    = 4'd5;
+    localparam [3:0] ST_CHAIN_WAIT = 4'd6;   // v12: wait for CONV chain psum
     localparam [31:0] FNV_OFFSET = 32'h811c9dc5;
     localparam [31:0] FNV_PRIME = 32'd16777619;
     localparam integer MAX_REQUANT_OUTPUT_SRAM_BYTES = 16777216;
 
-    reg [2:0] state;
+    reg [3:0] state;
     reg [31:0] pipe_remaining;
     reg signed [31:0] quantized;
     reg signed [31:0] clamped;
@@ -161,28 +180,110 @@ module vf_requant_sample_engine #(
         end
     endfunction
 
+    // v12 Phase 2: FP32 bit pattern compare (treats both as ordered floats with
+    // sign-magnitude semantics; NaN handling not required for our clamp use).
+    function fp32_lt;
+        input [31:0] a;
+        input [31:0] b;
+        reg sa, sb;
+        begin
+            sa = a[31];
+            sb = b[31];
+            if (sa != sb)
+                fp32_lt = sa;                                 // negative < positive
+            else if (!sa)
+                fp32_lt = (a[30:0] < b[30:0]);                // both pos: smaller mag wins
+            else
+                fp32_lt = (a[30:0] > b[30:0]);                // both neg: larger mag wins
+        end
+    endfunction
+
+    // v12 Phase 2: IEEE-754 FP32 -> FP16 with round-to-nearest-even, infinity
+    // saturation, and zero-flush for subnormals (matches SystemC fp_utils).
+    function [15:0] fp32_to_fp16;
+        input [31:0] f32;
+        reg sign;
+        reg [7:0] exp32;
+        reg [22:0] mant32;
+        reg [4:0] exp16;
+        reg [9:0] mant16;
+        reg [12:0] guard;
+        integer e_unbiased;
+        begin
+            sign  = f32[31];
+            exp32 = f32[30:23];
+            mant32 = f32[22:0];
+            if (exp32 == 8'd0) begin
+                fp32_to_fp16 = {sign, 5'd0, 10'd0};            // zero / subnormal -> 0
+            end else if (exp32 == 8'hff) begin
+                fp32_to_fp16 = {sign, 5'h1f, mant32[22:13]};   // inf / nan
+            end else begin
+                e_unbiased = $signed({1'b0, exp32}) - 127;
+                if (e_unbiased > 15) begin
+                    fp32_to_fp16 = {sign, 5'h1f, 10'd0};       // overflow -> +/-inf
+                end else if (e_unbiased < -14) begin
+                    fp32_to_fp16 = {sign, 5'd0, 10'd0};        // underflow -> +/-0
+                end else begin
+                    exp16  = e_unbiased[4:0] + 5'd15;
+                    mant16 = mant32[22:13];
+                    guard  = mant32[12:0];
+                    // Round-to-nearest, ties-to-even.
+                    if (guard[12] && (|guard[11:0] || mant16[0]))
+                        {exp16, mant16} = {exp16, mant16} + 1;
+                    fp32_to_fp16 = {sign, exp16, mant16};
+                end
+            end
+        end
+    endfunction
+
+    // v12 Phase 2: FP datapath registers. fp_clamped_bits is the clamped FP32
+    // bit pattern; fp_q is the down-cast FP16 result. INT path keeps using
+    // `clamped`/`out_q` exactly as before.
+    reg [31:0] fp_clamped_bits;
+    wire [15:0] fp_q_bits;
+    wire [31:0] fp_in_with_bias;
+    // Bias add in FP mode: re-interpret active_input_value as float, then we
+    // simply OR/add via a real-valued helper. To keep this synth-friendly,
+    // bias is applied OUTSIDE the engine in sample mode (compile_model folds
+    // it into the chain payload, same as INT). fp_bias is plumbed for future
+    // use in tile/streaming mode where per-OC bias add lives inside REQUANT.
+    assign fp_in_with_bias = active_input_value;
+    assign fp_q_bits = fp32_to_fp16(fp_clamped_bits);
+
     assign start_ready = (state == ST_IDLE);
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
+    // v12 Phase 1: in chain mode REQUANT asserts ready while waiting for the
+    // psum from CONV. Sample mode never enters ST_CHAIN_WAIT, so chain side
+    // back-pressures CONV (which currently silently drops if not consumed).
+    assign chain_psum_ready = (state == ST_CHAIN_WAIT);
     assign l1_req_valid = ((state == ST_PARAM) && read_input_from_l1 && !param_req_sent) ||
                           (state == ST_STORE);
     assign l1_req_write = (state == ST_STORE);
     assign l1_req_addr = (state == ST_STORE) ? out_byte_offset[ADDR_WIDTH-1:0] : l1_req_base_addr;
-    assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 : 32'd1;
+    // v12 Phase 2: FP store is 2 bytes (FP16); INT store stays 1 byte.
+    assign l1_req_bytes = (state == ST_PARAM) ? 32'd4 :
+                          (state == ST_STORE) ? (fp_mode ? 32'd2 : 32'd1) :
+                          32'd0;
     assign l1_req_payload_cycles =
         (state == ST_PARAM) ? ((32'd4 + READ_BYTES_PER_CYCLE - 32'd1) /
                                READ_BYTES_PER_CYCLE + 32'd1) :
-        (state == ST_STORE) ? ((32'd1 + WRITE_BYTES_PER_CYCLE - 32'd1) /
+        (state == ST_STORE) ? ((l1_req_bytes + WRITE_BYTES_PER_CYCLE - 32'd1) /
                                WRITE_BYTES_PER_CYCLE + 32'd1) :
         32'd2;
+    // FP mode: place fp_q_bits (16 bits) at the byte-aligned lane.
+    // INT mode: place out_q (8 bits) at the byte lane.
     assign l1_req_wdata = l1_req_write
-        ? byte_lane_wdata(out_q[7:0], l1_req_addr[3:0])
+        ? (fp_mode ? ({{(DATA_WIDTH-16){1'b0}}, fp_q_bits} << ({l1_req_addr[3:0], 3'd0}))
+                   : byte_lane_wdata(out_q[7:0], l1_req_addr[3:0]))
         : {DATA_WIDTH{1'b0}};
     assign l1_req_wstrb = l1_req_write
-        ? ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0])
+        ? (fp_mode ? ({{(DATA_WIDTH/8-2){1'b0}}, 2'b11} << l1_req_addr[3:0])
+                   : ({{(DATA_WIDTH/8-1){1'b0}}, 1'b1} << l1_req_addr[3:0]))
         : {DATA_WIDTH/8{1'b0}};
     assign scaled_out = clamped;
     assign out_q = clamped[7:0];
+    assign fp_q = fp_q_bits;
 
     always @* begin
         quantized = mbqm(active_input_value, multiplier, shift) + zp_out;
@@ -193,11 +294,23 @@ module vf_requant_sample_engine #(
         else
             clamped = quantized;
 
+        // v12 Phase 2: FP clamp. Treats active_input_value, act_min, act_max
+        // as FP32 bit patterns and picks the closest in-range value. This
+        // shadow path is computed unconditionally; it only drives output when
+        // fp_mode=1 (selected by l1_req_wdata mux above).
+        if (fp32_lt(fp_in_with_bias, act_min))
+            fp_clamped_bits = act_min;
+        else if (fp32_lt(act_max, fp_in_with_bias))
+            fp_clamped_bits = act_max;
+        else
+            fp_clamped_bits = fp_in_with_bias;
+
         case (state)
             ST_PARAM: begin phase_id = PH_PARAM_FETCH; remaining_cycles = l1_req_payload_cycles; end
             ST_PIPE: begin phase_id = PH_QUANT_PIPE; remaining_cycles = pipe_remaining; end
             ST_STORE: begin phase_id = PH_OUT_WRITE; remaining_cycles = l1_req_payload_cycles; end
             ST_SRAMCRC: begin phase_id = PH_QUANT_PIPE; remaining_cycles = sramcrc_remaining; end
+            ST_CHAIN_WAIT: begin phase_id = PH_PARAM_FETCH; remaining_cycles = 32'd1; end
             ST_DONE: begin phase_id = PH_RETIRE; remaining_cycles = 32'd1; end
             default: begin phase_id = PH_CFG_DECODE; remaining_cycles = 32'd0; end
         endcase
@@ -225,10 +338,20 @@ module vf_requant_sample_engine #(
                             sramcrc_index <= out_byte_offset;
                             sramcrc_remaining <= sramcrc_expected_count;
                             state <= (sramcrc_expected_count == 32'd0) ? ST_DONE : ST_SRAMCRC;
+                        end else if (use_chain_input) begin
+                            // v12 Phase 1: pull psum from CONV chain.
+                            state <= ST_CHAIN_WAIT;
                         end else begin
                             active_input_value <= input_value;
                             state <= ST_PARAM;
                         end
+                    end
+                end
+                ST_CHAIN_WAIT: begin
+                    if (chain_psum_valid) begin
+                        active_input_value <= chain_psum_data;
+                        pipe_remaining <= 32'd2;
+                        state <= ST_PIPE;
                     end
                 end
                 ST_PARAM: begin
@@ -268,8 +391,16 @@ module vf_requant_sample_engine #(
                 end
                 ST_STORE: begin
                     if (l1_req_ready) begin
-                        if (out_byte_offset < MAX_REQUANT_OUTPUT_SRAM_BYTES)
-                            output_sram[out_byte_offset] <= out_q;
+                        if (out_byte_offset < MAX_REQUANT_OUTPUT_SRAM_BYTES) begin
+                            if (fp_mode) begin
+                                // v12 Phase 2: write FP16 (2 bytes, little-endian).
+                                output_sram[out_byte_offset]      <= fp_q[7:0];
+                                if (out_byte_offset + 32'd1 < MAX_REQUANT_OUTPUT_SRAM_BYTES)
+                                    output_sram[out_byte_offset + 32'd1] <= fp_q[15:8];
+                            end else begin
+                                output_sram[out_byte_offset] <= out_q;
+                            end
+                        end
                         state <= ST_DONE;
                     end
                 end

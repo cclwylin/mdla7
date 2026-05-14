@@ -84,6 +84,8 @@ enum OpKindEnum : uint16_t {
     OK_TILE        = 25,
     OK_SPLIT       = 26,
     OK_LOGISTIC    = 27,
+    OK_RSQRT       = 28,    // 1/sqrt(x), INT8 LUT-based EWE unary
+    OK_TANH        = 29,    // tanh(x), INT8 LUT-based EWE unary
 };
 
 inline const char* op_name(uint16_t k) {
@@ -116,6 +118,8 @@ inline const char* op_name(uint16_t k) {
         case OK_TILE:       return "  tile";
         case OK_SPLIT:      return " split";
         case OK_LOGISTIC:   return "logist";
+        case OK_RSQRT:      return " rsqrt";
+        case OK_TANH:       return "  tanh";
     }
     return "??unknown";
 }
