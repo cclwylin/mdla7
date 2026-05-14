@@ -176,6 +176,12 @@ module Testbench_host_program;
     wire requant_read_input_from_l1;
     wire requant_use_chain_input;
     wire requant_fp_mode;
+    wire [31:0] requant_fp_bias;
+    wire requant_param_load_mode;
+    wire [21:0] requant_param_l1_addr;
+    wire [15:0] requant_oc_count;
+    wire [15:0] requant_oc_index;
+    wire conv_chain_out_enable;
     wire requant_sramcrc_mode;
     wire [31:0] requant_sramcrc_expected_crc;
     wire [31:0] requant_sramcrc_expected_count;
@@ -423,6 +429,12 @@ module Testbench_host_program;
         .requant_read_input_from_l1(requant_read_input_from_l1),
         .requant_use_chain_input(requant_use_chain_input),
         .requant_fp_mode(requant_fp_mode),
+        .requant_fp_bias(requant_fp_bias),
+        .requant_param_load_mode(requant_param_load_mode),
+        .requant_param_l1_addr(requant_param_l1_addr),
+        .requant_oc_count(requant_oc_count),
+        .requant_oc_index(requant_oc_index),
+        .conv_chain_out_enable(conv_chain_out_enable),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_crc(requant_sramcrc_expected_crc),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
@@ -646,6 +658,12 @@ module Testbench_host_program;
         .requant_read_input_from_l1(requant_read_input_from_l1),
         .requant_use_chain_input(requant_use_chain_input),
         .requant_fp_mode(requant_fp_mode),
+        .requant_fp_bias(requant_fp_bias),
+        .requant_param_load_mode(requant_param_load_mode),
+        .requant_param_l1_addr(requant_param_l1_addr),
+        .requant_oc_count(requant_oc_count),
+        .requant_oc_index(requant_oc_index),
+        .conv_chain_out_enable(conv_chain_out_enable),
         .requant_sramcrc_mode(requant_sramcrc_mode),
         .requant_sramcrc_expected_count(requant_sramcrc_expected_count),
         .requant_out_byte_offset(requant_out_byte_offset),

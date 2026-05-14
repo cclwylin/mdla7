@@ -56,6 +56,10 @@ module host #(
     output reg         conv_read_sample_from_l1,
     output reg         conv_fp_mode,
     output reg         conv_int16_mode,
+    // v12 Phase 4: CONV chain output enable (cmd_mem[base+3][15]). Set 1 by
+    // chain-mode descriptors to push the per-sample psum onto the CONV->REQUANT
+    // chain; sample-mode descriptors leave 0 so chain pulse stays low.
+    output reg         conv_chain_out_enable,
     output reg signed [15:0] conv_zp_in,
     output reg signed [31:0] conv_bias,
     output reg signed [31:0] conv_multiplier,
@@ -98,6 +102,16 @@ module host #(
     output reg         requant_use_chain_input,
     // v12 Phase 2: REQUANT FP mode select (cmd_mem[base+3][13]).
     output reg         requant_fp_mode,
+    // v12 Phase 2: REQUANT FP bias (cmd_mem[base+5]). Added to FP32 input
+    // before clamp. Ignored when fp_mode=0.
+    output reg [31:0]  requant_fp_bias,
+    // v12 Phase 3: REQUANT per-OC param table. param_load_mode=1 triggers
+    // ST_PARAM_LOAD which pulls oc_count entries from L1 starting at
+    // param_l1_addr; PIPE then indexes by oc_index.
+    output reg         requant_param_load_mode,
+    output reg [21:0]  requant_param_l1_addr,
+    output reg [15:0]  requant_oc_count,
+    output reg [15:0]  requant_oc_index,
     output reg         requant_sramcrc_mode,
     output reg [31:0]  requant_sramcrc_expected_crc,
     output reg [31:0]  requant_sramcrc_expected_count,
@@ -372,6 +386,10 @@ module host #(
                                      ((cmd_mem[base + 31] == 32'd0) ? 32'd1 : cmd_mem[base + 31]) :
                                      ((cmd_mem[base + 31][7:0] == 8'd0) ? 32'd1 : {24'd0, cmd_mem[base + 31][7:0]});
             conv_read_sample_from_l1 <= cmd_mem[base + 3][11];
+            // v12 Phase 4: CONV chain output enable. CONV-only bit (REQUANT
+            // descriptors use word[3][12]+[13] for chain/fp). Decoded for all
+            // op_classes -- non-CONV descriptors will hold 0.
+            conv_chain_out_enable <= cmd_mem[base + 3][15];
             conv_fp_mode <= cmd_mem[base + 12][8];
             conv_int16_mode <= cmd_mem[base + 12][11];
             conv_zp_in <= cmd_mem[base + 12][31:16];
@@ -414,6 +432,16 @@ module host #(
             // v12 Phase 1: word[3] bit 12 selects chain input.
             requant_use_chain_input <= cmd_mem[base + 3][12];
             requant_fp_mode <= cmd_mem[base + 3][13];
+            // v12 Phase 2: FP bias is 32-bit fp pattern in cmd_mem[base+5].
+            // Phase 4 generator will set it; default 0 means add zero (no-op).
+            requant_fp_bias <= cmd_mem[base + 5];
+            // v12 Phase 3: REQUANT-only param table. cmd_mem[base+3][14]=load
+            // mode, cmd_mem[base+6] = L1 byte address of param header,
+            // cmd_mem[base+7][15:0]=oc_count, cmd_mem[base+7][31:16]=oc_index.
+            requant_param_load_mode <= cmd_mem[base + 3][14];
+            requant_param_l1_addr <= cmd_mem[base + 6][21:0];
+            requant_oc_count <= cmd_mem[base + 7][15:0];
+            requant_oc_index <= cmd_mem[base + 7][31:16];
             requant_sramcrc_mode <= cmd_mem[base + 3][10];
             requant_sramcrc_expected_crc <= cmd_mem[base + 28];
             requant_sramcrc_expected_count <= cmd_mem[base + 29];
@@ -688,6 +716,7 @@ module host #(
             conv_read_sample_from_l1 <= 1'b0;
             conv_fp_mode <= 1'b0;
             conv_int16_mode <= 1'b0;
+            conv_chain_out_enable <= 1'b0;
             conv_zp_in <= 16'sd0;
             conv_bias <= 32'sd0;
             conv_multiplier <= 32'sd1073741824;
@@ -727,6 +756,11 @@ module host #(
             requant_read_input_from_l1 <= 1'b0;
             requant_use_chain_input <= 1'b0;
             requant_fp_mode <= 1'b0;
+            requant_fp_bias <= 32'd0;
+            requant_param_load_mode <= 1'b0;
+            requant_param_l1_addr <= 22'd0;
+            requant_oc_count <= 16'd0;
+            requant_oc_index <= 16'd0;
             requant_sramcrc_mode <= 1'b0;
             requant_sramcrc_expected_crc <= 32'd0;
             requant_sramcrc_expected_count <= 32'd0;

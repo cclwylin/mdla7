@@ -278,13 +278,20 @@ module vf_requant_sample_engine #(
     // `clamped`/`out_q` exactly as before.
     reg [31:0] fp_clamped_bits;
     wire [15:0] fp_q_bits;
-    wire [31:0] fp_in_with_bias;
-    // Bias add in FP mode: re-interpret active_input_value as float, then we
-    // simply OR/add via a real-valued helper. To keep this synth-friendly,
-    // bias is applied OUTSIDE the engine in sample mode (compile_model folds
-    // it into the chain payload, same as INT). fp_bias is plumbed for future
-    // use in tile/streaming mode where per-OC bias add lives inside REQUANT.
-    assign fp_in_with_bias = active_input_value;
+    reg  [31:0] fp_in_with_bias;
+    // v12 Phase 2: FP bias add. Reinterpret active_input_value + fp_bias as
+    // FP32 bit patterns, add, and feed into clamp. Uses simulation-only
+    // $bitstoshortreal / $shortrealtobits; the engine targets behavioral
+    // ArcSim, not synth. Sample mode descriptors leave fp_bias=0 so this
+    // becomes a no-op for the legacy path.
+    always @* begin
+        if (fp_bias == 32'd0) begin
+            fp_in_with_bias = active_input_value;
+        end else begin
+            fp_in_with_bias = $shortrealtobits(
+                $bitstoshortreal(active_input_value) + $bitstoshortreal(fp_bias));
+        end
+    end
     assign fp_q_bits = fp32_to_fp16(fp_clamped_bits);
 
     assign start_ready = (state == ST_IDLE);

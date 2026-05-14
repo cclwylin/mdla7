@@ -1,9 +1,102 @@
 # MDLA7 Verilog vs CX 待補清單
 
-日期：2026-05-14（更新）
+日期：2026-05-14（更新 — Phase 1/2/3/5 完成 session）
 Repo：`/Volumes/4T_OFFICE/_Claude/MDLA7_Claude`
 Branch：`main`
-最新已提交 commit：`fd13aab Update Verilog CX handoff todo`
+最新已提交 commit：`163db63 Add REQUANT per-OC param table (v12 Phase 3)`
+
+## 本 session 完成的工作（未 commit）
+
+### Phase 1：CONV→REQUANT chain wiring（COMPLETE）
+
+| 檔 | 變更 |
+|---|---|
+| `rtl/verilog/conv.v` | 加 `chain_out_enable` port；ST_DONE 入口在 `chain_out_enable=1` 時 latch psum + pulse `chain_psum_valid`；sticky 直到 REQUANT ack；`start_ready` 加上 `!chain_psum_valid` gate；FP path 改用 `$shortrealtobits(fp_sum)` 做正確 fp32 cast（之前 `fp_sum_bits[31:0]` 是 fp64 lower half，意義錯誤）|
+| `rtl/verilog/host.v` | 加 `conv_chain_out_enable` output reg + 解碼 `cmd_mem[base+3][15]` + reset default 0 |
+| `rtl/verilog/mdla7_top.v` | 加 `conv_chain_out_enable` input port + `conv_chain_out_enable_q` flop + ST_IDLE latch + reset；接到 CONV instance |
+| `rtl/verilog/Testbench_host_program.v` | `conv_chain_out_enable` wire + host/mdla7_top 兩邊 instance 接線 |
+
+### Phase 2：REQUANT FP mode（COMPLETE — wire-up + bias apply）
+
+| 檔 | 變更 |
+|---|---|
+| `rtl/verilog/requant.v` | `fp_in_with_bias` 改為 always block，當 `fp_bias != 0` 時用 `$shortrealtobits($bitstoshortreal(active_input_value) + $bitstoshortreal(fp_bias))` 算 fp32 加法（sim-only constructs，ArcSim 用）|
+| `rtl/verilog/host.v` | 加 `requant_fp_bias` output reg + 解碼 `cmd_mem[base+5]` + reset default 0 |
+| `rtl/verilog/mdla7_top.v` | 加 `requant_fp_bias` input port + `requant_fp_bias_q` flop + ST_IDLE latch + reset；REQUANT instance `.fp_bias` 從 hardcoded `32'd0` 改成 `requant_fp_bias_q` |
+| `rtl/verilog/Testbench_host_program.v` | `requant_fp_bias` wire + host/mdla7_top 兩邊接線 |
+
+注意：原來 `fp_bias` plumb 但綁 `32'd0`，現在 descriptor 控制。
+
+### Phase 3：REQUANT per-OC params table（COMPLETE — wire-up）
+
+RTL 端在前一個 commit (163db63) 已完成 ST_PARAM_LOAD + param_mem。本 session 補完 descriptor wire-up：
+
+| 檔 | 變更 |
+|---|---|
+| `rtl/verilog/host.v` | 加 `requant_param_load_mode`（word[3][14]）、`requant_param_l1_addr`（word[6][21:0]）、`requant_oc_count`（word[7][15:0]）、`requant_oc_index`（word[7][31:16]）四個 output reg + 解碼 + reset |
+| `rtl/verilog/mdla7_top.v` | 加 4 個 input port + 4 個 `_q` flop + ST_IDLE latch + reset；REQUANT instance 四個 input 從 hardcoded 改成 `_q` |
+| `rtl/verilog/Testbench_host_program.v` | 四個 wire + host/mdla7_top 兩邊接線 |
+
+注意：Phase 4 generator 還沒發 param_load_mode=1 descriptor，所以這些 wire 目前都 idle，sample mode unchanged。
+
+### Phase 5：CONV chain payload fp32 cast（COMPLETE）+ skip ST_STORE（DEFERRED）
+
+CONV 的 `chain_psum_data` 在 FP path 改用 `$shortrealtobits(fp_sum)` 做正確 fp32 cast（見 Phase 1 表）。
+
+「CONV 在 `chain_out_enable=1` 時跳過 ST_STORE」這步 deferred：ST_STORE 帶 partial_first/accumulate/final psum 暫存簿記，貿然 skip 會破壞 partial-tile path。建議在 Phase 4 generator 第一個 chain pair 上線後，再做受控的 ST_STORE bypass。
+
+### 驗證
+
+`rm -rf rtl/obj/verilog/host && ./batch/run_verilog.py --filter bmm --rerun-all --dpi`：
+
+```
+1  bmm_softmax_bmm_fp32               PASS
+2  bmm_softmax_bmm_int8               PASS
+3  bmm_softmax_bmm_sam_quant_L22_L61  PASS
+4  qwen35_attention_s1024             PASS
+5  qwen35_attention_s128              PASS
+summary: pass=5 fail=0 skip=0
+```
+
+無 regression。所有 chain / fp_bias / per-OC 新 wire 在 BMM descriptor 上都是 idle（default 0），sample mode 行為與本 session 前一致。
+
+### Descriptor bit allocation 總表（v12 Phase 1-3 加的）
+
+| 欄位 | cmd word | 位元 | 解碼於 host.v | latch in mdla7_top.v |
+|---|---|---|---|---|
+| `conv_chain_out_enable` | word[3] | bit 15 | 全 op_class（非 CONV 等於 don't care）| `conv_chain_out_enable_q` |
+| `requant_use_chain_input` | word[3] | bit 12 | REQUANT desc | `requant_use_chain_input_q` |
+| `requant_fp_mode` | word[3] | bit 13 | REQUANT desc | `requant_fp_mode_q` |
+| `requant_param_load_mode` | word[3] | bit 14 | REQUANT desc | `requant_param_load_mode_q` |
+| `requant_fp_bias` | word[5] | full 32-bit | REQUANT desc | `requant_fp_bias_q` |
+| `requant_param_l1_addr` | word[6] | bits[21:0] | REQUANT desc | `requant_param_l1_addr_q` |
+| `requant_oc_count` | word[7] | bits[15:0] | REQUANT desc | `requant_oc_count_q` |
+| `requant_oc_index` | word[7] | bits[31:16] | REQUANT desc | `requant_oc_index_q` |
+
+注意：word[5-7] 在 REQUANT descriptor 之前是 CONV/POOL/EWE 的 act/wgt vector 內容；REQUANT 不用 act/wgt vector，所以 reuse OK，但 generator 寫 REQUANT descriptor 時要小心不要 leak vector 進去。
+
+## 還沒完成
+
+### Phase 4：Generator emit chain-mode descriptor pair（NOT DONE）
+
+仍須在 `batch/gen_verilog_program.py` 增加 `closed_loop_conv_requant_chain_probe()` 之類的 builder：
+1. 選一個最小 CONV 層
+2. emit UDMA load act/wgt/param
+3. emit CONV descriptor with `chain_out_enable=1`
+4. emit REQUANT descriptor with `use_chain_input=1` + `param_load_mode=1`
+5. UDMA store + L1CRC verify
+
+注意：CONV 目前在 chain_out_enable=1 時仍會走 ST_STORE 寫 L1（Phase 5 skip 未做），所以 chain pair 會產生兩次 L1 write（CONV 的 int8 + REQUANT 的 chain 結果）。可用 REQUANT fp_mode=1 寫 fp16 來區隔，或先做 Phase 5 step 1 skip。
+
+### Phase 6：Sample-engine → tile-engine（DEFERRED — multi-session）
+
+Handoff 已明示這是 multi-session 工作。涉及：
+- CONV/REQUANT 內部加 OH/OW/OC nested loop
+- Generator 從「一個 sample 一個 descriptor」改成「一個 tile 一個 descriptor pair」
+- DRAM-model 16-byte/req limit 要修
+- ~1500 行 RTL + ~500 行 Python + testbench driver
+
+下個 session 起手點：先做 Phase 4（小 scope，驗 chain wire），再評估 Phase 6 怎麼切。
 
 ## 自上次 commit 以來的成果（未 commit）
 

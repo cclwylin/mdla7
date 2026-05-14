@@ -359,6 +359,11 @@ module vf_conv_sample_engine #(
     // v12 Phase 1: CONV->REQUANT chain. One INT32 psum per completed sample
     // (acc_out for INT path, FP32-bit-cast for FP path). Pulse one cycle when
     // entering ST_DONE. Receiver back-pressures via chain_psum_ready.
+    // v12 Phase 4: chain_out_enable gates the chain pulse. Sample-mode
+    // descriptors set this 0 so chain_psum_valid stays low (no consumer to
+    // drain it -> would otherwise dead-lock start_ready). Chain-mode
+    // descriptors set 1 to actually push the psum.
+    input                         chain_out_enable,
     output reg                    chain_psum_valid,
     output reg signed [31:0]      chain_psum_data,
     input                         chain_psum_ready
@@ -621,7 +626,11 @@ module vf_conv_sample_engine #(
                      ((state == ST_WGT) && (!read_sample_from_l1 || !wgt_req_sent)) ||
                      (state == ST_STORE);
 
-    assign start_ready = (state == ST_IDLE);
+    // v12 Phase 4: only gate start on chain availability when there's a real
+    // chain consumer (chain_out_enable was high on the producing descriptor).
+    // Otherwise sample-mode descriptors would dead-lock since nobody drains
+    // chain_psum_valid.
+    assign start_ready = (state == ST_IDLE) && !chain_psum_valid;
     assign busy = (state != ST_IDLE) && (state != ST_DONE);
     assign done_valid = (state == ST_DONE);
     assign l1_req_valid = req_state;
@@ -1035,7 +1044,10 @@ module vf_conv_sample_engine #(
                     compute_remaining <= 32'd0;
                     act_req_sent <= 1'b0;
                     wgt_req_sent <= 1'b0;
-                    chain_psum_valid <= 1'b0;
+                    // v12 Phase 4: keep chain_psum_valid sticky across IDLE
+                    // until REQUANT handshakes; only clear on real ready ack.
+                    if (chain_psum_valid && chain_psum_ready)
+                        chain_psum_valid <= 1'b0;
                     if (start_valid && start_ready) begin
                         active_act_vec <= act_vec;
                         active_wgt_vec <= wgt_vec;
@@ -1175,10 +1187,17 @@ module vf_conv_sample_engine #(
                         // chain_psum_ready, then clear in ST_DONE. When the
                         // chain is unconnected the receiver ties ready=1 so
                         // the pulse drains harmlessly.
-                        chain_psum_data <= fp_mode    ? $signed(fp_sum_bits[31:0])
-                                         : int16_mode ? int16_acc_out
-                                         :              acc_out;
-                        chain_psum_valid <= 1'b1;
+                        // v12 Phase 4/5: only push chain when descriptor opted
+                        // in. FP path bit-casts fp_sum (real, fp64 internally)
+                        // down to fp32; raw fp_sum_bits[31:0] would be lower
+                        // half of an fp64 pattern, which is meaningless to a
+                        // downstream fp32 consumer.
+                        if (chain_out_enable) begin
+                            chain_psum_data <= fp_mode    ? $signed($shortrealtobits(fp_sum))
+                                             : int16_mode ? int16_acc_out
+                                             :              acc_out;
+                            chain_psum_valid <= 1'b1;
+                        end
                         state <= ST_DONE;
                     end
                 end
