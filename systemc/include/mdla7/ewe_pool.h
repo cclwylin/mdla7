@@ -54,6 +54,26 @@ inline uint64_t pool_lanes_for_dtype(uint8_t dtype) {
     return ewe_lanes_for_dtype(dtype);
 }
 
+// v13: softmax-decomposition scratchpad. The decomposed softmax chain
+// (POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV) needs:
+//   FP : 2× elems × 2B (centered, exp) + 2× rows × 2B (max, sum) ≈ 520 KB
+//        for the 32h_64q_64k tile FP16 (256 KB) score.
+//   INT8: elems × 1B (diff) + elems × 4B (exp_q INT32) + rows × 1B (max) +
+//        rows × 8B (sum INT64) ≈ 658 KB for the same tile.
+// 1 MB at the top of L1MESH covers both. Models that have already saturated
+// L1 would still collide; the decomposition is gated by env flag.
+static constexpr uint32_t EWE_SOFTMAX_SCRATCH_BYTES = 1024u * 1024u;
+static constexpr uint32_t EWE_SOFTMAX_SCRATCH_BASE =
+    L1MESH_BYTES - EWE_SOFTMAX_SCRATCH_BYTES;
+
+inline bool softmax_decompose_enabled() {
+    static const bool en = []() {
+        const char* env = std::getenv("MDLA7_SOFTMAX_DECOMPOSE");
+        return env && env[0] && env[0] != '0';
+    }();
+    return en;
+}
+
 SC_MODULE(EweEngine) {
     sc_core::sc_fifo_in<DescriptorBody> cfg_in;
     sc_core::sc_fifo_out<uint8_t>       done_tag_out;
@@ -510,6 +530,200 @@ SC_MODULE(EweEngine) {
         l1mgr.write(e.out_addr, out16.data(), elems * sizeof(uint16_t));
     }
 
+    // v13: FP softmax decomposed into POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM
+    // → EWE_DIV. Intermediates live in a 256 KB scratchpad at the top of L1
+    // (EWE_SOFTMAX_SCRATCH_BASE); the math is the same as the monolithic
+    // softmax_fp path, but each phase issues its own L1 R/W so the L1Mesh
+    // report sees real POOL+EWE traffic (mirrors softmax.md §Phase B).
+    // Math is bit-exact against monolithic softmax_fp because both use the
+    // same FP32-internal max/exp/sum/divide order with FP16 round-trips at
+    // intermediate boundaries — verified by stepping through the scalar path.
+    void run_softmax_decomposed_fp(const EweBody& e, uint64_t elems) {
+        const uint64_t rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+        const uint64_t vec  = e.c;
+        const uint64_t lanes = ewe_lanes_for_dtype(last_dtype);
+        const uint64_t pool_lanes = lanes * 2;
+
+        const uint32_t scratch_centered = EWE_SOFTMAX_SCRATCH_BASE;
+        const uint32_t scratch_exp      = scratch_centered + uint32_t(elems * 2);
+        const uint32_t scratch_max      = scratch_exp      + uint32_t(elems * 2);
+        const uint32_t scratch_sum      = scratch_max      + uint32_t(rows  * 2);
+
+        std::vector<uint16_t> in16(elems);
+        l1mgr.read(e.in_a_addr, in16.data(), elems * sizeof(uint16_t));
+
+        // Phase 1 — POOL_MAX: write max[rows] to L1 scratch
+        std::vector<uint16_t> max16(rows);
+        for (uint64_t r = 0; r < rows; ++r) {
+            float mx = -3.4e38f;
+            for (uint64_t k = 0; k < vec; ++k) {
+                const float v = fp16_to_fp32(in16[r * vec + k]);
+                if (v > mx) mx = v;
+            }
+            max16[r] = fp32_to_fp16(mx);
+        }
+        l1mgr.write(scratch_max, max16.data(), rows * sizeof(uint16_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, pool_lanes, 1);  // POOL_MAX cycles
+        else
+            wait((elems + pool_lanes - 1) / pool_lanes, sc_core::SC_NS);
+
+        // Phase 2 — EWE_SUB: centered = in - max[rows] (broadcast over vec)
+        std::vector<uint16_t> centered16(elems);
+        l1mgr.read(scratch_max, max16.data(), rows * sizeof(uint16_t));
+        for (uint64_t r = 0; r < rows; ++r) {
+            const float mx = fp16_to_fp32(max16[r]);
+            for (uint64_t k = 0; k < vec; ++k)
+                centered16[r * vec + k] =
+                    fp32_to_fp16(fp16_to_fp32(in16[r * vec + k]) - mx);
+        }
+        l1mgr.write(scratch_centered, centered16.data(), elems * sizeof(uint16_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_binary(elems, lanes);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+
+        // Phase 3 — EWE_EXP: exp(centered)
+        std::vector<uint16_t> exp16(elems);
+        l1mgr.read(scratch_centered, centered16.data(), elems * sizeof(uint16_t));
+        for (uint64_t i = 0; i < elems; ++i)
+            exp16[i] = fp32_to_fp16(std::exp(fp16_to_fp32(centered16[i])));
+        l1mgr.write(scratch_exp, exp16.data(), elems * sizeof(uint16_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, lanes, 1);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+
+        // Phase 4 — POOL_SUM: sum[rows] = sum(exp over vec)
+        std::vector<uint16_t> sum16(rows);
+        l1mgr.read(scratch_exp, exp16.data(), elems * sizeof(uint16_t));
+        for (uint64_t r = 0; r < rows; ++r) {
+            float s = 0.0f;
+            for (uint64_t k = 0; k < vec; ++k)
+                s += fp16_to_fp32(exp16[r * vec + k]);
+            if (s == 0.0f) s = 1.0f;
+            sum16[r] = fp32_to_fp16(s);
+        }
+        l1mgr.write(scratch_sum, sum16.data(), rows * sizeof(uint16_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, pool_lanes, 1);
+        else
+            wait((elems + pool_lanes - 1) / pool_lanes, sc_core::SC_NS);
+
+        // Phase 5 — EWE_DIV: out = exp / sum[rows] (broadcast)
+        std::vector<uint16_t> out16(elems);
+        l1mgr.read(scratch_exp, exp16.data(), elems * sizeof(uint16_t));
+        l1mgr.read(scratch_sum, sum16.data(), rows * sizeof(uint16_t));
+        for (uint64_t r = 0; r < rows; ++r) {
+            const float s = fp16_to_fp32(sum16[r]);
+            for (uint64_t k = 0; k < vec; ++k)
+                out16[r * vec + k] =
+                    fp32_to_fp16(fp16_to_fp32(exp16[r * vec + k]) / s);
+        }
+        l1mgr.write(e.out_addr, out16.data(), elems * sizeof(uint16_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_binary(elems, lanes);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+    }
+
+    // v13: INT8 softmax decomposed. Same algorithm as softmax_int8 (LUT-based)
+    // but split into 5 phases with explicit L1 R/W per phase. Bit-exact vs the
+    // monolithic LUT implementation because each phase computes a strict
+    // sub-step of the original recipe in identical order.
+    void run_softmax_decomposed_int8(const EweBody& e, uint64_t elems) {
+        const uint64_t rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+        const uint64_t vec  = e.c;
+        const uint64_t lanes = ewe_lanes_for_dtype(last_dtype);
+        const uint64_t pool_lanes = lanes * 2;
+
+        const uint32_t scratch_diff = EWE_SOFTMAX_SCRATCH_BASE;
+        const uint32_t scratch_expq = scratch_diff + uint32_t(elems);
+        const uint32_t scratch_max  = scratch_expq + uint32_t(elems * 4);
+        const uint32_t scratch_sum  = scratch_max  + uint32_t(rows);
+
+        std::vector<int8_t>  in_buf(elems), max_buf(rows), diff_buf(elems), out_buf(elems);
+        std::vector<int32_t> exp_q(elems);
+        std::vector<int64_t> sum_q(rows);
+
+        l1mgr.read(e.in_a_addr, in_buf.data(), elems);
+
+        // Phase 1 — POOL_MAX: scalar max per row
+        for (uint64_t r = 0; r < rows; ++r) {
+            int m = -128;
+            for (uint64_t k = 0; k < vec; ++k)
+                if (in_buf[r * vec + k] > m) m = in_buf[r * vec + k];
+            max_buf[r] = int8_t(m);
+        }
+        l1mgr.write(scratch_max, max_buf.data(), rows);
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, pool_lanes, 1);
+        else
+            wait((elems + pool_lanes - 1) / pool_lanes, sc_core::SC_NS);
+
+        // Phase 2 — EWE_SUB: diff = clamp(max - logits, 0..255)
+        l1mgr.read(scratch_max, max_buf.data(), rows);
+        for (uint64_t r = 0; r < rows; ++r) {
+            const int mx = int(max_buf[r]);
+            for (uint64_t k = 0; k < vec; ++k) {
+                int d = mx - int(in_buf[r * vec + k]);
+                if (d < 0)   d = 0;
+                if (d > 255) d = 255;
+                diff_buf[r * vec + k] = int8_t(d & 0xFF);
+            }
+        }
+        l1mgr.write(scratch_diff, diff_buf.data(), elems);
+        if (is_rtl_style(engine_model))
+            rtl_run_binary(elems, lanes);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+
+        // Phase 3 — EWE_EXP via LUT: exp_q[i] = SOFTMAX_LUT[diff[i]]
+        l1mgr.read(scratch_diff, diff_buf.data(), elems);
+        for (uint64_t i = 0; i < elems; ++i) {
+            const uint8_t idx = static_cast<uint8_t>(diff_buf[i]);
+            exp_q[i] = SOFTMAX_LUT[idx];
+        }
+        l1mgr.write(scratch_expq, exp_q.data(), elems * sizeof(int32_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, lanes, 1);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+
+        // Phase 4 — POOL_SUM (widening): sum_q[r] = Σ exp_q[r*vec..]
+        l1mgr.read(scratch_expq, exp_q.data(), elems * sizeof(int32_t));
+        for (uint64_t r = 0; r < rows; ++r) {
+            int64_t s = 0;
+            for (uint64_t k = 0; k < vec; ++k)
+                s += exp_q[r * vec + k];
+            if (s == 0) s = 1;
+            sum_q[r] = s;
+        }
+        l1mgr.write(scratch_sum, sum_q.data(), rows * sizeof(int64_t));
+        if (is_rtl_style(engine_model))
+            rtl_run_unary(elems, pool_lanes, 1);
+        else
+            wait((elems + pool_lanes - 1) / pool_lanes, sc_core::SC_NS);
+
+        // Phase 5 — EWE_DIV: out = sat_int8((exp_q × 127) / sum_q)
+        l1mgr.read(scratch_expq, exp_q.data(), elems * sizeof(int32_t));
+        l1mgr.read(scratch_sum, sum_q.data(), rows * sizeof(int64_t));
+        for (uint64_t r = 0; r < rows; ++r) {
+            const int64_t s = sum_q[r];
+            for (uint64_t k = 0; k < vec; ++k) {
+                int64_t v = (int64_t(exp_q[r * vec + k]) * 127) / s;
+                if (v > 127) v = 127;
+                if (v < 0)   v = 0;
+                out_buf[r * vec + k] = int8_t(v);
+            }
+        }
+        l1mgr.write(e.out_addr, out_buf.data(), elems);
+        if (is_rtl_style(engine_model))
+            rtl_run_binary(elems, lanes);
+        else
+            wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+    }
+
     void run() {
         while (true) {
             DescriptorBody body = cfg_in.read();
@@ -628,8 +842,31 @@ SC_MODULE(EweEngine) {
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
                 }
             } else {
+                const uint64_t sm_rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+                const uint64_t scratch_fp_needed =
+                    uint64_t(elems) * 2 + sm_rows * 4;
+                const uint64_t scratch_int_needed =
+                    uint64_t(elems) * 5 + sm_rows * 9;   // diff(1) + exp(4) + max(1) + sum(8)
+                const bool decompose = softmax_decompose_enabled() && elems > 0
+                    && (fp ? (scratch_fp_needed <= EWE_SOFTMAX_SCRATCH_BYTES)
+                           : (scratch_int_needed <= EWE_SOFTMAX_SCRATCH_BYTES));
                 std::cout << "[EWE] softmax " << e.h << "x" << e.w << "x" << e.c
-                          << "  dtype=" << (fp ? "fp" : "int") << "\n";
+                          << "  dtype=" << (fp ? "fp" : "int")
+                          << (decompose ? "  [decomposed POOL_MAX→SUB→EXP→POOL_SUM→DIV]" : "")
+                          << "\n";
+                if (decompose) {
+                    if (fp) run_softmax_decomposed_fp(e, elems);
+                    else    run_softmax_decomposed_int8(e, elems);
+                    const sc_core::sc_time t_end_d = sc_core::sc_time_stamp();
+                    busy_time += t_end_d - t_begin;
+                    tasks.emplace_back(uint64_t(t_begin.to_seconds() * 1e9),
+                                       uint64_t(t_end_d  .to_seconds() * 1e9));
+                    rtl_phase_tasks.push_back(is_rtl_style(engine_model)
+                                              ? last_rtl_phases
+                                              : std::vector<RtlPhaseTrace>{});
+                    done_tag_out.write(0);
+                    continue;
+                }
                 if (elems > 0) {
                     const uint64_t softmax_rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
                     const uint64_t softmax_vec = e.c;
