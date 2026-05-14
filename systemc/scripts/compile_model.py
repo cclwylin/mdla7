@@ -137,6 +137,7 @@ OP_LOGISTIC   = 27       # v10: sigmoid unary EWE (EfficientNet swish gate)
 OP_RSQRT      = 28       # 1/sqrt(x) INT8 LUT EWE (LayerNorm/RMSNorm normaliser)
 OP_TANH       = 29       # tanh(x)   INT8 LUT EWE (RNN/transformer activation)
 OP_FC_BMM     = 30       # BATCH_MATMUL lowered to 1x1 CONV; same engine as OP_FC
+OP_SHAPE      = 31       # TFLite SHAPE: compile-time constant shape vector
 
 # dtype enum — must mirror DType in include/mdla7/descriptor.h
 DT_INT8x4   = 0
@@ -175,7 +176,8 @@ OP_NAME = {OP_CONV:"   conv", OP_DWCONV:" dwconv",
            OP_LOGISTIC:  "logist",
            OP_RSQRT:     " rsqrt",
            OP_TANH:      "  tanh",
-           OP_FC_BMM:    "fc(bmm)"}
+           OP_FC_BMM:    "fc(bmm)",
+           OP_SHAPE:     "  shape"}
 
 
 def _load_interpreter(path: str):
@@ -274,11 +276,12 @@ MATERIALIZED_FALLBACK_OPS = frozenset((
     "SQUARED_DIFFERENCE", "SUM", "BATCH_MATMUL",
     "RESIZE_BILINEAR", "RESIZE_NEAREST_NEIGHBOR",
     "TRANSPOSE_CONV",
-    # v11: qwen35 graph helpers. SHAPE returns the producer tensor's static
-    # shape vector; REVERSE_V2 flips along given axes; RANDOM_STANDARD_NORMAL
-    # is materialized deterministically from a fixed seed so reference bytes
-    # are reproducible across compile runs.
-    "SHAPE", "REVERSE_V2", "RANDOM_STANDARD_NORMAL",
+    # v11: qwen35 graph helpers. REVERSE_V2 flips along given axes;
+    # RANDOM_STANDARD_NORMAL is materialized deterministically from a fixed
+    # seed so reference bytes are reproducible across compile runs.
+    # NOTE: SHAPE is no longer a fallback — it is lowered to OK_SHAPE (L1
+    # constant-load) and handled before this block.
+    "REVERSE_V2", "RANDOM_STANDARD_NORMAL",
 ))
 
 # FP variants of these ops have native EWE/unary support below. Quantized/int
@@ -1608,6 +1611,75 @@ def main():
                     # list was partially mutated — just skip cleanly.
                     last_output_arr = None
                     continue
+
+        # ---- v12 SHAPE → OK_SHAPE constant-load lowering ----------------------
+        # TFLite SHAPE returns the static dimensions of its input tensor as a
+        # 1-D INT32 tensor.  For fixed-topology ArcSim the dims are compile-time
+        # constants.  Lower to OK_SHAPE: store INT32 bytes in the wgt area and
+        # emit a single UDMA load — no DRAM write-back needed.
+        if opname == "SHAPE":
+            src_t = sg.Tensors(int(op.Inputs(0)))
+            src_shape = [int(src_t.Shape(k)) for k in range(src_t.ShapeLength())]
+            rank = len(src_shape)
+            shape_bytes = np.asarray(src_shape, dtype=np.int32).tobytes()
+            in_b   = b""                  # no activation input at runtime
+            wgt_b  = shape_bytes          # constant payload (loaded by UDMA)
+            ref_b  = shape_bytes          # expected L1 content = same bytes
+            _OH, _OW, _OC = 1, 1, rank   # display shape: 1x1xrank
+            _H,  _W,  _Cin = 1, 1, rank
+            _op_kind    = OP_SHAPE
+            _layer_dtype = DT_INT8x8     # raw bytes, displayed as INT8
+            print(f"  layer {li:>2d}  {OP_NAME[OP_SHAPE]}  "
+                  f"in={_H}x{_W}x{_Cin}  k=1x1  s=1x1  g=1  "
+                  f"out={_OH}x{_OW}x{_OC}  ({rank} INT32 = {len(shape_bytes)} B)  ready")
+            _in_off_shape  = in_off
+            _wgt_off_shape = wgt_off
+            _ref_off_shape = ref_off
+            # SHAPE has no activation input — in_b is empty, no alias check needed.
+            budget_error_shape = _program_budget_error(0, len(wgt_b), len(ref_b))
+            if budget_error_shape:
+                print(f"  layer {li:>2d}  {OP_NAME[OP_SHAPE]}  skipped ({budget_error_shape})")
+                last_output_arr = None
+                continue
+            _output_tensor = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
+            layers.append(dict(
+                in_h=_H, in_w=_W, in_c=_Cin,
+                out_h=_OH, out_w=_OW, out_c=_OC,
+                k_h=1, k_w=1, s_h=1, s_w=1,
+                p_t=0, p_b=0, p_l=0, p_r=0,
+                dram_in=DRAM_IN  + cur_i,
+                dram_wgt=DRAM_WGT + cur_w,
+                dram_out=DRAM_OUT + cur_o,
+                in_size=0,
+                wgt_size=len(wgt_b),
+                ref_size=len(ref_b),
+                in_off=_in_off_shape,
+                wgt_off=_wgt_off_shape,
+                ref_off=_ref_off_shape,
+                in_alias_layer=-1,
+                group=1,
+                op_kind=_op_kind,
+                dtype=_layer_dtype,
+                zp_in_eff=0,
+                orig_op_index=orig_op_index,
+                input0_tensor=int(op.Inputs(0)),
+                input1_tensor=-1,
+                output_tensor=_output_tensor,
+            ))
+            op_to_compiled[orig_op_index] = len(layers) - 1
+            cur_w  += len(wgt_b)
+            cur_o  += len(ref_b)
+            wgt_off += len(wgt_b)
+            ref_off += len(ref_b)
+            # no in_blob — SHAPE has no activation input
+            wgt_blobs.append(wgt_b)
+            ref_blobs.append(ref_b)
+            _shape_arr = np.frombuffer(shape_bytes, dtype=np.int32).reshape(1, 1, rank)
+            if _output_tensor >= 0:
+                tensor_values[_output_tensor] = _shape_arr.copy()
+            last_output_arr = _shape_arr
+            last_output_tensor = _output_tensor
+            continue   # skip materialize path
 
         if materialize_op:
             # Tranche-1 materialized support. These ops become explicit

@@ -913,6 +913,7 @@ def _write_html_report(model: Path, paths: dict[str, Path],
         "h_swsh": "ewe", "relu": "ewe", "gelu": "ewe", "softmax": "ewe",
         "logist": "ewe", "rsqrt": "ewe", "tanh": "ewe",
         "avgpool": "pool", "maxpool": "pool", "mean": "pool",
+        "shape": "—",   # constant fill, no engine — wgt UDMA load only
     }
     for _tnps_op in TNPS_OPS:
         _OP_TO_ENGINE[_tnps_op] = "tnps"

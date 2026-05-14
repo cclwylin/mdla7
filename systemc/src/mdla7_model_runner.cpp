@@ -1764,11 +1764,11 @@ int sc_main(int argc, char* argv[]) {
     }
 
     for (uint32_t k = 0; k < N; ++k) {
-        if (metas[k].op_kind == OK_MATERIALIZE) {
-            // MATERIALIZE is an explicit compiler fallback/reference boundary,
-            // not a transparent metadata view.  Suppressing its store can
-            // replace the fallback bytes with an unrelated streamed producer
-            // tensor and hide the actual supported-but-not-native op.
+        if (metas[k].op_kind == OK_MATERIALIZE ||
+            metas[k].op_kind == OK_SHAPE) {
+            // MATERIALIZE / SHAPE are explicit compiler boundaries, not
+            // transparent metadata views.  Suppressing their store can replace
+            // the reference/constant bytes with an unrelated streamed tensor.
             producer_no_store[k] = false;
         }
     }
@@ -10748,6 +10748,41 @@ int sc_main(int argc, char* argv[]) {
             fuse_prev_l1_out_addr   = 0;
             fuse_prev_l1_out_size   = 0;
             fuse_prev_single_tile   = false;
+            fuse_prev_is_conv_class = false;
+            clear_prev_binary_ewe_live();
+            chain_alt = 0;
+            break;
+        }
+        case OK_SHAPE: {
+            flush_pending();
+            // Constant fill: shape INT32 bytes live in the program's wgt area.
+            // UDMA-load from wgt into L1, then stage to dram_out for verification.
+            if (producer_no_store[i]) {
+                udma_w_skipped[i]  = true;
+                udma_w_streamed[i] = true;
+                layer_done_tag[i] = (i > 0) ? layer_done_tag[i - 1] : 0;
+                fuse_prev_l1_out_addr   = 0;
+                fuse_prev_l1_out_size   = 0;
+                fuse_prev_single_tile   = false;
+                fuse_prev_is_conv_class = false;
+                clear_prev_binary_ewe_live();
+                chain_alt = 0;
+                break;
+            }
+            // Stage constant bytes: wgt area → DRAM, then UDMA-load into L1.
+            // Write dram_out so the verifier can compare the reference bytes.
+            sys.dram.write(L.dram_wgt, file.data() + L.wgt_off, L.wgt_size);
+            sys.dram.write(L.dram_out, file.data() + L.wgt_off, L.wgt_size);
+            const uint8_t load_tag = alloc_tag();
+            const uint32_t l1_dst  = uint32_t(L.dram_out % L1_BUDGET);
+            program.push_back(make_udma(L.dram_wgt, l1_dst, L.wgt_size,
+                                        /*dir=load=*/0, load_tag, 0));
+            acc[i].dram_r += L.wgt_size;
+            acc[i].sram_w += L.wgt_size;
+            layer_done_tag[i] = load_tag;
+            fuse_prev_l1_out_addr   = l1_dst;
+            fuse_prev_l1_out_size   = L.wgt_size;
+            fuse_prev_single_tile   = true;
             fuse_prev_is_conv_class = false;
             clear_prev_binary_ewe_live();
             chain_alt = 0;

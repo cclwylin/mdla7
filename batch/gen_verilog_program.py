@@ -42,6 +42,7 @@ OK_CONCAT = 8
 OK_GATHER = 9
 OK_D2SPACE = 14
 OK_MATERIALIZE = 15
+OK_SHAPE = 31       # TFLite SHAPE: compile-time constant shape vector
 OK_TRANSPOSE = 16
 OK_S2SPACE = 17
 OK_SQUEEZE = 18
@@ -74,7 +75,7 @@ TNPS_OPS = {
     OK_TILE,
     OK_SPLIT,
 }
-UDMA_OPS = {OK_GATHER, OK_MATERIALIZE}
+UDMA_OPS = {OK_GATHER, OK_MATERIALIZE, OK_SHAPE}
 # v11: INT8 RSQRT/TANH/LOGISTIC ride the generic ref-CRC path until the
 # RTL EWE engine grows its 256-byte LUT lookup. compile_model has already
 # pre-evaluated the LUT in the .bin reference bytes, so byte-CRC against

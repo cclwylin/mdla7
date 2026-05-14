@@ -87,6 +87,7 @@ enum OpKindEnum : uint16_t {
     OK_RSQRT       = 28,    // 1/sqrt(x), INT8 LUT-based EWE unary
     OK_TANH        = 29,    // tanh(x), INT8 LUT-based EWE unary
     OK_FC_BMM      = 30,    // BATCH_MATMUL lowered to 1x1 CONV; same engine as OK_FC
+    OK_SHAPE       = 31,    // TFLite SHAPE: compile-time constant shape vector (UDMA load)
 };
 
 inline const char* op_name(uint16_t k) {
@@ -122,6 +123,7 @@ inline const char* op_name(uint16_t k) {
         case OK_RSQRT:      return " rsqrt";
         case OK_TANH:       return "  tanh";
         case OK_FC_BMM:     return "fc(bmm)";
+        case OK_SHAPE:      return "  shape";
     }
     return "??unknown";
 }
