@@ -1470,10 +1470,21 @@ def main():
                         _act_sl = _a_sl.reshape(_M_bmm, 1, _K_bmm)
                         # Reference output [M, 1, N]
                         if _is_fp_bmm:
-                            _a_f32 = _a_sl.astype(np.float32)
-                            _b_f32 = _b_sl.astype(np.float32)
-                            _ref_f32 = np.matmul(_a_f32, _b_f32)   # [M, N]
-                            _ref_sl  = _ref_f32.astype(np.float16).reshape(_M_bmm, 1, _N_bmm)
+                            # Use conv_fp_ref — same FP16→FP32 cast + sequential
+                            # per-element FP32 accumulation as conv_engine.h
+                            # compute_fp(). Bit-exact with the sim for any N.
+                            # _b_sl shape [K, N]: transpose to [N, K] then
+                            # reshape to OHWI [N,1,1,K] matching _wgt_sl.
+                            _act_ref = _a_sl.astype(np.float16).astype(np.float32).reshape(_M_bmm, 1, _K_bmm)
+                            _wgt_ref = _b_sl.T.astype(np.float16).astype(np.float32).reshape(_N_bmm, 1, 1, _K_bmm)
+                            _bias_ref = np.zeros(_N_bmm, dtype=np.float32)
+                            _ref_f32 = conv_fp_ref(
+                                _act_ref, _wgt_ref,
+                                s_h=1, s_w=1, pad=(0, 0, 0, 0), group=1,
+                                bias=_bias_ref,
+                                act_min=float(-3.4e38), act_max=float(3.4e38),
+                            )   # [M, 1, N] float32
+                            _ref_sl = _ref_f32.astype(np.float16).reshape(_M_bmm, 1, _N_bmm)
                         else:
                             # v12 Phase 7: INT8 with full ZP correction.
                             # true_acc = Σ(a_q*b_q) - zp_A*Σb_q[n] - zp_B*Σa_q[m] + K*zp_A*zp_B
