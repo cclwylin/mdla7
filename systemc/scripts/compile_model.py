@@ -688,9 +688,10 @@ def softmax_int8_ref(logits_i8):
 def softmax_int8_decomp_ref(logits_i8, zp_in, zp_out=-128):
     """v13: INT8 softmax via the descriptor-level decomposition chain
     (ES_DEQUANT_INT8 → POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV →
-    ES_QUANT_FP_INT8). Must match EweEngine + PoolEngine FP paths byte-for-byte
-    when MDLA7_DECOMPOSE_SOFTMAX=1. FP16 storage between every sub-op; FP32
-    internal compute via libm expf (matches softmax_fp_ref).
+    ES_QUANT_FP_INT8). Must match EweEngine + PoolEngine FP paths when
+    MDLA7_DECOMPOSE_SOFTMAX=1. FP16 storage between every sub-op; FP32
+    internal compute. EXP uses libm `expf` (via ctypes) for bit-parity with
+    C++ `std::exp(float)` — same pattern as softmax_fp_ref.
 
     NOT bit-equal to softmax_int8_ref (the LUT path); selected only when the
     runner emits the decomp chain. TFLite softmax output convention: zp=-128,
@@ -699,45 +700,38 @@ def softmax_int8_decomp_ref(logits_i8, zp_in, zp_out=-128):
     expf = _libm_expf()
     flat = logits_i8.reshape(-1, logits_i8.shape[-1])
     rows, K = flat.shape
-    # Phase 1 dequant — INT8 -> FP16 (FP32 subtract → FP16 cast).
-    dq16 = np.empty((rows, K), dtype=np.float16)
-    for r in range(rows):
-        for k in range(K):
-            dq16[r, k] = np.float16(np.float32(int(flat[r, k]) - int(zp_in)))
-    out_i8 = np.empty((rows, K), dtype=np.int8)
+    # Phase 1 dequant — INT8 -> FP16 (vectorised: int32 subtract -> fp32 -> fp16).
+    dq16 = (flat.astype(np.int32) - int(zp_in)).astype(np.float32).astype(np.float16)
+    out_i8 = np.empty_like(flat)
     for r in range(rows):
         row32 = dq16[r].astype(np.float32)
         # Phase 2 POOL_MAX (FP16 storage, FP32 compute).
-        mx16 = np.float16(np.float32(row32.max()))
+        mx16 = np.float16(row32.max())
         mx32 = np.float32(mx16)
-        # Phase 3 EWE_SUB (broadcast row max).
-        ctr16 = np.empty(K, dtype=np.float16)
-        for k in range(K):
-            ctr16[k] = np.float16(np.float32(row32[k]) - mx32)
-        # Phase 4 EWE_EXP (libm expf for bit-parity with std::exp).
-        exp16 = np.empty(K, dtype=np.float16)
-        for k in range(K):
-            x32 = np.float32(ctr16[k])
-            y32 = np.float32(expf(float(x32))) if expf else np.float32(np.exp(x32))
-            exp16[k] = np.float16(y32)
-        # Phase 5 POOL_SUM (sequential FP32 running add, FP16 cast at end).
+        # Phase 3 EWE_SUB (broadcast row max, vector op).
+        ctr16 = (row32 - mx32).astype(np.float16)
+        ctr32 = ctr16.astype(np.float32)
+        # Phase 4 EWE_EXP — libm expf if loadable for bit-parity with std::exp.
+        if expf:
+            exp32 = np.empty(K, dtype=np.float32)
+            for k in range(K):
+                exp32[k] = expf(float(ctr32[k]))
+        else:
+            exp32 = np.exp(ctr32).astype(np.float32)
+        exp16 = exp32.astype(np.float16)
+        # Phase 5 POOL_SUM (sequential FP32 running add — engine adds kw=0..K-1
+        # in order so reduction order matters for bit-parity).
         s32 = np.float32(0.0)
-        for k in range(K):
-            s32 = np.float32(s32 + np.float32(exp16[k]))
+        for v in exp16:
+            s32 = np.float32(s32 + np.float32(v))
         if s32 == np.float32(0.0):
             s32 = np.float32(1.0)
-        sum16 = np.float16(s32)
-        sum32 = np.float32(sum16)
-        # Phase 6 EWE_DIV (broadcast row sum).
-        div16 = np.empty(K, dtype=np.float16)
-        for k in range(K):
-            div16[k] = np.float16(np.float32(exp16[k]) / sum32)
-        # Phase 7 ES_QUANT_FP_INT8 (round to nearest even per std::lrintf).
-        for k in range(K):
-            q = int(np.rint(np.float32(div16[k]) * np.float32(256.0))) + int(zp_out)
-            if q < -128: q = -128
-            if q >  127: q =  127
-            out_i8[r, k] = np.int8(q)
+        sum32 = np.float32(np.float16(s32))
+        # Phase 6 EWE_DIV (broadcast row sum, vector op).
+        div16 = (exp16.astype(np.float32) / sum32).astype(np.float16)
+        # Phase 7 ES_QUANT_FP_INT8 (round to nearest even via np.rint).
+        q = np.rint(div16.astype(np.float32) * np.float32(256.0)).astype(np.int32) + int(zp_out)
+        out_i8[r] = np.clip(q, -128, 127).astype(np.int8)
     return out_i8.reshape(logits_i8.shape)
 
 
