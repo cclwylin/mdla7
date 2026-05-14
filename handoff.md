@@ -149,3 +149,53 @@ git checkout model/BMM/
 ```
 
 **注意**：4T_OFFICE 是 exFAT 外接硬碟，新生成的 .tflite 檔案可能在 unmount 後遺失（未 git commit）。建議重要檔案立即 commit 或確認 flush。
+
+---
+
+## Session 3 추가 작업（2026-05-14）
+
+### Phase 6d：OH spatial tile loop（`9768589`）
+
+**RTL 새로 추가된 포트 (conv.v):**
+- `conv_tile_oh_count[15:0]` ← word[9][23:8]
+- `act_tile_row_stride[21:0]` ← word[11][21:0]
+- `conv_spatial_tile_enable` ← word[3][18] ← **필수 enable flag**
+
+**Backward-compat 설계:**
+- word[3][18] = `CONV_SPATIAL_TILE_EN` 이 0이면 OW/OH loop 모두 비활성화
+- 기존 CONV descriptor의 word[8..11]은 WGT data → 오염된 tile count 방지
+- enable flag를 set하지 않은 기존 hex 프로그램 전부 그대로 동작
+
+**State machine:**
+```
+ST_STORE:
+  if tile_oc_remaining > 1  → OC 루프 (기존)
+  elif tile_ow_remaining > 1 → OW 루프 (Phase 6c)
+  elif tile_oh_remaining > 1 → OH 루프 (Phase 6d 신규)
+  else → ST_DONE
+```
+
+**Generator:**
+- `CONV_SPATIAL_TILE_EN = 1 << 18` 상수
+- `closed_loop_conv_requant_oh_ow_tile_probe(tile_oh=2, tile_ow=2)`：
+  - 4 ACT UDMA + 1 WGT UDMA + CONV(OH=2,OW=2) + REQUANT(drain=4) + L1CRC(4B)
+  - desc[3]에 CONV_SPATIAL_TILE_EN 반드시 set
+- OW probe도 desc[9]=0, desc[11]=0 으로 OH count 오염 방지
+
+**Regression:** 12/12 Verilog DPI PASS（backward compat 확인）
+
+### Descriptor bit 갱신
+
+| 필드 | word | bits | 비고 |
+|---|---|---|---|
+| `conv_spatial_tile_enable` | [3] | [18] | 1이어야 OW/OH 루프 활성화 |
+| `conv_tile_ow_count` | [8] | [31:16] | tile_ow iterations |
+| `conv_tile_oh_count` | [9] | [23:8] | tile_oh iterations |
+| `act_tile_col_stride` | [10] | [21:0] | L1 bytes per OW step |
+| `act_tile_row_stride` | [11] | [21:0] | L1 bytes per OH step |
+
+### Next session 권장 작업 갱신
+
+1. **compile_model.py OH/OW 연동**: 실제 conv layer를 OH×OW tile descriptor로 lower하는 코드 추가 (현재는 probe만 존재, compiler는 미구현)
+2. **DRAM multi-beat**: vf_dram_model burst 지원 (Phase 6 tile engine weight load)
+3. **Producer INT8 BMM**: sum_b dynamic correction driver-side
