@@ -108,12 +108,27 @@ diffing the per-engine task counts:
 | cx-monolithic | 186,545 | 364 |  8 | 0   |  0 |
 | cx-decomposed | 187,574 | 890 | 31 | 304 | 16 |
 
-Task-count delta matches the predicted `rows × 5` chain: every row adds
-1 POOL_MAX + 1 EWE_SUB + 1 EWE_EXP + 1 POOL_SUM + 1 EWE_DIV. POOL goes
-from 0 → `rows × 2` tasks (it had no work in the monolithic path);
-EWE picks up the remaining `rows × 3` on top of its baseline traffic.
+`bmm_softmax_bmm_int8` (rows = 16, K = 8, **INT8** with dequant/requant wrap):
+
+| Mode | Total cyc | EWE busy | EWE tasks | POOL busy | POOL tasks |
+|------|----------:|---------:|----------:|----------:|-----------:|
+| cx-monolithic |   676 |   48 |  2 |   0 |  0 |
+| cx-decomposed | 3,298 | 1,764 | 81 | 829 | 32 |
+
+For the INT8 case every row emits 7 sub-descriptors — DEQUANT_INT8,
+POOL_MAX, EWE_SUB, EWE_EXP, POOL_SUM, EWE_DIV, QUANT_FP_INT8 — so EWE
+jumps from 2 → `1 + 16 × 5 = 81` tasks (baseline MUL plus DEQUANT +
+SUB + EXP + DIV + QUANT per row) and POOL goes from 0 → `16 × 2 = 32`.
+
+Task-count delta matches the predicted chain. POOL goes from 0 →
+`rows × 2` tasks (it had no work in the monolithic path); EWE picks up
+the remaining `rows × 3` (or `rows × 5` on INT8) on top of its baseline
+traffic.
 
 Functional regression: BMM `fast` and `cx` both clean 9/13 with the
 flag on, matching the pre-decomp baseline. The 4 pre-existing fails
-(bmm_softmax_bmm_2.5ms_1g_int8 — INT8 so not exercised by this flag —
-and three qwen35 fp16 compile-skips) are unaffected.
+(bmm_softmax_bmm_2.5ms_1g_int8 and three qwen35 fp16 compile-skips)
+are unchanged. INT8 softmax outputs no longer come from the LUT path
+when the flag is on, but the downstream BMM₂ still matches its
+reference for every model with an INT8 softmax layer that previously
+passed.

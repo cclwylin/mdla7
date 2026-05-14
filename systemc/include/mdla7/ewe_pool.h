@@ -814,6 +814,57 @@ SC_MODULE(EweEngine) {
                     rtl_run_binary(elems, lanes);
                 else
                     wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+            } else if (e.subtype == ES_DEQUANT_INT8) {
+                // v13: softmax INT8 decomp entry — cast INT8 -> FP16. Output
+                // is fp = float(int8 - scalar_imm). The input quant scale is
+                // intentionally dropped because softmax is shift-and-scale
+                // invariant; the matching ES_QUANT_FP_INT8 at the chain tail
+                // re-quantises the probabilities into the canonical TFLite
+                // softmax INT8 layout (scale=1/256, zp=-128).
+                std::cout << "[EWE] dequant " << e.h << "x" << e.w << "x" << e.c
+                          << "  zp=" << int(e.scalar_imm) << "\n";
+                if (elems > 0) {
+                    const int32_t zp = int32_t(e.scalar_imm);
+                    std::vector<int8_t>   in_buf(elems);
+                    std::vector<uint16_t> out16(elems);
+                    l1mgr.read(e.in_a_addr, in_buf.data(), elems);
+                    for (uint64_t i = 0; i < elems; ++i)
+                        out16[i] = fp32_to_fp16(float(int32_t(in_buf[i]) - zp));
+                    l1mgr.write(e.out_addr, out16.data(), elems * sizeof(uint16_t));
+                }
+                if (is_synth_style(engine_model))
+                    synth_run_unary(elems, lanes, 1);
+                else if (is_rtl_style(engine_model))
+                    rtl_run_unary(elems, lanes, 1);
+                else
+                    wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
+            } else if (e.subtype == ES_QUANT_FP_INT8) {
+                // v13: softmax INT8 decomp exit — cast FP16 -> INT8 using
+                // TFLite softmax convention (scale = 1/256, zp = scalar_imm).
+                // i.e. out = clamp(round(in * 256) + zp, -128, 127). Matches
+                // softmax_int8_ref's final mapping byte-for-byte.
+                std::cout << "[EWE] quant   " << e.h << "x" << e.w << "x" << e.c
+                          << "  zp=" << int(e.scalar_imm) << "\n";
+                if (elems > 0) {
+                    const int32_t zp = int32_t(e.scalar_imm);
+                    std::vector<uint16_t> in16(elems);
+                    std::vector<int8_t>   out_buf(elems);
+                    l1mgr.read(e.in_a_addr, in16.data(), elems * sizeof(uint16_t));
+                    for (uint64_t i = 0; i < elems; ++i) {
+                        const float v = fp16_to_fp32(in16[i]) * 256.0f;
+                        int32_t q = int32_t(std::lrintf(v)) + zp;
+                        if (q < -128) q = -128;
+                        if (q >  127) q =  127;
+                        out_buf[i] = int8_t(q);
+                    }
+                    l1mgr.write(e.out_addr, out_buf.data(), elems);
+                }
+                if (is_synth_style(engine_model))
+                    synth_run_unary(elems, lanes, 1);
+                else if (is_rtl_style(engine_model))
+                    rtl_run_unary(elems, lanes, 1);
+                else
+                    wait((elems + lanes - 1) / lanes, sc_core::SC_NS);
             } else if (e.subtype == ES_HARD_SWISH ||
                        e.subtype == ES_GELU ||
                        e.subtype == ES_LOGISTIC ||

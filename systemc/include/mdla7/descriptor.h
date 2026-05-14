@@ -127,6 +127,8 @@ enum EweSubtype : uint8_t {
     ES_TANH       = 8,    // unary: tanh(x), INT8 LUT-based
     ES_EXP        = 9,    // v13: unary exp(x), INT8 LUT-based / FP analytical
     ES_DIV        = 10,   // v13: binary a/b, broadcast over last axis; FP-only
+    ES_DEQUANT_INT8 = 11, // v13: cast INT8 -> FP16, (in - scalar_imm) (softmax decomp)
+    ES_QUANT_FP_INT8 = 12,// v13: cast FP16 -> INT8, round(in * 256) + scalar_imm clamped
 };
 
 // Descriptor flags.

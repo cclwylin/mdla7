@@ -349,6 +349,44 @@ Descriptor make_ewe_exp(const LayerMeta& L, uint32_t in_addr, uint32_t out_addr,
     return d;
 }
 
+// v13: INT8 softmax decomp entry/exit casts. Dequant reads INT8, writes FP16
+// (input dtype byte = DT_INT8x8 so EweEngine picks the int path; subtype
+// distinguishes dequant from regular int ops). Quant inverts that: reads FP16,
+// writes INT8. zp is stored inline in EweBody.scalar_imm.
+Descriptor make_ewe_dequant_int8(uint32_t in_addr, uint32_t out_addr,
+                                 uint32_t rows, uint32_t K, int16_t zp_in,
+                                 uint8_t wait_a, uint8_t signal_tag) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_EWE;
+    d.hdr.dtype = DT_INT8x8;
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& e = d.body.ewe;
+    e.in_a_addr = in_addr;  e.in_b_addr = 0;  e.out_addr = out_addr;
+    e.n = 1;  e.h = uint16_t(rows);  e.w = 1;  e.c = uint16_t(K);
+    e.scalar_imm = zp_in;
+    e.subtype = ES_DEQUANT_INT8;
+    return d;
+}
+
+Descriptor make_ewe_quant_to_int8(uint32_t in_addr, uint32_t out_addr,
+                                  uint32_t rows, uint32_t K, int16_t zp_out,
+                                  uint8_t wait_a, uint8_t signal_tag) {
+    Descriptor d{};
+    d.hdr.op_class_subtype = OC_EWE;
+    d.hdr.dtype = DT_INT8x8;
+    d.hdr.signal_tag = signal_tag;
+    d.hdr.wait_count = wait_a ? 1 : 0;
+    d.hdr.wait_tags[0] = wait_a;
+    auto& e = d.body.ewe;
+    e.in_a_addr = in_addr;  e.in_b_addr = 0;  e.out_addr = out_addr;
+    e.n = 1;  e.h = uint16_t(rows);  e.w = 1;  e.c = uint16_t(K);
+    e.scalar_imm = zp_out;
+    e.subtype = ES_QUANT_FP_INT8;
+    return d;
+}
+
 Descriptor make_ewe_add(const LayerMeta& L,
                         uint32_t in_a_addr, uint32_t in_b_addr,
                         uint32_t out_addr,  uint32_t params_addr,
@@ -5241,6 +5279,15 @@ int sc_main(int argc, char* argv[]) {
                 return false;
             const auto& B = metas[i];
             const auto& S = metas[i + 1];
+            // v13: when softmax decomposition is enabled the OK_SOFTMAX
+            // dispatch needs to see the softmax layer to emit the 5-op chain
+            // (POOL_MAX → SUB → EXP → POOL_SUM → DIV, bracketed by
+            // DEQUANT/QUANT casts on INT8 inputs). This streamed pre-pass
+            // would otherwise swallow the layer pair and emit a single
+            // monolithic ES_SOFTMAX. The binary op preceding the softmax
+            // still flows through its own (non-streamed) dispatch.
+            if (std::getenv("MDLA7_DECOMPOSE_SOFTMAX") != nullptr)
+                return false;
             if (!producer_no_store[i])
                 return false;
             if (B.dtype != DT_INT8x8 || S.dtype != B.dtype)
@@ -9460,53 +9507,77 @@ int sc_main(int argc, char* argv[]) {
                     layer_done_tag[i] = st_tag;
                 }
             } else if (std::getenv("MDLA7_DECOMPOSE_SOFTMAX") != nullptr
-                       && L.dtype == DT_FP16
+                       && (L.dtype == DT_FP16
+                           || L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8)
                        && [&]() {
                            // L1 fit check (matches the allocation below).
-                           const uint32_t vec_b = uint32_t(vec_bytes);
-                           const uint32_t es   = elem_size;
+                           const bool is_int8 =
+                               (L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8);
+                           const uint32_t K_     = uint32_t(vec_elems);
+                           const uint32_t vec_b  = uint32_t(vec_bytes);
+                           const uint32_t fp_vec_b = K_ * 2u;
+                           const uint32_t fp_es  = 2u;
                            const uint64_t in_top = fuse_eligible
                                ? align64(uint32_t(L1_IN + L.in_size))
                                : align64(vec_b);
                            uint64_t cur = align64(uint32_t(in_top + L.ref_size));
-                           cur = align64(uint32_t(cur + vec_b));      // ctr
-                           cur = align64(uint32_t(cur + vec_b));      // exp
-                           cur = align64(uint32_t(cur + es));         // max scalar
-                           cur = align64(uint32_t(cur + es));         // sum scalar
+                           cur = align64(uint32_t(cur + fp_vec_b)); // ctr
+                           cur = align64(uint32_t(cur + fp_vec_b)); // exp
+                           cur = align64(uint32_t(cur + fp_es));    // max scalar
+                           cur = align64(uint32_t(cur + fp_es));    // sum scalar
+                           if (is_int8) {
+                               cur = align64(uint32_t(cur + fp_vec_b)); // fp_in
+                               cur = align64(uint32_t(cur + fp_vec_b)); // fp_out
+                           }
                            return cur <= L1_BUDGET;
                        }()) {
                 // v13: rows>1 decomposed softmax — per-row 5-op chain
-                // (POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV).
-                // Per-row output addresses so the udma_w of row r cannot race
-                // with row r+1's EWE_DIV overwriting a shared scratch. INT8
-                // still takes the monolithic dispatch. See softmax.md Stage C.
+                // (POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV) on FP16
+                // intermediates. For INT8 inputs the chain is bracketed by an
+                // ES_DEQUANT_INT8 (in-zp -> FP16) on entry and an
+                // ES_QUANT_FP_INT8 (round(fp*256) + zp_out clamp) on exit, so
+                // each layer's L1 sees 7 sub-descriptors per row. See
+                // softmax.md Stage C.
+                const bool is_int8 =
+                    (L.dtype == DT_INT8x4 || L.dtype == DT_INT8x8);
                 const uint32_t K     = uint32_t(vec_elems);
                 const uint32_t row1  = 1;
-                const uint32_t es    = elem_size;
-                const uint32_t vec_b = uint32_t(vec_bytes);
+                const uint32_t fp_es = 2u;                  // FP16 scratch elem
+                const uint32_t vec_b = uint32_t(vec_bytes); // input row size (native dtype)
+                const uint32_t fp_vec_b = K * fp_es;        // FP16 row scratch size
                 const uint32_t in_size  = uint32_t(L.in_size);
                 const uint32_t ref_size = uint32_t(L.ref_size);
-                // L1 layout:
+                // L1 layout (FP16 path):
                 //   fused: input stays at producer's L1_IN..L1_IN+in_size.
                 //   non-fused: input is a single-row scratch at addr 0,
                 //              re-loaded per row from DRAM.
                 //   output: rows*vec_bytes stacked above the input region.
-                //   temps: ctr/exp (vec_b each), max/sum (es scalar each).
+                //   temps: ctr/exp (fp_vec_b each), max/sum (fp_es scalar each).
+                //   INT8 only: extra fp_in / fp_out single-row FP16 scratches
+                //              that the chain reads/writes.
                 const uint32_t addr_in_base = fuse_eligible ? L1_IN : 0u;
                 const uint32_t addr_in_top  = fuse_eligible
                                             ? align64(addr_in_base + in_size)
                                             : align64(addr_in_base + vec_b);
                 const uint32_t addr_out_base = addr_in_top;
                 uint32_t scratch = align64(addr_out_base + ref_size);
-                const uint32_t addr_ctr = scratch;  scratch = align64(scratch + vec_b);
-                const uint32_t addr_exp = scratch;  scratch = align64(scratch + vec_b);
-                const uint32_t addr_max = scratch;  scratch = align64(scratch + es);
-                const uint32_t addr_sum = scratch;  scratch = align64(scratch + es);
+                const uint32_t addr_ctr = scratch;  scratch = align64(scratch + fp_vec_b);
+                const uint32_t addr_exp = scratch;  scratch = align64(scratch + fp_vec_b);
+                const uint32_t addr_max = scratch;  scratch = align64(scratch + fp_es);
+                const uint32_t addr_sum = scratch;  scratch = align64(scratch + fp_es);
+                const uint32_t addr_fp_in  = is_int8 ? scratch : 0u;
+                if (is_int8) scratch = align64(scratch + fp_vec_b);
+                const uint32_t addr_fp_out = is_int8 ? scratch : 0u;
+                if (is_int8) scratch = align64(scratch + fp_vec_b);
                 (void)scratch;
                 tiles_h_per_layer[i] = uint16_t(std::min<uint64_t>(rows, 65535));
                 LayerMeta row_L = L;
+                row_L.dtype = DT_FP16;                      // chain runs on FP16 scratches
                 row_L.in_h  = 1; row_L.in_w  = 1;
                 row_L.out_h = 1; row_L.out_w = 1;
+                const int16_t zp_in_int8 = is_int8 ? int16_t(L.zp_in_eff) : int16_t(0);
+                // TFLite softmax convention: output scale = 1/256, zp = -128.
+                const int16_t zp_out_int8 = -128;
                 uint8_t prev_req_tag = 0;
                 for (uint64_t row = 0; row < rows; ++row) {
                     const uint64_t off = row * vec_bytes;
@@ -9523,19 +9594,21 @@ int sc_main(int argc, char* argv[]) {
                     mb.elems = uint32_t(vec_elems);
                     mb.bytes = vec_b;
                     const uint8_t in_tag  = alloc_tag();
+                    const uint8_t t_dq    = is_int8 ? alloc_tag() : uint8_t(0);
                     const uint8_t t_max   = alloc_tag();
                     const uint8_t t_sub   = alloc_tag();
                     const uint8_t t_exp   = alloc_tag();
                     const uint8_t t_sum   = alloc_tag();
+                    const uint8_t t_div   = is_int8 ? alloc_tag() : uint8_t(0);
                     const uint8_t req_tag = alloc_tag();
-                    uint8_t first_wait;
+                    uint8_t load_done_wait;
                     uint64_t load_charged = 0;
                     if (fuse_eligible) {
                         // Producer already left row data at row_in_addr; chain
-                        // first POOL_MAX off the producer's done tag for row 0,
+                        // first op off the producer's done tag for row 0,
                         // subsequent rows depend on previous row's req_tag
                         // (input region is untouched by the chain so no RAW).
-                        first_wait = (row == 0) ? fuse_prev_done_tag : prev_req_tag;
+                        load_done_wait = (row == 0) ? fuse_prev_done_tag : prev_req_tag;
                     } else {
                         // Per-row reload into a shared single-row scratch.
                         // Load waits on previous row's req_tag so the chain
@@ -9547,14 +9620,29 @@ int sc_main(int argc, char* argv[]) {
                         load_charged = charged;
                         mark_stream(ld, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
                         program.push_back(ld);
-                        first_wait = in_tag;
+                        load_done_wait = in_tag;
                     }
-                    Descriptor d_max = make_pool_row_reduce(row_L, row_in_addr, addr_max,
+                    // For INT8, dequant the row's INT8 input into a FP16
+                    // scratch the chain then reads from. For FP, the chain
+                    // reads from row_in_addr directly and the dequant step
+                    // is elided.
+                    const uint32_t chain_in_addr  = is_int8 ? addr_fp_in  : row_in_addr;
+                    const uint32_t chain_out_addr = is_int8 ? addr_fp_out : row_out_addr;
+                    uint8_t chain_first_wait = load_done_wait;
+                    if (is_int8) {
+                        Descriptor d_dq = make_ewe_dequant_int8(row_in_addr, addr_fp_in,
+                                                                row1, K, zp_in_int8,
+                                                                load_done_wait, t_dq);
+                        mark_stream(d_dq, i, mb, SMF_COMPUTE);
+                        program.push_back(d_dq);
+                        chain_first_wait = t_dq;
+                    }
+                    Descriptor d_max = make_pool_row_reduce(row_L, chain_in_addr, addr_max,
                                                             row1, K, PM_MAX,
-                                                            first_wait, t_max);
+                                                            chain_first_wait, t_max);
                     mark_stream(d_max, i, mb, SMF_COMPUTE);
                     program.push_back(d_max);
-                    Descriptor d_sub = make_ewe_binary_bcast(row_L, row_in_addr, addr_max,
+                    Descriptor d_sub = make_ewe_binary_bcast(row_L, chain_in_addr, addr_max,
                                                              addr_ctr, /*params*/0,
                                                              row1, K, ES_SUB,
                                                              t_max, t_max, t_sub);
@@ -9570,13 +9658,22 @@ int sc_main(int argc, char* argv[]) {
                                                              t_exp, t_sum);
                     mark_stream(d_psum, i, mb, SMF_COMPUTE);
                     program.push_back(d_psum);
+                    const uint8_t div_signal = is_int8 ? t_div : req_tag;
                     Descriptor d_div = make_ewe_binary_bcast(row_L, addr_exp, addr_sum,
-                                                             row_out_addr, /*params*/0,
+                                                             chain_out_addr, /*params*/0,
                                                              row1, K, ES_DIV,
-                                                             t_sum, t_sum, req_tag);
+                                                             t_sum, t_sum, div_signal);
                     mark_stream(d_div, i, mb,
-                                SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                                SMF_COMPUTE | (final_mb && !is_int8 ? SMF_FINAL_TILE : 0));
                     program.push_back(d_div);
+                    if (is_int8) {
+                        Descriptor d_q = make_ewe_quant_to_int8(addr_fp_out, row_out_addr,
+                                                                row1, K, zp_out_int8,
+                                                                t_div, req_tag);
+                        mark_stream(d_q, i, mb,
+                                    SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(d_q);
+                    }
                     prev_req_tag = req_tag;
                     acc[i].dram_r += load_charged;
                     if (!fuse_eligible)
