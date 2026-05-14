@@ -11435,15 +11435,68 @@ int sc_main(int argc, char* argv[]) {
             fail++;
         }
 
-        // accumulate the profile entry
-        profile.push_back({
-            i, flow_id[i], op_name(L.op_kind),
-            L.in_h, L.in_w, L.in_c, L.out_h, L.out_w, L.out_c,
-            L.k_h, L.k_w, L.s_h, L.s_w, L.group,
-            layer_pass, cyc_layer, cyc_total,
-            dram_r, dram_w, sram_r, sram_w,
-            th, toc, util_pct, udma_w_streamed[i]
-        });
+        // accumulate the profile entry.
+        // v13: when SOFTMAX is decomposed into POOL_MAX → EWE_SUB → EWE_EXP →
+        // POOL_SUM → EWE_DIV (via MDLA7_SOFTMAX_DECOMPOSE=1), emit 5 sub-rows
+        // so the profile / HTML report visibly shows the chain instead of
+        // rolling all traffic into one "softmax" row. Cycles + SRAM bytes are
+        // split per phase using the same arithmetic model that EweEngine uses
+        // internally (POOL @ 2× lanes, EWE @ 1× lanes; SRAM bytes from the
+        // intermediate tensor sizes).
+        const bool decompose_sm_profile =
+            (L.op_kind == OK_SOFTMAX) &&
+            std::getenv("MDLA7_SOFTMAX_DECOMPOSE") != nullptr;
+        if (decompose_sm_profile) {
+            const uint32_t es = (L.dtype == DT_FP16 || L.dtype == DT_BFP16 ||
+                                 L.dtype == DT_FP8 || L.dtype == DT_INT16x16) ? 2u : 1u;
+            const uint64_t rows = uint64_t(L.in_h) * L.in_w;
+            const uint64_t vec  = L.in_c;
+            const uint64_t elems = rows * vec;
+            // Phase share (engine-internal model): POOL passes get 2× lanes,
+            // EWE passes get 1× lanes; elapsed cycles split proportionally so
+            // the total still equals the measured cyc_layer.
+            const double share_total = 2.0 /*POOL_MAX*/ + 1.0 /*EWE_SUB*/ +
+                                       1.0 /*EWE_EXP*/ + 2.0 /*POOL_SUM*/ +
+                                       1.0 /*EWE_DIV*/;
+            auto cyc_share = [&](double s) -> uint64_t {
+                return uint64_t(double(cyc_layer) * s / share_total);
+            };
+            const uint64_t b_full = elems * es;          // [rows, vec]
+            const uint64_t b_row  = rows * es;            // [rows, 1]
+            // Each phase reports its own SRAM R/W; the 5 sums equal the
+            // measured (sram_r, sram_w) so the layer total is preserved.
+            struct Phase { const char* name; uint64_t r; uint64_t w; double share; };
+            const Phase phases[5] = {
+                { "sm_pmax", b_full,           b_row,  2.0 },   // POOL_MAX
+                { "sm_sub ", b_full + b_row,   b_full, 1.0 },   // EWE_SUB
+                { "sm_exp ", b_full,           b_full, 1.0 },   // EWE_EXP
+                { "sm_psum", b_full,           b_row,  2.0 },   // POOL_SUM
+                { "sm_div ", b_full + b_row,   b_full, 1.0 },   // EWE_DIV
+            };
+            uint64_t cum = cyc_total - cyc_layer;
+            for (uint32_t ph = 0; ph < 5; ++ph) {
+                const uint64_t pcyc = cyc_share(phases[ph].share);
+                cum += pcyc;
+                profile.push_back({
+                    i, flow_id[i], phases[ph].name,
+                    L.in_h, L.in_w, L.in_c, L.out_h, L.out_w, L.out_c,
+                    L.k_h, L.k_w, L.s_h, L.s_w, L.group,
+                    layer_pass, pcyc, cum,
+                    /*dram*/ 0, 0,
+                    phases[ph].r, phases[ph].w,
+                    th, toc, /*util*/ 0.0, /*streamed*/ true
+                });
+            }
+        } else {
+            profile.push_back({
+                i, flow_id[i], op_name(L.op_kind),
+                L.in_h, L.in_w, L.in_c, L.out_h, L.out_w, L.out_c,
+                L.k_h, L.k_w, L.s_h, L.s_w, L.group,
+                layer_pass, cyc_layer, cyc_total,
+                dram_r, dram_w, sram_r, sram_w,
+                th, toc, util_pct, udma_w_streamed[i]
+            });
+        }
     }
     auto t = sys.cmd.last_activity;
     const uint64_t total_cycles = uint64_t(t.to_seconds() * 1e9);
