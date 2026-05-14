@@ -319,11 +319,26 @@ SC_MODULE(EweEngine) {
     void run_binary_fp(const EweBody& e, uint64_t elems, uint8_t op) {
         std::vector<uint16_t> a16(elems), b16(elems), out16(elems);
         l1mgr.read(e.in_a_addr, a16.data(), elems * sizeof(uint16_t));
-        float clip[2];
-        l1mgr.read(e.lut_addr, clip, sizeof(clip));
+        // v13: softmax decomposition sets e.broadcast_axes bit 0 = last-axis
+        // (C) broadcast and passes no params blob. Default clip to ±inf in
+        // that case; otherwise preserve legacy behaviour (read clip + bcast
+        // magic from e.lut_addr unconditionally).
+        const bool decomp_bcast = (e.broadcast_axes & 0x1u) != 0;
+        float clip[2] = {-3.4e38f, 3.4e38f};
         uint32_t bcast[3] = {0, 0, 0};
-        l1mgr.read(e.lut_addr + 8, bcast, sizeof(bcast));
-        if (bcast[0] == FP_BINARY_BCAST_MAGIC && bcast[1] == FP_BINARY_BCAST_SCALAR) {
+        if (!decomp_bcast) {
+            l1mgr.read(e.lut_addr, clip, sizeof(clip));
+            l1mgr.read(e.lut_addr + 8, bcast, sizeof(bcast));
+        }
+        if (decomp_bcast) {
+            const uint64_t rows = uint64_t(e.n ? e.n : 1) * e.h * e.w;
+            const uint64_t vec  = e.c;
+            std::vector<uint16_t> b_rows(rows);
+            l1mgr.read(e.in_b_addr, b_rows.data(), rows * sizeof(uint16_t));
+            for (uint64_t r = 0; r < rows; ++r)
+                for (uint64_t k = 0; k < vec; ++k)
+                    b16[r * vec + k] = b_rows[r];
+        } else if (bcast[0] == FP_BINARY_BCAST_MAGIC && bcast[1] == FP_BINARY_BCAST_SCALAR) {
             uint16_t scalar = 0;
             l1mgr.read(e.in_b_addr, &scalar, sizeof(scalar));
             std::fill(b16.begin(), b16.end(), scalar);
@@ -502,8 +517,11 @@ SC_MODULE(EweEngine) {
     void run_unary_fp(const EweBody& e, uint64_t elems, uint8_t subtype) {
         std::vector<uint16_t> in16(elems), out16(elems);
         l1mgr.read(e.in_a_addr, in16.data(), elems * sizeof(uint16_t));
-        float clip[2];
-        l1mgr.read(e.lut_addr, clip, sizeof(clip));
+        // v13: ES_EXP from softmax decomposition has no params blob (lut_addr
+        // = 0); default to no clipping. All other subtypes preserve legacy
+        // behaviour and read clip params from lut_addr unconditionally.
+        float clip[2] = {-3.4e38f, 3.4e38f};
+        if (subtype != ES_EXP) l1mgr.read(e.lut_addr, clip, sizeof(clip));
         const float act_min = clip[0], act_max = clip[1];
         constexpr float k = 0.7978845608028654f;        // sqrt(2/pi)
         constexpr float c = 0.044715f;

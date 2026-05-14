@@ -160,16 +160,16 @@ Score matrix [134 MB] 完全不 materialize，DRAM 只寫最終 output。
 
 | Stage | File(s) | Status |
 |---|---|---|
-| **C+D (rest)** — tile-path decomposition | systemc/src/mdla7_model_runner.cpp:9398-9499 | not started — extend the `rows>1` tile loop to emit 5 sub-descriptors per tile (currently only `rows==1` path is decomposed). This is what `bmm_softmax_bmm` tile model actually exercises. |
+| **C+D (rest)** — tile-path decomposition | systemc/src/mdla7_model_runner.cpp:9462-9564 | **done (FP)** — `rows>1` softmax now emits per-row 5-op chain when `MDLA7_DECOMPOSE_SOFTMAX=1` and `L.dtype == DT_FP16`. Single-slot, one row at a time; handles both fused and non-fused producer. Engine-side fix in `ewe_pool.h` so `run_binary_fp` honors `e.broadcast_axes` (bit 0 = last-axis row broadcast) and `run_unary_fp` skips the params blob for `ES_EXP`. BMM fast 9/13 = baseline. |
 | **C (INT8)** — INT8 chain | systemc/include/mdla7/ewe_pool.h | not started — ES_EXP INT8 needs `lut_addr` populated with 256-byte exp LUT; ES_DIV INT8 not implemented. Alternative: dequant-on-entry, requant-on-exit so chain runs all-FP16 in L1 for INT8 models too. |
 | **E** — Verilog RTL | rtl/verilog/ewe.v, rtl/verilog/pool.v | not started — `ewe.v` currently dispatches 2-bit subtype (line 472); needs widening + handlers for ES_EXP (subtype 9) and ES_DIV (subtype 10). `pool.v` needs PM_SUM mode. |
-| **F** — Verify | — | fast already runs (regression clean). cx/verilog: TBD after Stage C+D rest. L1Mesh per-sub-op breakdown: should auto-appear once the chain fires on a real model. |
+| **F** — Verify | — | fast already runs (regression clean for both baseline and decomp flag). cx/verilog: TBD. L1Mesh per-sub-op breakdown: should auto-appear once the chain fires on a real model. |
 
 ### Next pickup
 
-1. Find a working FP softmax model on disk (bmm_softmax_bmm_fp32.tflite vanished from exFAT — regenerate from gen_bmm_int8_tflite.py with --fp flag or similar, or use any FP-softmax model from a different corpus). Test that `MDLA7_DECOMPOSE_SOFTMAX=1` fires the 5-op chain and produces correct output on a `rows==1` softmax.
-2. Replicate the decomposition into the `rows>1` tile loop ([mdla7_model_runner.cpp:9398-9499](systemc/src/mdla7_model_runner.cpp#L9398-L9499)) — per tile, allocate `max/centered/exp/sum` L1 temps and emit 5 sub-descriptors.
-3. INT8 chain: simplest path is to interleave Requant op as dequant (INT8→FP16) at the start of the chain and requant (FP16→INT8) at the end. Avoids implementing ES_EXP/ES_DIV INT8 entirely.
+1. ~~Verify rows==1 FP softmax path~~ — done; bmm_softmax_bmm_fp32.tflite passes (16 rows × K=8, fuse-eligible, fires the new tile chain).
+2. ~~Replicate decomposition into rows>1 tile loop~~ — done; emits per-row 5-op chain when `MDLA7_DECOMPOSE_SOFTMAX=1` for FP softmax. Engine fix: `run_binary_fp` now honors `e.broadcast_axes` so ES_SUB/ES_DIV broadcast `[rows]` scalars across the C dim without a params-blob magic.
+3. INT8 chain: simplest path is to interleave Requant op as dequant (INT8→FP16) at the start of the chain and requant (FP16→INT8) at the end. Avoids implementing ES_EXP/ES_DIV INT8 entirely. The `MDLA7_DECOMPOSE_SOFTMAX` env flag gate currently skips INT8 — drop that gate once the dequant/requant wrappers exist.
 4. Verilog RTL: widen subtype field in `ewe.v` to 4 bits; add EXP/DIV handlers. Add PM_SUM to `pool.v`. Update `batch/gen_verilog_program.py` if descriptor byte layout assumptions need adjustment.
 
 ### 本輪 scope 確認 (Phase 1+2)

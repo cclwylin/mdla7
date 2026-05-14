@@ -9459,6 +9459,145 @@ int sc_main(int argc, char* argv[]) {
                     acc[i].dram_w += L.ref_size;
                     layer_done_tag[i] = st_tag;
                 }
+            } else if (std::getenv("MDLA7_DECOMPOSE_SOFTMAX") != nullptr
+                       && L.dtype == DT_FP16
+                       && [&]() {
+                           // L1 fit check (matches the allocation below).
+                           const uint32_t vec_b = uint32_t(vec_bytes);
+                           const uint32_t es   = elem_size;
+                           const uint64_t in_top = fuse_eligible
+                               ? align64(uint32_t(L1_IN + L.in_size))
+                               : align64(vec_b);
+                           uint64_t cur = align64(uint32_t(in_top + L.ref_size));
+                           cur = align64(uint32_t(cur + vec_b));      // ctr
+                           cur = align64(uint32_t(cur + vec_b));      // exp
+                           cur = align64(uint32_t(cur + es));         // max scalar
+                           cur = align64(uint32_t(cur + es));         // sum scalar
+                           return cur <= L1_BUDGET;
+                       }()) {
+                // v13: rows>1 decomposed softmax — per-row 5-op chain
+                // (POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV).
+                // Per-row output addresses so the udma_w of row r cannot race
+                // with row r+1's EWE_DIV overwriting a shared scratch. INT8
+                // still takes the monolithic dispatch. See softmax.md Stage C.
+                const uint32_t K     = uint32_t(vec_elems);
+                const uint32_t row1  = 1;
+                const uint32_t es    = elem_size;
+                const uint32_t vec_b = uint32_t(vec_bytes);
+                const uint32_t in_size  = uint32_t(L.in_size);
+                const uint32_t ref_size = uint32_t(L.ref_size);
+                // L1 layout:
+                //   fused: input stays at producer's L1_IN..L1_IN+in_size.
+                //   non-fused: input is a single-row scratch at addr 0,
+                //              re-loaded per row from DRAM.
+                //   output: rows*vec_bytes stacked above the input region.
+                //   temps: ctr/exp (vec_b each), max/sum (es scalar each).
+                const uint32_t addr_in_base = fuse_eligible ? L1_IN : 0u;
+                const uint32_t addr_in_top  = fuse_eligible
+                                            ? align64(addr_in_base + in_size)
+                                            : align64(addr_in_base + vec_b);
+                const uint32_t addr_out_base = addr_in_top;
+                uint32_t scratch = align64(addr_out_base + ref_size);
+                const uint32_t addr_ctr = scratch;  scratch = align64(scratch + vec_b);
+                const uint32_t addr_exp = scratch;  scratch = align64(scratch + vec_b);
+                const uint32_t addr_max = scratch;  scratch = align64(scratch + es);
+                const uint32_t addr_sum = scratch;  scratch = align64(scratch + es);
+                (void)scratch;
+                tiles_h_per_layer[i] = uint16_t(std::min<uint64_t>(rows, 65535));
+                LayerMeta row_L = L;
+                row_L.in_h  = 1; row_L.in_w  = 1;
+                row_L.out_h = 1; row_L.out_w = 1;
+                uint8_t prev_req_tag = 0;
+                for (uint64_t row = 0; row < rows; ++row) {
+                    const uint64_t off = row * vec_bytes;
+                    const bool final_mb = (row + 1 == rows);
+                    const uint32_t row_in_addr  = fuse_eligible
+                                                ? uint32_t(addr_in_base + off)
+                                                : addr_in_base;
+                    const uint32_t row_out_addr = uint32_t(addr_out_base + off);
+                    Microblock mb{};
+                    mb.id = uint16_t(std::min<uint64_t>(row, 65535));
+                    mb.slot = 0;
+                    mb.elem_off = row * vec_elems;
+                    mb.rows = 1;
+                    mb.elems = uint32_t(vec_elems);
+                    mb.bytes = vec_b;
+                    const uint8_t in_tag  = alloc_tag();
+                    const uint8_t t_max   = alloc_tag();
+                    const uint8_t t_sub   = alloc_tag();
+                    const uint8_t t_exp   = alloc_tag();
+                    const uint8_t t_sum   = alloc_tag();
+                    const uint8_t req_tag = alloc_tag();
+                    uint8_t first_wait;
+                    uint64_t load_charged = 0;
+                    if (fuse_eligible) {
+                        // Producer already left row data at row_in_addr; chain
+                        // first POOL_MAX off the producer's done tag for row 0,
+                        // subsequent rows depend on previous row's req_tag
+                        // (input region is untouched by the chain so no RAW).
+                        first_wait = (row == 0) ? fuse_prev_done_tag : prev_req_tag;
+                    } else {
+                        // Per-row reload into a shared single-row scratch.
+                        // Load waits on previous row's req_tag so the chain
+                        // has finished reading the scratch before we
+                        // overwrite it.
+                        auto [ld, charged] = make_act_load(L, uint32_t(L.dram_in + off),
+                                                           row_in_addr, vec_b,
+                                                           in_tag, prev_req_tag);
+                        load_charged = charged;
+                        mark_stream(ld, i, mb, SMF_LOAD_A | (final_mb ? SMF_FINAL_TILE : 0));
+                        program.push_back(ld);
+                        first_wait = in_tag;
+                    }
+                    Descriptor d_max = make_pool_row_reduce(row_L, row_in_addr, addr_max,
+                                                            row1, K, PM_MAX,
+                                                            first_wait, t_max);
+                    mark_stream(d_max, i, mb, SMF_COMPUTE);
+                    program.push_back(d_max);
+                    Descriptor d_sub = make_ewe_binary_bcast(row_L, row_in_addr, addr_max,
+                                                             addr_ctr, /*params*/0,
+                                                             row1, K, ES_SUB,
+                                                             t_max, t_max, t_sub);
+                    mark_stream(d_sub, i, mb, SMF_COMPUTE);
+                    program.push_back(d_sub);
+                    Descriptor d_exp = make_ewe_exp(row_L, addr_ctr, addr_exp,
+                                                    /*params*/0, row1, K,
+                                                    t_sub, t_exp);
+                    mark_stream(d_exp, i, mb, SMF_COMPUTE);
+                    program.push_back(d_exp);
+                    Descriptor d_psum = make_pool_row_reduce(row_L, addr_exp, addr_sum,
+                                                             row1, K, PM_SUM,
+                                                             t_exp, t_sum);
+                    mark_stream(d_psum, i, mb, SMF_COMPUTE);
+                    program.push_back(d_psum);
+                    Descriptor d_div = make_ewe_binary_bcast(row_L, addr_exp, addr_sum,
+                                                             row_out_addr, /*params*/0,
+                                                             row1, K, ES_DIV,
+                                                             t_sum, t_sum, req_tag);
+                    mark_stream(d_div, i, mb,
+                                SMF_COMPUTE | (final_mb ? SMF_FINAL_TILE : 0));
+                    program.push_back(d_div);
+                    prev_req_tag = req_tag;
+                    acc[i].dram_r += load_charged;
+                    if (!fuse_eligible)
+                        acc[i].sram_w += vec_b;   // load
+                    acc[i].sram_r += vec_b;       // compute read (mirrors monolithic)
+                    acc[i].sram_w += vec_b;       // compute write
+                }
+                // One udma covers the whole contiguous output region.
+                if (!suppress_producer_store) {
+                    const uint8_t st_tag = alloc_tag();
+                    Descriptor wd = make_udma(addr_out_base, L.dram_out, ref_size,
+                                              /*dir*/ 1, st_tag, prev_req_tag);
+                    program.push_back(wd);
+                    acc[i].dram_w += ref_size;
+                    acc[i].sram_r += ref_size;
+                    layer_done_tag[i] = st_tag;
+                } else {
+                    udma_w_skipped[i] = true;
+                    udma_w_streamed[i] = true;
+                    layer_done_tag[i] = prev_req_tag;
+                }
             } else {
                 uint8_t prev_st_tag = 0;
                 const uint64_t softmax_l1_safety = 64ull * 1024ull;
