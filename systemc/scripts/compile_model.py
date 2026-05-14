@@ -1356,6 +1356,231 @@ def main():
             (opname in DTYPE_MATERIALIZED_FALLBACK_OPS
              and in_t.Type() not in FP_TFLITE_TYPES)
         )
+        # ---- v12 BATCH_MATMUL → FC-style CONV lowering -------------------------
+        # BATCH_MATMUL(A[...,M,K], B[...,K,N]) == 1×1 CONV with H=M, W=1,
+        # Cin=K, OC=N. Lower when ZP conditions allow exact int8 accumulation
+        # (or always for FP16). Each head/batch slice becomes one OP_FC layer.
+        if opname == "BATCH_MATMUL":
+            _a_idx_bmm = int(op.Inputs(0)); _b_idx_bmm = int(op.Inputs(1))
+            _a_t_bmm   = sg.Tensors(_a_idx_bmm); _b_t_bmm = sg.Tensors(_b_idx_bmm)
+            _is_fp_bmm = _a_t_bmm.Type() in FP_TFLITE_TYPES
+
+            def _bmm_can_lower(a_t, b_t):
+                if a_t.Type() in FP_TFLITE_TYPES:
+                    return True
+                aq = a_t.Quantization(); bq = b_t.Quantization()
+                zp_a = int(aq.ZeroPoint(0)) if aq and aq.ZeroPointLength() > 0 else 0
+                zp_b = int(bq.ZeroPoint(0)) if bq and bq.ZeroPointLength() > 0 else 0
+                return zp_a == 0 and zp_b == 0
+
+            _b_arr_raw = _tensor_original_array(_b_idx_bmm)
+            if _bmm_can_lower(_a_t_bmm, _b_t_bmm) and _b_arr_raw is not None:
+                # Read adjoint flags
+                _adj_x = _adj_y = False
+                if opt_table:
+                    try:
+                        _bo = fb.BatchMatMulOptions()
+                        _bo.Init(opt_table.Bytes, opt_table.Pos)
+                        _adj_x = bool(_bo.AdjX()); _adj_y = bool(_bo.AdjY())
+                    except Exception:
+                        pass
+                # Get A from chain or raw tensor
+                _a_arr_raw = _tensor_original_array(_a_idx_bmm)
+                _a_arr_bmm = np.asarray(
+                    in_arr if in_arr is not None else _a_arr_raw,
+                    dtype=np.float16 if _is_fp_bmm else np.int8,
+                )
+                _b_arr_bmm = np.asarray(_b_arr_raw,
+                                         dtype=np.float16 if _is_fp_bmm else np.int8)
+                if _adj_x: _a_arr_bmm = np.swapaxes(_a_arr_bmm, -1, -2)
+                if _adj_y: _b_arr_bmm = np.swapaxes(_b_arr_bmm, -1, -2)
+                # Shape: a[...,M,K], b[...,K,N] — both may have batch leading dims
+                # Broadcast contracting dim (K), mirrors the materialised path.
+                _a_k = _a_arr_bmm.shape[-1]; _b_k = _b_arr_bmm.shape[-2]
+                if _a_k != _b_k:
+                    if _b_k == 1:
+                        _tgt = list(_b_arr_bmm.shape); _tgt[-2] = _a_k
+                        _b_arr_bmm = np.broadcast_to(_b_arr_bmm, _tgt).copy()
+                    elif _a_k == 1:
+                        _tgt = list(_a_arr_bmm.shape); _tgt[-1] = _b_k
+                        _a_arr_bmm = np.broadcast_to(_a_arr_bmm, _tgt).copy()
+                _a_flat_shape = _a_arr_bmm.shape
+                _b_flat_shape = _b_arr_bmm.shape
+                if _a_flat_shape[-1] != _b_flat_shape[-2]:
+                    pass  # K mismatch — fall through to materialise
+                else:
+                    _M_bmm  = int(_a_flat_shape[-2])
+                    _K_bmm  = int(_a_flat_shape[-1])
+                    _N_bmm  = int(_b_flat_shape[-1])
+                    # Compute total batch (head) count from remaining leading dims
+                    _batch_a = _a_flat_shape[:-2]
+                    _batch_b = _b_flat_shape[:-2]
+                    # Broadcast batch dims following numpy matmul semantics
+                    try:
+                        _batch_out = np.broadcast_shapes(_batch_a, _batch_b)
+                    except Exception:
+                        _batch_out = _batch_a if _batch_a else _batch_b
+                    _B_total = int(np.prod(_batch_out)) if _batch_out else 1
+                    _a_3d = np.broadcast_to(
+                        _a_arr_bmm.reshape(_batch_a + (_M_bmm, _K_bmm)),
+                        _batch_out + (_M_bmm, _K_bmm),
+                    ).reshape(_B_total, _M_bmm, _K_bmm)
+                    _b_3d = np.broadcast_to(
+                        _b_arr_bmm.reshape(_batch_b + (_K_bmm, _N_bmm)),
+                        _batch_out + (_K_bmm, _N_bmm),
+                    ).reshape(_B_total, _K_bmm, _N_bmm)
+                    # Quantisation params for INT8 path
+                    if not _is_fp_bmm:
+                        _in_q_bmm  = in_t.Quantization()
+                        _out_q_bmm = out_t.Quantization()
+                        _b_t_q_bmm = _b_t_bmm.Quantization()
+                        _sc_in  = _qscale(_in_q_bmm)
+                        _sc_out = _qscale(_out_q_bmm)
+                        _sc_b   = _qscale(_b_t_q_bmm)
+                        _zp_out_bmm = (int(_out_q_bmm.ZeroPoint(0))
+                                       if _out_q_bmm and _out_q_bmm.ZeroPointLength() > 0 else 0)
+                        _eff = _sc_in * _sc_b / (_sc_out if _sc_out > 0 else 1.0)
+                        _mult_s, _shift_s = quantize_multiplier(float(_eff))
+                        _mult_arr_bmm  = np.full(_N_bmm, _mult_s,  dtype=np.int32)
+                        _shift_arr_bmm = np.full(_N_bmm, _shift_s, dtype=np.int8)
+                        _zp_in_eff_bmm = (int(_in_q_bmm.ZeroPoint(0))
+                                          if _in_q_bmm and _in_q_bmm.ZeroPointLength() > 0
+                                          else 0)
+                    _out_tensor_bmm = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
+                    _in0_tensor_bmm = _a_idx_bmm
+                    _in1_tensor_bmm = _b_idx_bmm
+                    _ld_bmm = TYPE_TO_DTYPE.get(in_t.Type(), DT_INT8x8)
+                    if _is_fp_bmm: _ld_bmm = DT_FP16
+                    _all_ref_slices = []
+                    _lowered_ok = True
+                    for _bi in range(_B_total):
+                        _a_sl = _a_3d[_bi]           # [M, K]
+                        _b_sl = _b_3d[_bi]           # [K, N]
+                        # Weights: OHWI [N, 1, 1, K] = b.T rows
+                        _wgt_sl = _b_sl.T.reshape(_N_bmm, 1, 1, _K_bmm)
+                        # Input: [M, 1, K]
+                        _act_sl = _a_sl.reshape(_M_bmm, 1, _K_bmm)
+                        # Reference output [M, 1, N]
+                        if _is_fp_bmm:
+                            _a_f32 = _a_sl.astype(np.float32)
+                            _b_f32 = _b_sl.astype(np.float32)
+                            _ref_f32 = np.matmul(_a_f32, _b_f32)   # [M, N]
+                            _ref_sl  = _ref_f32.astype(np.float16).reshape(_M_bmm, 1, _N_bmm)
+                        else:
+                            # INT8: accumulate in int32, then MBQM-requantise
+                            _psum = np.matmul(
+                                _a_sl.astype(np.int32),
+                                _b_sl.astype(np.int32),
+                            ).reshape(_M_bmm, 1, _N_bmm)   # [M, 1, N]
+                            _sum_w_sl = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))
+                            _bias_eff_sl = (-_zp_in_eff_bmm * _sum_w_sl).astype(np.int32)
+                            _pb = (_psum.astype(np.int64)
+                                   + _bias_eff_sl.reshape(1, 1, _N_bmm).astype(np.int64))
+                            _pb = np.clip(_pb, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                            _sc = multiply_by_quantized_multiplier_np(
+                                _pb,
+                                _mult_arr_bmm.reshape(1, 1, _N_bmm),
+                                _shift_arr_bmm.reshape(1, 1, _N_bmm),
+                            )
+                            _ref_sl = np.clip(_sc + _zp_out_bmm, -128, 127).astype(np.int8)
+                            _ref_sl = _ref_sl.reshape(_M_bmm, 1, _N_bmm)
+                        _all_ref_slices.append(_ref_sl)
+                        # Build conv_wgt_payload for this slice
+                        if _is_fp_bmm:
+                            _amin_s = np.float32(-3.4e38); _amax_s = np.float32(3.4e38)
+                            _bias_f32 = np.zeros(_N_bmm, dtype=np.float32)
+                            _params_b_sl = (struct.pack("<ff", float(_amin_s), float(_amax_s))
+                                            + _bias_f32.astype("<f4").tobytes())
+                            _wgt_payload_sl = (_wgt_sl.astype(np.float16).tobytes(order="C")
+                                               + _params_b_sl)
+                            _in_b_sl  = _act_sl.astype(np.float16).tobytes(order="C")
+                            _ref_b_sl = _ref_sl.astype(np.float16).tobytes(order="C")
+                        else:
+                            _sum_w_sl2 = _wgt_sl.astype(np.int64).sum(axis=(1, 2, 3))
+                            _be_sl = (-_zp_in_eff_bmm * _sum_w_sl2).astype(np.int64)
+                            _be_i32_sl = np.clip(_be_sl, -(1 << 31), (1 << 31) - 1).astype(np.int32)
+                            _params_b_sl = (struct.pack("<iii", _zp_out_bmm, -128, 127)
+                                            + _mult_arr_bmm.astype("<i4").tobytes()
+                                            + _shift_arr_bmm.astype(np.int8).tobytes()
+                                            + _be_i32_sl.tobytes())
+                            _wgt_payload_sl = (_wgt_sl.astype(np.int8).tobytes(order="C")
+                                               + _params_b_sl)
+                            _in_b_sl  = _act_sl.astype(np.int8).tobytes(order="C")
+                            _ref_b_sl = _ref_sl.astype(np.int8).tobytes(order="C")
+                        # Emit the layer directly (mirrors bottom-of-loop code).
+                        # No input-alias optimisation across BMM slices (different shapes).
+                        _stored_in_b_sl = _in_b_sl
+                        _budget_err = _program_budget_error(
+                            len(_stored_in_b_sl), len(_wgt_payload_sl), len(_ref_b_sl))
+                        if _budget_err:
+                            print(f"  layer {li:>2d}  bmm[{_bi}]  "
+                                  f"in={_M_bmm}x1x{_K_bmm} "
+                                  f"skipped ({_budget_err})")
+                            _lowered_ok = False
+                            break
+                        _slice_label = f"[{_bi}/{_B_total}]" if _B_total > 1 else ""
+                        print(f"  layer {li:>2d}  {OP_NAME[OP_FC]}  "
+                              f"in={_M_bmm}x1x{_K_bmm}  k=1x1  s=1x1  g=1  "
+                              f"out={_M_bmm}x1x{_N_bmm}  "
+                              f"({_M_bmm * _N_bmm} {'FP16' if _is_fp_bmm else 'INT8'})  "
+                              f"ready  from=BATCH_MATMUL{_slice_label}")
+                        _zp_in_eff_sl = _zp_in_eff_bmm if not _is_fp_bmm else 0
+                        _compiled_idx_sl = len(layers)
+                        layers.append(dict(
+                            in_h=_M_bmm, in_w=1, in_c=_K_bmm,
+                            out_h=_M_bmm, out_w=1, out_c=_N_bmm,
+                            k_h=1, k_w=1, s_h=1, s_w=1,
+                            p_t=0, p_b=0, p_l=0, p_r=0,
+                            dram_in=DRAM_IN  + cur_i,
+                            dram_wgt=DRAM_WGT + cur_w,
+                            dram_out=DRAM_OUT + cur_o,
+                            in_size=len(_in_b_sl),
+                            wgt_size=len(_wgt_payload_sl),
+                            ref_size=len(_ref_b_sl),
+                            in_off=in_off, wgt_off=wgt_off, ref_off=ref_off,
+                            in_alias_layer=-1,
+                            group=1,
+                            op_kind=OP_FC,
+                            dtype=_ld_bmm,
+                            zp_in_eff=_zp_in_eff_sl,
+                            orig_op_index=orig_op_index,
+                            input0_tensor=_in0_tensor_bmm if _bi == 0 else -1,
+                            input1_tensor=_in1_tensor_bmm if _bi == 0 else -1,
+                            output_tensor=_out_tensor_bmm if _bi == _B_total - 1 else -1,
+                        ))
+                        if _bi == 0:
+                            op_to_compiled[orig_op_index] = _compiled_idx_sl
+                        cur_w   += len(_wgt_payload_sl)
+                        cur_i   += len(_stored_in_b_sl)
+                        cur_o   += len(_ref_b_sl)
+                        wgt_off += len(_wgt_payload_sl)
+                        in_off  += len(_stored_in_b_sl)
+                        ref_off += len(_ref_b_sl)
+                        in_blobs.append(_in_b_sl)
+                        wgt_blobs.append(_wgt_payload_sl)
+                        ref_blobs.append(_ref_b_sl)
+                    if _lowered_ok:
+                        # Update chain state with the combined output of all slices.
+                        # The combined output shape is batch_out+[M,1,N]; collapse to 3D.
+                        _combined = np.stack([s.reshape(_M_bmm, _N_bmm)
+                                              for s in _all_ref_slices], axis=0)
+                        # Shape stored in tensor_values is the flat original rank.
+                        _out_shape_full = list(_batch_out) + [_M_bmm, _N_bmm]
+                        _out_arr_full   = _combined.reshape(_out_shape_full)
+                        if _out_tensor_bmm >= 0:
+                            tensor_values[_out_tensor_bmm] = _out_arr_full.copy().reshape(-1)
+                        # last_output_arr: use 3D [M,1,N] of the last slice so that
+                        # downstream chain detection works when the consumer has
+                        # compatible shape.
+                        last_output_arr   = _all_ref_slices[-1]  # [M, 1, N]
+                        last_output_tensor = _out_tensor_bmm
+                        continue   # skip materialise path for this op
+                    # else: budget error mid-way; let the materialized path run
+                    # to at least emit the full-tensor reference. But the layers
+                    # list was partially mutated — just skip cleanly.
+                    last_output_arr = None
+                    continue
+
         if materialize_op:
             # Tranche-1 materialized support. These ops become explicit
             # reference-byte layers, so fast/cx/verilog execute and compare
