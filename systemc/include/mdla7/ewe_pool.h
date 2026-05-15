@@ -32,9 +32,16 @@ namespace mdla7 {
 static constexpr uint32_t FP_BINARY_BCAST_MAGIC = 0x46424357u;
 static constexpr uint32_t FP_BINARY_BCAST_SCALAR = 1u;
 
-static constexpr uint64_t EWE_INT8_LANES  = 64;
-static constexpr uint64_t EWE_INT16_LANES = 32;
-static constexpr uint64_t EWE_FP_LANES    = 32;
+// EWE ×4: 128 FP / 256 INT8 lanes.
+static constexpr uint64_t EWE_INT8_LANES  = 256;
+static constexpr uint64_t EWE_INT16_LANES = 128;
+static constexpr uint64_t EWE_FP_LANES    = 128;
+
+// POOL ×2 (independent of EWE): 64 FP base × internal ×2 = 128 effective,
+//          128 INT8 base × internal ×2 = 256 effective.
+static constexpr uint64_t POOL_INT8_LANES  = 128;
+static constexpr uint64_t POOL_INT16_LANES = 64;
+static constexpr uint64_t POOL_FP_LANES    = 64;
 
 inline uint64_t ewe_lanes_for_dtype(uint8_t dtype) {
     if (is_fp_dtype(dtype)) return EWE_FP_LANES;
@@ -51,7 +58,17 @@ inline uint64_t ewe_lanes_for_dtype(uint8_t dtype) {
 }
 
 inline uint64_t pool_lanes_for_dtype(uint8_t dtype) {
-    return ewe_lanes_for_dtype(dtype);
+    if (is_fp_dtype(dtype)) return POOL_FP_LANES;
+    switch (static_cast<DType>(dtype)) {
+        case DT_INT16x4:
+        case DT_INT16x8:
+        case DT_INT16x16:
+            return POOL_INT16_LANES;
+        case DT_INT8x4:
+        case DT_INT8x8:
+        default:
+            return POOL_INT8_LANES;
+    }
 }
 
 // v13: softmax-decomposition scratchpad. The decomposed softmax chain

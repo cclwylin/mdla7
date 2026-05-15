@@ -100,10 +100,10 @@ static_assert(sizeof(Payload) == 24, "Payload must be 24 bytes");
 struct PayloadPortCount {
     static constexpr unsigned REQUANT_R = 8;
     static constexpr unsigned REQUANT_W = 8;
-    static constexpr unsigned EWE_R = 16;
-    static constexpr unsigned EWE_W = 8;
-    static constexpr unsigned POOL_R = 16;
-    static constexpr unsigned POOL_W = 8;
+    static constexpr unsigned EWE_R = 32;   // 512 B/cyc (×2 to unblock read after ×4 compute)
+    static constexpr unsigned EWE_W = 32;   // 512 B/cyc (×4 to match ×4 compute)
+    static constexpr unsigned POOL_R = 32;  // 512 B/cyc (×2 to match ×2 compute)
+    static constexpr unsigned POOL_W = 16;  // 256 B/cyc (×2)
     static constexpr unsigned TNPS_R = 8;
     static constexpr unsigned TNPS_W = 8;
     static constexpr unsigned L1MESH_R = 16;
