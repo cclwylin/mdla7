@@ -9083,7 +9083,13 @@ int sc_main(int argc, char* argv[]) {
                 oh_done += this_oh;
                 ++tile_id;
             }
-            if (suppress_producer_store && !single_tile_layer && !tiled_layout_tail.valid && prev_store) {
+            // P3: skip store_barrier when BMM feeds a pipelined softmax — the
+            // barrier would be inserted between BMM tiles and SM descriptors in
+            // program order, forcing the CX CommandEngine to wait for it before
+            // dispatching dq_mb0 to EWE.  The SM's per-mb bm_dep tags already
+            // guard correctness; no verification write is needed here.
+            if (suppress_producer_store && !single_tile_layer && !tiled_layout_tail.valid
+                    && prev_store && p3_sm_dq_pre_tags.empty()) {
                 const uint8_t barrier_tag = alloc_tag();
                 program.push_back(make_store_barrier(i, last_l1_out_addr, L.dram_out,
                                                      barrier_tag, prev_store));
