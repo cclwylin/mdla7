@@ -8460,7 +8460,8 @@ int sc_main(int argc, char* argv[]) {
                 L1_OUT = layout.L1_OUT;
 
                 const bool can_pingpong =
-                    tile_oc == L.out_c && tile_oh < L.out_h;
+                    tile_oc == L.out_c && tile_oh < L.out_h
+                    && !fc_prefetch_wgt_tag[i];  // prefetch uses non-PP layout
                 if (can_pingpong) {
                     auto pp_persistent_wgt_layout_for = [&](uint32_t toh) {
                         struct R {
@@ -8782,7 +8783,13 @@ int sc_main(int argc, char* argv[]) {
                     in_tag = fuse_prev_done_tag;     // prev REQUANT done = input ready
                 } else {
                     in_tag = alloc_tag();
-                    const uint8_t wait_slot = pingpong_tiles ? slot_free_tag[tile_slot] : prev_store;
+                    // P3 prefetch (no pingpong): tile1 must wait for dq_mb0 to
+                    // finish reading L1_OUT before tile1 REQUANT overwrites it.
+                    const uint8_t wait_slot =
+                        (!pingpong_tiles && fc_prefetch_wgt_tag[i]
+                         && tile_id == 1 && !p3_sm_dq_pre_tags.empty())
+                            ? p3_sm_dq_pre_tags[0]
+                            : (pingpong_tiles ? slot_free_tag[tile_slot] : prev_store);
                     auto [id, charged] = make_act_load(L, L.dram_in + dram_in_off,
                                                        tile_l1_in, tile_in_size,
                                                        in_tag, wait_slot, 0);
@@ -9805,6 +9812,36 @@ int sc_main(int argc, char* argv[]) {
                         udma_w_skipped[i] = true;
                         udma_w_streamed[i] = true;
                         layer_done_tag[i] = final_done_tag;
+                    }
+
+                    // P3 weight prefetch: during the SM chain (~12K EWE/POOL
+                    // cycles) DRAM is idle.  Emit the next BMM's weight UDMA_R
+                    // (wait=0) to L1 above SM scratch so CONV can start right
+                    // after SM ends rather than waiting for the weight load.
+                    // pref_addr = scratch_end is always above SM output and scratch.
+                    for (uint32_t j = i + 1; j < N && j <= i + 4; ++j) {
+                        if (metas[j].op_kind == OK_FC_BMM
+                                && fc_prefetch_wgt_tag[j] == 0) {
+                            const auto& BL   = metas[j];
+                            const uint32_t nwgt = uint32_t(conv_pure_weight_bytes(BL));
+                            const uint32_t pref_addr = scratch_end;
+                            if (nwgt > 0
+                                    && uint64_t(pref_addr) + nwgt <= uint64_t(L1_BUDGET)) {
+                                const uint8_t pref_tag = alloc_tag();
+                                program.push_back(make_udma(
+                                    BL.dram_wgt, pref_addr, nwgt,
+                                    /*dir*/ 0, pref_tag));
+                                acc[j].dram_r += nwgt;
+                                acc[j].sram_w += nwgt;
+                                fc_prefetch_wgt_tag[j] = pref_tag;
+                                fc_prefetch_wgt_l1[j]  = pref_addr;
+                            }
+                            break;
+                        }
+                        // Skip zero-cost layers between SM and BMM.
+                        if (metas[j].in_size > 0 && metas[j].op_kind != OK_SLICE
+                                && metas[j].op_kind != OK_STRIDED_SLICE)
+                            break;
                     }
                 }
                 // Reset softmax fuse_prev state (no further fusion from softmax).
