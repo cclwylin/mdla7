@@ -142,3 +142,36 @@ M=16 安全（每 slot ~512 KB scratch），同時切成 4 個 microblock per so
 - **要不要走 P3？** 估 2 sessions（含步驟 3 的 BMM 盤點 + 可能新增）
 - **是否保留批量化 (current code) 作 fallback？** M=rows 自動退化已涵蓋，可不留環境變數
 - **要不要先做步驟 3 的 BMM 盤點再回頭決策？** 純讀，0.5 session 內可結束
+
+---
+
+## Session 5 (2026-05-15) — EWE×4 / POOL×2 / P3 pipeline / UDMA prefetch
+
+### 已完成
+
+| 項目 | 結果 |
+|---|---|
+| P3 store_barrier 移除 | CONV mb1 與 EWE dq_mb0 真正 overlap |
+| EWE ×4（FP 32→128 lanes, INT8 64→256）+ EWE_R×2, EWE_W×4 | ewe_pool.h + descriptor.h |
+| POOL ×2（獨立 POOL_FP/INT8 constants, POOL_R×2, POOL_W×2） | pool_lanes_for_dtype 拆開 |
+| UDMA_R weight prefetch（wait=0，寫到 scratch_end 以上） | next BMM wgt 在 SM 期間 prefetch |
+
+CX latency 進展：baseline 16 ms → P3 8.34 ms → EWE×4/POOL×2 3.8 ms → **prefetch 3.6 ms（4.4×）**
+
+### UDMA_R 更早 emit（未做，記錄於此）
+
+目前 prefetch descriptor 在 SM dispatch **結束後**才加入 program，CX CommandEngine 需等 SM 所有 descriptor 進 FIFO 後才 dispatch prefetch UDMA_R → 實際 overlap 只有 597 cycles（理論 2722 cycles）。
+
+**改進方向**：在 P3 SM microblock loop 內，於 **mb0 的 quant descriptor 之後**立即 emit prefetch UDMA_R，而不是等整個 loop 結束。此時 SM mb1 descriptors 還未 emit，CommandEngine 可以在 mb0 compute 期間就開始 dispatch prefetch。
+
+實作位置：`mdla7_model_runner.cpp` P3 SM branch 的 microblock loop 內，`mbi == 0` 完成後（`t_out` 已知）立刻 emit next BMM weight UDMA_R：
+```cpp
+if (mbi == 0 && /* found next_bmm_idx */) {
+    // emit prefetch UDMA_R here, while mb1 descriptors haven't been issued yet
+}
+```
+
+預估額外收益：再省 ~2000 cycles/block × 221 blocks ≈ 0.3 ms（3.6 → ~3.3 ms）。
+
+### 下一步：Verilog RTL
+接下來看 RTL Verilog 方向。
