@@ -1297,7 +1297,86 @@ def main():
                src[:, y1, :, :][:, :, x1, :] * wx[None, None, :, None])
         return top * (1.0 - wy)[None, :, None, None] + bot * wy[None, :, None, None]
 
+    # ---- BMM/FC → MUL(scalar const) → consumer fold ----
+    # When a BATCH_MATMUL (or FC) output is multiplied by a constant scalar
+    # (e.g. attention's 1/sqrt(depth)) and the MUL output's zero-point equals
+    # its input's, MUL is purely a scale renaming in INT8 — same bit pattern,
+    # different scale tag. Fold the scalar into the BMM's output requant
+    # scale and drop the MUL. On bmm_softmax_bmm_tiled_2.5ms_int8 the MUL
+    # alone accounts for ~91 % of EWE busy time (each one a DRAM round-trip
+    # for the BMM₁ score), so folding eliminates a major DRAM-bound op.
+    bmm_mul_fold = {}            # producer op_idx → fold info
+    mul_skipped_by_fold = set()  # MUL op_idx values that the fold consumed
+
+    def _scalar_const_value_idx(tensor_idx):
+        if tensor_idx is None or int(tensor_idx) < 0:
+            return None
+        t = sg.Tensors(int(tensor_idx))
+        shape = [int(t.Shape(i)) for i in range(t.ShapeLength())]
+        if shape and any(d != 1 for d in shape):
+            return None
+        buf = model.Buffers(t.Buffer())
+        if buf.DataLength() == 0:
+            return None
+        raw = np.frombuffer(buf.DataAsNumpy(), dtype=np.uint8)
+        if raw.size != 1:
+            return None
+        q = t.Quantization()
+        if not q or q.ScaleLength() == 0:
+            return None
+        q_byte = int(raw.view(np.int8)[0])
+        scale = float(q.Scale(0))
+        zp = int(q.ZeroPoint(0)) if q.ZeroPointLength() > 0 else 0
+        return (q_byte - zp) * scale
+
+    for _idx_pp, _name_pp, _op_pp in ops:
+        if _name_pp != "MUL" or _op_pp.InputsLength() < 2:
+            continue
+        _in0 = int(_op_pp.Inputs(0))
+        _in1 = int(_op_pp.Inputs(1))
+        _prod_op_idx = producer_op_by_tensor.get(_in0)
+        if _prod_op_idx is None:
+            continue
+        _prod_op = sg.Operators(_prod_op_idx)
+        _prod_name = _opcode_name(fb, model, _prod_op)
+        if _prod_name not in ("BATCH_MATMUL", "FULLY_CONNECTED"):
+            continue
+        _sc_val = _scalar_const_value_idx(_in1)
+        if _sc_val is None or _sc_val == 0.0:
+            continue
+        # pure scale-rename check: zp_in0 == zp_out (no zp shift)
+        _t_in0 = sg.Tensors(_in0)
+        _t_out = sg.Tensors(int(_op_pp.Outputs(0)))
+        _qi = _t_in0.Quantization()
+        _qo = _t_out.Quantization()
+        if (not _qi or not _qo or _qi.ZeroPointLength() == 0
+                or _qo.ZeroPointLength() == 0):
+            continue
+        if int(_qi.ZeroPoint(0)) != int(_qo.ZeroPoint(0)):
+            continue
+        # Require BMM/FC output to feed only this MUL — otherwise rewriting
+        # the producer's output quantization would corrupt other consumers.
+        _bmm_out_tensor = int(_prod_op.Outputs(0))
+        if len(consumers_by_tensor.get(_bmm_out_tensor, [])) != 1:
+            continue
+        bmm_mul_fold[_prod_op_idx] = {
+            "mul_out_tensor": int(_op_pp.Outputs(0)),
+            "mul_out_q": _qo,
+            "scalar_value": _sc_val,
+            "mul_op_idx": _idx_pp,
+        }
+        mul_skipped_by_fold.add(_idx_pp)
+    if bmm_mul_fold:
+        print(f"compile_model: BMM→MUL(scalar)→cons fold: "
+              f"{len(bmm_mul_fold)} fused")
+
     for li, (orig_op_index, opname, op) in enumerate(ops):
+        if orig_op_index in mul_skipped_by_fold:
+            _in_shape_fold = list(_tensor_shape(sg.Tensors(int(op.Inputs(0)))))
+            _shape_str_fold = "x".join(str(int(d)) for d in _in_shape_fold) or "scalar"
+            print(f"  layer {li:>2d}  {'mul':>7s}  in={_shape_str_fold}  "
+                  f"folded into upstream BMM requant scale")
+            continue
         # TFLite SPLIT is encoded as SPLIT(axis, value); value is the data tensor.
         # Keep compiler chaining and GraphMeta centered on the real data input,
         # not the scalar axis input.
@@ -1486,10 +1565,16 @@ def main():
                         _batch_out + (_K_bmm, _N_bmm),
                     ).reshape(_B_total, _K_bmm, _N_bmm)
                     # Quantisation params for INT8 path
+                    # Fold downstream MUL(scalar) into this BMM's requant
+                    # scale. INT8 only — FP path has different requant
+                    # semantics and is unfolded.
+                    _fold_info = bmm_mul_fold.get(orig_op_index) if not _is_fp_bmm else None
                     if not _is_fp_bmm:
                         _in_q_bmm  = in_t.Quantization()
                         _out_q_bmm = out_t.Quantization()
                         _b_t_q_bmm = _b_t_bmm.Quantization()
+                        if _fold_info is not None:
+                            _out_q_bmm = _fold_info["mul_out_q"]
                         _sc_in  = _qscale(_in_q_bmm)
                         _sc_out = _qscale(_out_q_bmm)
                         _sc_b   = _qscale(_b_t_q_bmm)
@@ -1507,6 +1592,11 @@ def main():
                                      if _b_t_q_bmm and _b_t_q_bmm.ZeroPointLength() > 0
                                      else 0)
                     _out_tensor_bmm = int(op.Outputs(0)) if op.OutputsLength() > 0 else -1
+                    if _fold_info is not None:
+                        # Take over the folded MUL's output tensor so SOFTMAX
+                        # (or whichever consumer) finds the BMM's output
+                        # under the tensor index it actually references.
+                        _out_tensor_bmm = int(_fold_info["mul_out_tensor"])
                     _in0_tensor_bmm = _a_idx_bmm
                     _in1_tensor_bmm = _b_idx_bmm
                     _ld_bmm = TYPE_TO_DTYPE.get(in_t.Type(), DT_INT8x8)
@@ -3323,14 +3413,17 @@ def main():
                 is_fp_layer = True
                 elem_size   = 2
             else:
-                # v13: when MDLA7_DECOMPOSE_SOFTMAX=1 the runner emits a
+                # v13: when softmax decomposition is enabled (the
+                # MDLA7_SOFTMAX_DECOMPOSE flag, default ON) the runner emits a
                 # dequant -> FP16 chain -> requant descriptor sequence per row;
                 # the reference must follow the same FP16-storage trajectory or
                 # the layer-end byte-compare reports spurious mismatches.
                 in_q = in_t.Quantization()
                 zp_in = (int(in_q.ZeroPoint(0))
                          if in_q and in_q.ZeroPointLength() else 0)
-                if os.environ.get("MDLA7_DECOMPOSE_SOFTMAX"):
+                _sm_env = os.environ.get("MDLA7_SOFTMAX_DECOMPOSE")
+                _sm_decomp = (_sm_env is None) or (_sm_env != "" and _sm_env != "0")
+                if _sm_decomp:
                     ref = softmax_int8_decomp_ref(in_i8, zp_in)
                 else:
                     ref = softmax_int8_ref(in_i8)      # v1: real LUT-based

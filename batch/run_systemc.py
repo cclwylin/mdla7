@@ -1192,7 +1192,7 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
   <button id="gantt-reset">Reset</button>
   &nbsp;|&nbsp;
   <label>scope:
-    <input id="gantt-scope" placeholder="op name · L&lt;id&gt; · range 3-6"
+    <input id="gantt-scope" placeholder="op name · L&lt;id&gt; · F&lt;flow&gt; · range 3-6"
            style="width:200px; padding:1px 4px; font: 11px ui-monospace,Menlo,Consolas,monospace;"
            autocomplete="off"/></label>
   <button id="gantt-prev"  title="previous match">◀</button>
@@ -1896,6 +1896,20 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
       return [];
     }}
 
+    // Flow id: "F37" / "flow37" / "flow 37". A flow can span multiple layers,
+    // so collapse all matching layers into one flow-range match covering
+    // [min(start), max(end)] across them.
+    const flM = q.match(/^(?:f|flow)\\s*(\\d+)$/);
+    if (flM) {{
+      const target = parseInt(flM[1], 10);
+      const hits = data.layers.filter(L => L.flow === target);
+      if (!hits.length) return [];
+      if (hits.length === 1) return [{{kind: 'layer', L: hits[0]}}];
+      const start = Math.min(...hits.map(L => L.start));
+      const end   = Math.max(...hits.map(L => L.end));
+      return [{{kind: 'flow', flow: target, count: hits.length, start, end}}];
+    }}
+
     // Single id: "5" or "L5".
     const idM = q.match(/^l?(\\d+)$/);
     if (idM) {{
@@ -1917,6 +1931,9 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     if (m.kind === 'range') {{
       s = m.start; e = m.end;
       highlight = {{start: s, end: e, id: `${{m.lo}}–${{m.hi}}`, op: `${{m.count}} layers`}};
+    }} else if (m.kind === 'flow') {{
+      s = m.start; e = m.end;
+      highlight = {{start: s, end: e, id: `F${{m.flow}}`, op: `${{m.count}} layers`}};
     }} else {{
       const L = m.L;
       s = L.start; e = L.end;
@@ -1940,6 +1957,8 @@ input.filter {{ width: 220px; padding: 3px 6px; margin: 4px 0 8px 0;
     let label;
     if (m.kind === 'range') {{
       label = `range L${{m.lo}}–L${{m.hi}} (${{m.count}} layers) [${{fmt(m.start)}}, ${{fmt(m.end)}}]`;
+    }} else if (m.kind === 'flow') {{
+      label = `F${{m.flow}} (${{m.count}} layers) [${{fmt(m.start)}}, ${{fmt(m.end)}}]`;
     }} else {{
       const L = m.L;
       label = `${{matchIdx + 1}}/${{matches.length}}: L${{L.id}} ${{L.op}} [${{fmt(L.start)}}, ${{fmt(L.end)}}]`;

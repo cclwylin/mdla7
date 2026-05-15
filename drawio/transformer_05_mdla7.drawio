@@ -1,0 +1,92 @@
+<mxGraphModel background="#FFFFFF" grid="0" pageWidth="760" pageHeight="480">
+  <root>
+    <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+    <mxCell id="ttl" value="Transformer → MDLA7 硬體對應" style="text;html=1;fontSize=15;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="180" y="10" width="400" height="28" as="geometry"/>
+    </mxCell>
+
+    <!-- Layer loop box -->
+    <mxCell id="loop" value="" style="rounded=0;fillColor=#F7F9FF;strokeColor=#2D3E8A;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="30" y="50" width="700" height="380" as="geometry"/>
+    </mxCell>
+    <mxCell id="looplbl" value="for each layer  （Qwen3.5 = 24 層）" style="text;html=1;fontSize=10;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#2D3E8A;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="40" y="53" width="280" height="18" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Attention section ── -->
+    <mxCell id="attnbox" value="" style="rounded=0;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=1.5;" vertex="1" parent="1">
+      <mxGeometry x="60" y="80" width="620" height="150" as="geometry"/>
+    </mxCell>
+    <mxCell id="attnlbl" value="Attention" style="text;html=1;fontSize=11;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="70" y="83" width="100" height="18" as="geometry"/>
+    </mxCell>
+
+    <!-- BMM1 op -->
+    <mxCell id="bmm1op" value="BMM1&lt;br/&gt;Q × K^T" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1E2761;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="90" y="108" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="smxop" value="Softmax&lt;br/&gt;EWE+POOL" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#9673a6;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="320" y="108" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="bmm2op" value="BMM2&lt;br/&gt;probs × V" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1E2761;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="550" y="108" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="ea1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="bmm1op" target="smxop" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ea2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="smxop" target="bmm2op" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Engine labels for Attention -->
+    <mxCell id="eng1" value="CONV Engine" style="text;html=1;fontSize=9;fillColor=#CADCFC;strokeColor=#6c8ebf;fontColor=#1E2761;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="90" y="168" width="100" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="eng2" value="EWE + POOL" style="text;html=1;fontSize=9;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#9673a6;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="320" y="168" width="100" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="eng3" value="CONV Engine" style="text;html=1;fontSize=9;fillColor=#CADCFC;strokeColor=#6c8ebf;fontColor=#1E2761;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="550" y="168" width="100" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- ── FFN section ── -->
+    <mxCell id="ffnbox" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=1.5;" vertex="1" parent="1">
+      <mxGeometry x="60" y="248" width="620" height="130" as="geometry"/>
+    </mxCell>
+    <mxCell id="ffnlbl" value="FFN" style="text;html=1;fontSize=11;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1B7B4E;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="70" y="251" width="60" height="18" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="fc1op" value="FC1&lt;br/&gt;D → 4D" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1B7B4E;strokeColor=#1B7B4E;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="90" y="278" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="geluop" value="GELU&lt;br/&gt;激活函數" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#9673a6;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="320" y="278" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="fc2op" value="FC2&lt;br/&gt;4D → D" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1B7B4E;strokeColor=#1B7B4E;fontFamily=Helvetica;fontSize=10;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="550" y="278" width="100" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="ef1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1B7B4E;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="fc1op" target="geluop" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ef2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1B7B4E;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="geluop" target="fc2op" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ffen1" value="CONV Engine" style="text;html=1;fontSize=9;fillColor=#CADCFC;strokeColor=#6c8ebf;fontColor=#1E2761;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="90" y="338" width="100" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="ffen2" value="EWE" style="text;html=1;fontSize=9;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#9673a6;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="320" y="338" width="100" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="ffen3" value="CONV Engine" style="text;html=1;fontSize=9;fillColor=#CADCFC;strokeColor=#6c8ebf;fontColor=#1E2761;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="550" y="338" width="100" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Memory note -->
+    <mxCell id="mem" value="所有中間結果在  L1Mesh（3MB）↔ DRAM（4GB）之間搬運" style="text;html=1;fontSize=10;fillColor=#FFF9E6;strokeColor=#D6B656;fontColor=#7A6000;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="60" y="390" width="620" height="25" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

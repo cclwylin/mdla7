@@ -1,0 +1,102 @@
+<mxGraphModel background="#FFFFFF" grid="0" pageWidth="700" pageHeight="780">
+  <root>
+    <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+    <!-- Title -->
+    <mxCell id="ttl" value="Transformer Block 完整結構" style="text;html=1;fontSize=15;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="160" y="10" width="380" height="28" as="geometry"/>
+    </mxCell>
+
+    <!-- Input -->
+    <mxCell id="inp" value='輸入文字&lt;br/&gt;&lt;font style="font-size:9px;color:#666;"&gt;"今天天氣很好"&lt;/font&gt;' style="rounded=0;whiteSpace=wrap;html=1;fillColor=#CADCFC;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="250" y="50" width="200" height="45" as="geometry"/>
+    </mxCell>
+
+    <!-- Tokenizer -->
+    <mxCell id="tok" value="Tokenizer&lt;br/&gt;切成 token（字或詞）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Helvetica;fontSize=10;fontColor=#333;" vertex="1" parent="1">
+      <mxGeometry x="250" y="130" width="200" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="ei" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="inp" target="tok" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Embedding -->
+    <mxCell id="emb" value="Embedding&lt;br/&gt;每個 token → 數字向量 [S, D]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Helvetica;fontSize=10;fontColor=#333;" vertex="1" parent="1">
+      <mxGeometry x="250" y="205" width="200" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="et" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="tok" target="emb" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Transformer Block outer -->
+    <mxCell id="blk" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F7F9FF;strokeColor=#2D3E8A;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+      <mxGeometry x="100" y="275" width="500" height="360" as="geometry"/>
+    </mxCell>
+    <mxCell id="blklabel" value="Transformer Block  ×N 層（例如 Qwen3.5 = 24 層）" style="text;html=1;fontSize=10;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#2D3E8A;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="110" y="278" width="400" height="18" as="geometry"/>
+    </mxCell>
+
+    <!-- Attention sub-box -->
+    <mxCell id="attn" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=1.5;" vertex="1" parent="1">
+      <mxGeometry x="130" y="305" width="440" height="130" as="geometry"/>
+    </mxCell>
+    <mxCell id="attnlbl" value="Multi-Head Attention" style="text;html=1;fontSize=10;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="140" y="308" width="200" height="18" as="geometry"/>
+    </mxCell>
+    <mxCell id="attn_inner" value="Q = x × W_Q     K = x × W_K     V = x × W_V&lt;br/&gt;scores = BMM(Q, K^T) / √D&lt;br/&gt;probs  = Softmax(scores + mask)&lt;br/&gt;out    = BMM(probs, V)" style="text;html=1;fontSize=10;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;align=left;" vertex="1" parent="1">
+      <mxGeometry x="145" y="328" width="410" height="95" as="geometry"/>
+    </mxCell>
+
+    <!-- Add & LayerNorm 1 -->
+    <mxCell id="ln1" value="Add &amp; LayerNorm&lt;br/&gt;&lt;font style=&quot;font-size:9px;color:#666;&quot;&gt;output = LayerNorm(x + Attention(x))&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Helvetica;fontSize=10;fontColor=#333;" vertex="1" parent="1">
+      <mxGeometry x="200" y="450" width="300" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="ea1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="attn" target="ln1" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- FFN sub-box -->
+    <mxCell id="ffn" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=1.5;" vertex="1" parent="1">
+      <mxGeometry x="130" y="505" width="440" height="65" as="geometry"/>
+    </mxCell>
+    <mxCell id="ffnlbl" value="FFN  —  Linear(D→4D) → GELU → Linear(4D→D)" style="text;html=1;fontSize=10;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1B7B4E;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="145" y="522" width="410" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="ef" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="ln1" target="ffn" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Add & LayerNorm 2 -->
+    <mxCell id="ln2" value="Add &amp; LayerNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Helvetica;fontSize=10;fontColor=#333;" vertex="1" parent="1">
+      <mxGeometry x="200" y="585" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="ef2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="ffn" target="ln2" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrow out of block -->
+    <mxCell id="eblk" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="emb" target="blk" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Output Layer -->
+    <mxCell id="outlyr" value="Output Layer&lt;br/&gt;預測下一個字的機率" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#CADCFC;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="250" y="670" width="200" height="45" as="geometry"/>
+    </mxCell>
+    <mxCell id="eout" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="ln2" target="outlyr" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Repeat arrow -->
+    <mxCell id="rep" value="重複 N 層" style="text;html=1;fontSize=9;fillColor=none;strokeColor=none;fontColor=#2D3E8A;fontStyle=1;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="615" y="430" width="80" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="repa" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#2D3E8A;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="620" y="600" as="sourcePoint"/>
+        <mxPoint x="620" y="310" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

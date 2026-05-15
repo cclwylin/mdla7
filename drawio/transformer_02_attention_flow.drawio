@@ -1,0 +1,85 @@
+<mxGraphModel background="#FFFFFF" grid="0" pageWidth="700" pageHeight="600">
+  <root>
+    <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+    <!-- Title -->
+    <mxCell id="ttl" value="Attention 計算流程" style="text;html=1;fontSize=15;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="220" y="10" width="260" height="28" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Inputs Q K V ── -->
+    <mxCell id="q" value="Q&lt;br/&gt;Query" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="80"  y="50" width="80" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="k" value="K&lt;br/&gt;Key" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="300" y="50" width="80" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="v" value="V&lt;br/&gt;Value" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="520" y="50" width="80" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Step 1: BMM1 ── -->
+    <mxCell id="bmm1" value="① BMM&lt;br/&gt;Q × K^T → scores" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1E2761;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=11;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="160" y="160" width="200" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="e1q" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="q" target="bmm1" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e1k" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="k" target="bmm1" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="l1" value="[1, H, S, S]" style="text;html=1;fontSize=9;fillColor=none;strokeColor=none;fontColor=#666666;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="380" y="173" width="90" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Step 2: Scale ── -->
+    <mxCell id="scale" value="② Scale × 1/√D&lt;br/&gt;(e.g. ×0.0625 for D=256)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Helvetica;fontSize=11;fontColor=#333333;" vertex="1" parent="1">
+      <mxGeometry x="160" y="265" width="200" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="bmm1" target="scale" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Step 3: Mask ── -->
+    <mxCell id="mask" value="③ Mask（選用）&lt;br/&gt;不該看的位置設為 −∞" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Helvetica;fontSize=11;fontColor=#333333;dashed=1;" vertex="1" parent="1">
+      <mxGeometry x="160" y="370" width="200" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="scale" target="mask" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Step 4: Softmax ── -->
+    <mxCell id="smx" value="④ Softmax&lt;br/&gt;→ probs（機率，加總=1）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Helvetica;fontSize=11;fontColor=#333333;" vertex="1" parent="1">
+      <mxGeometry x="160" y="475" width="200" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="mask" target="smx" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ── Step 5: BMM2 ── -->
+    <mxCell id="bmm2" value="⑤ BMM&lt;br/&gt;probs × V → output" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1B7B4E;strokeColor=#1B7B4E;fontFamily=Helvetica;fontSize=11;fontColor=#FFFFFF;" vertex="1" parent="1">
+      <mxGeometry x="160" y="580" width="200" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="smx" target="bmm2" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <!-- V into BMM2 -->
+    <mxCell id="e5v" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=1.5;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" source="v" target="bmm2" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="560" y="640"/>
+          <mxPoint x="360" y="640"/>
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- Output -->
+    <mxCell id="out" value="Attention Output" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#CADCFC;strokeColor=#1E2761;fontFamily=Helvetica;fontSize=11;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="160" y="685" width="200" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="eout" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1E2761;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="bmm2" target="out" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

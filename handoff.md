@@ -7,125 +7,6 @@ Branch：`main`
 
 ---
 
-## 本 session 已提交的工作（1 commit）
-
-### Profile HTML + 5 improvements（`2df2d16`）
-
-#### Item 5：fc(bmm) profile label 改進
-- fc(bmm) label 現在顯示 ic→oc 維度（e.g. `fc(bmm, 256→1024)` for Q×Kᵀ, `fc(bmm, 1024→256)` for S×V）
-- engine 欄修正為 `conv+requant`（之前顯示 `—`）
-
-#### Item 2：INT8 KV cache attention models
-- `gen_qwen35_kvcache_tflite.py` 修正 TFLite INT8 quantization 的 softmax shape inference bug：
-  - 問題：4-D softmax 後接 BATCH_MATMUL，TFLite quantizer 的 accum_dim 推算錯誤（1 vs 128）
-  - 修正：Reshape squeeze inner-1 → Softmax → Reshape unsqueeze
-- 生成 `model/BMM/qwen35_kvcache_{128,512,1024}_int8.tflite`
-- 11/11 BMM SystemC + Verilog DPI PASS
-
-#### Item 4：REVERSE_V2 → OK_REVERSE constant-load lowering
-- 新增 `OP_REVERSE = 32` / `OK_REVERSE = 32`
-- compile-time constant 的 REVERSE_V2 ops（RoPE sinusoid flip）改為 UDMA constant-load layer（與 OK_SHAPE 相同 runtime path）
-- `qwen35_attention_s128/s1024` layer 9, 15：`matrlz from=REVERSE_V2` → `reverse`
-
-#### Item 3：Production INT8 BMM 評估
-- ArcSim regression：bit-exact ✅（A,B 固定）
-- Production：`bias_eff[n]` 含 compile-time `sum_b[n]`，B 動態時需要 driver-side 更新
-- 修正路徑：driver 在每次 inference 前重算 `sum_b[n]` 並 overwrite DRAM params blob（無需 RTL 變更）
-- 加了說明 comment 在 compile_model.py
-
-#### Item 1：Phase 6c OW spatial tile loop
-**RTL 新增：**
-- `conv.v`：新增 `conv_tile_ow_count[15:0]`（word[8][31:16]）和 `act_tile_col_stride[21:0]`（word[10][21:0]）port
-- `conv.v`：ST_STORE 中 OC loop 完成後，若 `tile_ow_remaining > 1` → 推進 `act_tile_ow_offset` 並回 ST_ACT
-- `host.v`、`mdla7_top.v`、`Testbench_host_program.v`：全部接線
-
-**Generator 新增：**
-- `CONV_OW_COUNT_SHIFT = 16` 常數
-- `closed_loop_conv_requant_ow_tile_probe()` 函數：tile_ow=2 spatial probe（兩個 ACT copies → 同 WGT → 2 chain pulses → REQUANT drain 2 次）
-- 自動插入到 `closed_loop_conv_probes()` 中
-
-**Regression：** 11/11 Verilog DPI PASS
-
----
-
-## 目前整體狀態
-
-### Regression
-
-```
-BMM (11 models):  SystemC 8/11 clean  (3 compile-skipped = FP16 DEQUANTIZE，無害)
-                  Verilog DPI 11/11 PASS
-```
-
-### Descriptor bit 全覽（v12 完整版）
-
-| 欄位 | word | bits | engine |
-|---|---|---|---|
-| `conv_chain_out_enable` | [3] | [15] | CONV |
-| `requant_use_chain_input` | [3] | [12] | REQUANT |
-| `requant_fp_mode` | [3] | [13] | REQUANT |
-| `requant_param_load_mode` | [3] | [14] | REQUANT |
-| `requant_use_act_correction` | [3] | [17] | REQUANT |
-| `conv_tile_oc_count` | [31] | [31:16] | CONV |
-| `conv_tile_ow_count` | [8] | [31:16] | CONV (v12 Phase 6c) |
-| `requant_tile_drain_count` | [8] | [15:0] | REQUANT |
-| `act_tile_col_stride` | [10] | [21:0] | CONV (v12 Phase 6c, L1-mode only) |
-| `requant_fp_bias` | [5] | [31:0] | REQUANT |
-| `requant_param_l1_addr` | [6] | [21:0] | REQUANT |
-| `requant_oc_count` | [7] | [15:0] | REQUANT |
-| `requant_oc_index` | [7] | [31:16] | REQUANT |
-| `requant_chain_zp_b` | [9] | [7:0] | REQUANT |
-| `chain_psum_data[31:0]` | chain | — | CONV→REQUANT psum |
-| `chain_psum_data[63:32]` | chain | — | CONV→REQUANT sum_a |
-
-### Op kind 全覽
-
-| kind | value | 描述 |
-|---|---|---|
-| OK_FC_BMM | 30 | BATCH_MATMUL lowered to CONV |
-| OK_SHAPE | 31 | compile-time constant shape vector (UDMA load) |
-| OK_REVERSE | 32 | REVERSE_V2 pre-flipped bytes (UDMA load) |
-
----
-
-## 接下來 next session 的建議工作
-
-### 1. Phase 6d：OH spatial tile loop（OW loop 之外再加 OH）
-
-目前 Phase 6c 完成了 OW loop。OH loop 是外層：
-- 新 port：`conv_tile_oh_count[15:0]`（可放 word[9][23:8]），`act_tile_row_stride[21:0]`（word[11][21:0]）
-- ST_STORE 中：OW loop 完成後，若 `tile_oh_remaining > 1` → 推進 `act_tile_oh_offset` 並回 ST_ACT
-- Generator：`closed_loop_conv_requant_oh_ow_tile_probe()`（tile_oh=2, tile_ow=2）
-
-### 2. Production INT8 BMM：dynamic sum_b correction
-
-Driver-side fix（無需 RTL）：
-- compile_model.py emit 一個 "dynamic correction header" block（包含 `zp_A, K, N` 和 bias_eff table offset）
-- mdla7_model_runner.cpp 或 production driver 在 dispatch 前：
-  1. 讀取 B tile data from DRAM
-  2. 計算 `sum_b[n] = Σ_k B[k,n]`
-  3. 更新 `bias_eff[n] = -zp_A * sum_b[n] + K * zp_A * zp_B`
-  4. Overwrite DRAM params blob
-
-### 3. RESHAPE / RANDOM_STANDARD_NORMAL lowering
-
-類似 REVERSE_V2 → OK_REVERSE 的模式，把其他 matrlz ops lower 到 constant-load：
-- `RANDOM_STANDARD_NORMAL`：固定 seed → deterministic bytes → UDMA load
-- `RESHAPE`（compile-time constant input）：直接 reinterpret bytes → UDMA load
-- 可以統一成 `OK_CONST = 33`（generic compile-time constant）
-
-### 4. DRAM multi-beat（vf_dram_model burst）
-
-目前 `vf_dram_model` 每 request 回 16 byte。Phase 6 tile engine 的 weight load 可能需要多個 beat。
-需要：
-- `vf_dram_model` 支援 burst mode（`bytes > 16` 時分多 beat 回應）
-- CONV ST_WGT：改為 burst 讀取（loop 直到所有 bytes 到位）
-
-### 5. Profile HTML 改進
-
-- `qwen35_attention` 的 `fc(bmm, 256→1)` 等 s=128 的模型：oc 太小，label 可能不直觀
-- 可考慮 model-level tag 來標記 "attention" 模型
-
 ---
 
 ## 快速重建指令
@@ -152,147 +33,112 @@ git checkout model/BMM/
 
 ---
 
-## Session 3 추가 작업（2026-05-14）
+CONV/EWE/POOL microblock pipeline plan
 
-### Phase 6d：OH spatial tile loop（`9768589`）
+### 動機
 
-**RTL 새로 추가된 포트 (conv.v):**
-- `conv_tile_oh_count[15:0]` ← word[9][23:8]
-- `act_tile_row_stride[21:0]` ← word[11][21:0]
-- `conv_spatial_tile_enable` ← word[3][18] ← **필수 enable flag**
+批量化後 11.18 ms / 21 ms (fast / sim)，但 F34 周邊測得**三引擎完全沒 overlap**：
 
-**Backward-compat 설계:**
-- word[3][18] = `CONV_SPATIAL_TILE_EN` 이 0이면 OW/OH loop 모두 비활성화
-- 기존 CONV descriptor의 word[8..11]은 WGT data → 오염된 tile count 방지
-- enable flag를 set하지 않은 기존 hex 프로그램 전부 그대로 동작
+| Layer              | cyc    | 累計 cum |
+| ------------------ | ------ | -------- |
+| L33 BMM (Q×Kᵀ)   | 7,425  | 7,425    |
+| L34 sm_pmax (POOL) | 11,262 | 18,687   |
+| L34 sm_sub (EWE)   | 5,631  | 24,318   |
+| L34 sm_exp (EWE)   | 5,631  | 29,949   |
+| L34 sm_psum (POOL) | 11,262 | 41,211   |
+| L34 sm_div (EWE)   | 5,631  | 46,842   |
+| L36 BMM (S×V)     | 8,629  | 55,473   |
 
-**State machine:**
-```
-ST_STORE:
-  if tile_oc_remaining > 1  → OC 루프 (기존)
-  elif tile_ow_remaining > 1 → OW 루프 (Phase 6c)
-  elif tile_oh_remaining > 1 → OH 루프 (Phase 6d 신규)
-  else → ST_DONE
-```
+每 attention block 55.5 K cyc。引擎用量分布：POOL 22.5K（兩個 reduce）/ EWE 16.9K (sub+exp+div) / CONV+Requant 16.1K。完美 overlap → critical path = **max(22.5K) ≈ 40% of 55.5K**。
 
-**Generator:**
-- `CONV_SPATIAL_TILE_EN = 1 << 18` 상수
-- `closed_loop_conv_requant_oh_ow_tile_probe(tile_oh=2, tile_ow=2)`：
-  - 4 ACT UDMA + 1 WGT UDMA + CONV(OH=2,OW=2) + REQUANT(drain=4) + L1CRC(4B)
-  - desc[3]에 CONV_SPATIAL_TILE_EN 반드시 set
-- OW probe도 desc[9]=0, desc[11]=0 으로 OH count 오염 방지
+對 442 個 attention block 推估：sim 21 ms × 0.4 ≈ **~8 ms**，fast latency 11 ms → **~4–5 ms**，接近原 baseline 7 ms。
 
-**Regression:** 12/12 Verilog DPI PASS（backward compat 확인）
+### 為什麼現在沒 overlap
 
-### Descriptor bit 갱신
+1. **每層 1 個 descriptor 整批**（剛批量化的副作用）— 後一引擎要等前一引擎整批做完
+2. **Softmax 內 5 ops 強制序列**（chain wait_tag）— 結構性無法 overlap 同 softmax 內
+3. **Scratches `addr_max/ctr/exp/sum` 跨 softmax 共用一塊** — 不同 softmax 也不能 overlap（早 Session 4 的 Phase E 分析）
 
-| 필드 | word | bits | 비고 |
-|---|---|---|---|
-| `conv_spatial_tile_enable` | [3] | [18] | 1이어야 OW/OH 루프 활성화 |
-| `conv_tile_ow_count` | [8] | [31:16] | tile_ow iterations |
-| `conv_tile_oh_count` | [9] | [23:8] | tile_oh iterations |
-| `act_tile_col_stride` | [10] | [21:0] | L1 bytes per OW step |
-| `act_tile_row_stride` | [11] | [21:0] | L1 bytes per OH step |
+### 真正可以 overlap 的方向
 
-### Next session 권장 작업 갱신
+**不是**同一個 softmax 內的 5 ops（dep chain 寫死），**是**：
 
-1. **compile_model.py OH/OW 연동**: 실제 conv layer를 OH×OW tile descriptor로 lower하는 코드 추가 (현재는 probe만 존재, compiler는 미구현)
-2. **DRAM multi-beat**: vf_dram_model burst 지원 (Phase 6 tile engine weight load)
-3. **Producer INT8 BMM**: sum_b dynamic correction driver-side
+- **Softmax N 的 POOL_SUM** ↔ **Softmax N+1 的 POOL_MAX**（同 POOL engine，scratch 要分）
+- **Softmax 的 EWE 階段** ↔ **下一個 BMM 的 CONV/Requant**（不同 engine，要 microblock 切細）
+- **BMM 的 CONV 出 row 0..k** ↔ **Softmax 的 POOL_MAX 處理 row 0..k**（cross-layer row streaming，要 BMM 也 tile）
 
----
+→ 結構是 **跨 attention block 的 row-level pipeline**，不是 softmax 內部 overlap。
 
-## Session 4 (2026-05-15) — Softmax decomposition: Pool bottleneck 重新校準
+### 階段化 Plan
 
-### 初始錯誤診斷（已校正）
+| Phase                                                    | 內容                                                                                                                                                                                                       | 預期 latency 改善                      | 風險                                                            | session 數 |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------- | ---------- |
+| **P1: Softmax 間 scratch ping-pong**               | `addr_max[2]/ctr[2]/exp[2]/sum[2]` 雙緩衝；softmax N+1 的 POOL_MAX 只 wait softmax N-1 而非 N                                                                                                            | 中（POOL 兩 op 不再卡同 softmax 連續） | 低 — 純 compiler-side，~80 行                                  | 1          |
+| **P2: 同 softmax 內 dequant/quant 平行 BMM**       | INT8 chain 的 dequant (entry) 跟前一個 BMM (Requant tail) overlap；quant (exit) 跟下一個 BMM (CONV head) overlap；靠調整 wait_tag dep 來鬆綁                                                               | 小–中（dequant/quant ~2K cyc × 442） | 低 — 改 tag 不改結構                                           | 1          |
+| **P3: BMM tile-by-row + softmax microblock chain** | BMM L33/L36 改成 M-row microblock（M=16 試）；softmax chain 也切成 M-row microblock，每 microblock 7 ops；scratch 開 2×M-row ping-pong；BMM 第 k 個 microblock done → softmax chain 第 k microblock 啟動 | 大（target 4-5 ms）                    | 中–高 — 動 BMM tile loop + scratch allocator + L1 budget 再驗 | 2          |
+| **P4: 三引擎 steady-state 驗證**                   | 跑 profile + L1Mesh，看 timeline 是否真的三層疊；找剩餘 stall 點（DRAM bandwidth? sslice? udma_w?）                                                                                                        | 確認/微調                              | 低                                                              | 0.5        |
 
-最初判斷「Pool bottleneck = decomposition 全在 EWE thread 內 inline 跑完，沒真的丟給 PoolEngine」— **這是錯的**。
+### 起點建議：P1（softmax 間 ping-pong）
 
-校正後事實：跨引擎 dispatch **早就完整實作在 [mdla7_model_runner.cpp](systemc/src/mdla7_model_runner.cpp) 內**：
-- FP16（任意 rows）：[9462-9499](systemc/src/mdla7_model_runner.cpp#L9462-L9499) (rows==1) + [9519-9682](systemc/src/mdla7_model_runner.cpp#L9519-L9682) (rows>1) 已發 POOL_MAX → EWE_SUB → EWE_EXP → POOL_SUM → EWE_DIV 5 條 descriptor
-- INT8 rows>1：已 dequant→FP16 chain→quant 走同一路
-- `make_pool_row_reduce` ([mdla7_model_runner.cpp:288-310](systemc/src/mdla7_model_runner.cpp#L288-L310)) 用形狀慣例 `[in_h=rows, in_w=K, in_c=1, k_w=K]` — PoolEngine 現有三層迴圈直接處理，**不需改 PoolEngine**
+最小可驗、改動隔離。改 [mdla7_model_runner.cpp:9573-9582](systemc/src/mdla7_model_runner.cpp#L9573-L9582) 的 scratch 分配 + 跨 softmax 的 wait_tag 路徑（layer-loop 那層的 `prev_*_done` 追蹤）。
 
-[ewe_pool.h](systemc/include/mdla7/ewe_pool.h) 的 `run_softmax_decomposed_*` inline 路徑只在邊角情況 fire：
-1. INT8 + rows==1（[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件 `L.dtype == DT_FP16` 排除）
-2. `MDLA7_SOFTMAX_DECOMPOSE=0`
-3. L1 容量檢查失敗
+具體：
 
-### 真正的 Pool bottleneck 來源
+- 把 `addr_max/addr_sum` 改成 per-layer pair `{addr_max[0], addr_max[1]}`
+- 在 model_runner 的 layer 迴圈外維持 `softmax_scratch_slot` (mod 2) 跟 `prev2_softmax_done_tag`
+- 每個 softmax chain 用 `softmax_scratch_slot` 對應的 buffer，wait 改 `prev2_softmax_done_tag`（兩個 softmax 前的）
+- L1 用量加倍：`fp_buf_b × 4 + scalar_b × 4`（INT8 chain），對 typical (rows=64, K=2048) = 2 MB scratch，跟 L1_BUDGET 一樣 — **不夠**！
 
-每個 row 的 POOL_MAX 都**顯式等前一個 row 的 EWE_DIV done**（[mdla7_model_runner.cpp:9591](systemc/src/mdla7_model_runner.cpp#L9591) `load_done_wait = (row == 0) ? fuse_prev_done_tag : prev_req_tag`）。
+→ **P1 需先解 L1 fit**：要嘛縮 microblock（< 64 rows）配 ping-pong，要嘛先做 P3 把 microblock 切細再 ping-pong。
 
-原因：scratches `addr_max / addr_ctr / addr_exp / addr_sum`（[9574-9577](systemc/src/mdla7_model_runner.cpp#L9574-L9577)）**跨所有 row 共用一塊**，有 WAR/WAW hazard，只能串。
+→ 結論：**P1 跟 P3 必須一起做**，因為 ping-pong 在 whole-shape (64 rows × 2048 K) 上 L1 裝不下。建議直接走 P3 + 內含 ping-pong。
 
-→ Critical path 上有 `2 × rows` 個 POOL ops 全部串行；看起來 Pool 是 bottleneck，**真因是 scratch 沒 double-buffer**，不是 Pool 本身。
+### 修訂後的真正起點：P3（BMM tile + softmax microblock + 2-slot ping-pong）
 
-### Phase 表重新對齊現況
+選 M（microblock rows 大小）讓 L1 裝得下 2 個 slot 的所有 scratch：
 
-| 原 Phase | 校正後現況 |
-|---|---|
-| A: PoolEngine row-reduce mode | ✅ 已用 shape convention，PoolEngine 不需動 |
-| B: FP 5-descriptor chain | ✅ [mdla7_model_runner.cpp:9462+](systemc/src/mdla7_model_runner.cpp#L9462) 已實作 |
-| C: L1Mesh 報告驗證 POOL 流量歸屬 | ❓ 沒驗過 — 待跑 |
-| D: INT8 widening | ❌ 不需要 — INT8 已走 dequant→FP16→quant，PoolBody 不需動 |
-| E: Microblock overlap (scratch ping-pong) | ❌ **真正未做的工** |
+對 (rows=64, K=2048, INT8)：
 
-### 真正的下一步候選
+- 每 slot 需要 `ctr(M×K×2) + exp(M×K×2) + fp_in(M×K×2) + fp_out(M×K×2) + max(M×2) + sum(M×2)` ≈ `M × K × 8 + M × 4`
+- 2 slots: `M × K × 16 + M × 8`
+- L1_BUDGET = 2 MB = 2,097,152 bytes
+- 留 ~512 KB 給 input/output → ~1.5 MB 給 scratch
+- M ≤ 1,572,864 / (2048 × 16) ≈ 48 rows
 
-1. **Phase E（微塊 overlap，本來該做的）**：
-   - `addr_max[2] / addr_ctr[2] / addr_exp[2] / addr_sum[2]` 雙緩衝
-   - 移除 `load_done_wait = prev_req_tag` 強制依賴（改成 row r 只需 wait row r-2 的 div done）
-   - 預期：POOL/EWE 可以 row 級 overlap，critical path 從 `O(rows × 5)` 降到 `O(rows × max(per-op))`
-   - 風險：L1 scratch 用量 2x；要重看 L1_BUDGET fit check
-   - 影響：[mdla7_model_runner.cpp:9519-9682](systemc/src/mdla7_model_runner.cpp#L9519-L9682) 內，pure compiler-side
+M=16 安全（每 slot ~512 KB scratch），同時切成 4 個 microblock per softmax，足夠跨層 overlap。
 
-2. **Phase C（先驗證後改）**：
-   - 跑 model + [L1Mesh_report.md](L1Mesh_report.md) 生成器，確認 POOL 流量歸 PoolEngine 帳上
-   - 確認 user 觀察是「2 × rows POOL ops 在 critical path」的現象本身（→ 走 E），還是報告歸屬錯（→ 修報告）
-   - 純讀，沒改動
+要不要走這條？要的話下一步：先 P3 草圖 + L1 fit 自動 sizing helper。
 
-3. **邊角清理（低優先）**：INT8 rows==1 改走 chain（[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件加 INT8），消除 inline path
+### P3 執行步驟（待 user 確認啟動）
 
-### 建議起點
+1. **L1 fit auto-sizing helper**
 
-**Phase C 先做** — 讀 L1Mesh 報告，先確認 bottleneck 真因再決定 E 怎麼動。Phase E 是 compiler-side 大改，先驗報告再下手較穩。
+   - 輸入 `(rows, K, dtype, fuse_eligible, in_size, ref_size)` → 輸出 `(M, num_microblocks)`
+   - 預設選 `M = max{2^k : 2 slots 全 scratch + in + out ≤ L1_BUDGET}`，clamp 到 `M ≤ rows`
+   - 對 (rows=64, K=2048, INT8) 應該選出 M=16
+   - 對小 model（rows=8, K=128）會選出 M=rows（單 microblock，退化為當前批量化）
+2. **改 [mdla7_model_runner.cpp:9519-9694](systemc/src/mdla7_model_runner.cpp#L9519-L9694) — softmax chain microblock loop**
 
-### 教訓 / 自我修正
+   - 外層 `for (mb = 0; mb < num_microblocks; ++mb)`
+   - Scratch 分配雙倍：`addr_ctr[2] / addr_exp[2] / addr_max[2] / addr_sum[2] / addr_fp_in[2] / addr_fp_out[2]`
+   - 每 microblock 用 `slot = mb % 2` 對應 scratch
+   - Microblock k 的 7 ops 內部仍鏈式（dep on prev op），第 1 op (dequant 或 POOL_MAX) 改 wait 於 microblock k-2 的最後 op（同 slot 之前的釋放）
+   - mb=0,1 的 first-op wait 於 fuse_prev_done_tag / load_done_wait（同今）
+   - Stream 標記：每 microblock = 1 個 `Microblock` 結構，`mb.id = k`, `mb.rows = M`, `mb.elem_off = k*M*K`
+3. **BMM L33/L36 row-tile 能力盤點**（**open question，先盤再動**）
 
-下次接手相同主題：**先讀 model_runner 的 softmax 段才開診斷**，不要光看 ewe_pool.h 就推結論。EweEngine 內的 inline path 是 fallback，不是主路徑。
+   - 看 [mdla7_model_runner.cpp](systemc/src/mdla7_model_runner.cpp) `OK_CONV` / `OK_BMM` 的 descriptor 發送，搜尋既有 `tile_h` / `oh_tile` / `tiles_h_per_layer` 對 BMM 是否生效
+   - Phase 6c/6d (CONV OW/OH spatial tile) 已存在（commit `9768589`），但 BMM 走 conv path 是否會用到？需確認
+   - 如有：直接 reuse；如無：要新增 BMM row-tile 路徑（風險與 session 數會多 1）
+4. **驗證 timeline overlap**
 
-### 修法落地：批量化（whole-shape chain）
+   - 跑 `./batch/run_systemc.py --filter bmm --model-filter tiled_2.5ms_int8 --rerun-all`
+   - 看 `cycles_cum` delta：若 microblock k+1 的 cum 比 microblock k 少（i.e., 沒等 microblock k 完全結束），表示 overlap 成功
+   - 看 [L1Mesh_report.md](L1Mesh_report.md)：POOL/EWE 同時間區間的 busy 是否真的重疊
+   - 預期 fast latency: 11 ms → ~5 ms
 
-User 確認觀察到的具體 regression 是 `bmm_softmax_bmm_tiled_2.5ms_int8.tflite` fast mode 從 **7ms → 72ms**。stored profile 確認 baseline = 137 ms（POOL 117 ms / 56,576 tasks）。
+### 待 user 回答的開放問題
 
-選的方案：**批量化** — per-row 5-descriptor loop 改成 per-softmax 1 套 5/7 descriptor 操作整個 `[rows, K]` shape。PoolEngine row-reduce shape convention 跟 EweEngine 末軸 broadcast 本來就支援 rows>1。
-
-**改動位置**：[mdla7_model_runner.cpp:9519-9694](systemc/src/mdla7_model_runner.cpp#L9519-L9694)
-- L1 fit check scratch 大小從 `K*2` 改 `rows*K*2`（ctr/exp/fp_in/fp_out）+ `rows*2`（max/sum 改 row-vector）
-- 移除 `for (uint64_t row = 0; row < rows; ++row)` 迴圈
-- 一條 UDMA 載入整塊 `in_size` (non-fused)
-- 一套 5/7 descriptor，rows 參數從 1 改 actual rows
-- `tiles_h_per_layer[i] = 1`（whole softmax = 1 microblock）
-- acc accounting 改 in_size/ref_size 整批
-
-**測試結果**：`./batch/run_systemc.py --filter bmm --model-filter tiled_2.5ms_int8 --rerun-all`
-
-| 指標 | Before (per-row) | After (batched) | 改善 |
-|---|---|---|---|
-| Fast latency | 72 ms | **11.18 ms** | 6.4x ↓ |
-| Sim total | 137 ms | 21.25 ms | 6.5x ↓ |
-| POOL tasks | 56,576 | 884 (= 442×2) | 64x ↓ |
-| POOL busy | 117 ms | 4.95 ms | 24x ↓ |
-| EWE tasks | 141,440 | 2,210 (= 442×5) | 64x ↓ |
-| EWE busy | 13.3 ms | 13.2 ms | 同 (compute floor) |
-| Cmd dispatches | 228,514 | 5,746 | 40x ↓ |
-| Correctness | 1358/1358 PASS | **1358/1358 PASS** | ✓ |
-
-新 bottleneck = EWE (util_peak 62.1%)，是真實 compute floor，不是 dispatch overhead。
-
-### 後續可選工作
-
-1. **其他 softmax model 全掃**：跑整個 bmm corpus（不只 tiled_2.5ms_int8）確認沒有別的 regression / L1 fit 失敗
-2. **rows==1 INT8 inline path 邊角清理**：[9462](systemc/src/mdla7_model_runner.cpp#L9462) 條件目前還排除 INT8，加入 INT8 後 EweEngine 的 inline `run_softmax_decomposed_int8` 就完全用不到
-3. **`compile-skipped:1` 含義**：CSV 寫 `bmm_softmax_bmm_tiled_2.5ms_int8,11.184,compile-skipped:1`，看 [run_systemc.py:187](batch/run_systemc.py#L187) `_compile_skipped_rows` 是 compile 階段有 1 row 沒 ready；correctness 還是 1358/1358 PASS，要不要修看實際 model 需求
-4. **Phase E (scratch ping-pong)**：目前已不是 critical path，可保留為未來工程
-
+- **要不要走 P3？** 估 2 sessions（含步驟 3 的 BMM 盤點 + 可能新增）
+- **是否保留批量化 (current code) 作 fallback？** M=rows 自動退化已涵蓋，可不留環境變數
+- **要不要先做步驟 3 的 BMM 盤點再回頭決策？** 純讀，0.5 session 內可結束

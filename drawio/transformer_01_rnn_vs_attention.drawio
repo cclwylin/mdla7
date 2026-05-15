@@ -1,0 +1,110 @@
+<mxGraphModel background="#FFFFFF" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="900" pageHeight="400" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <!-- ── Title ── -->
+    <mxCell id="t1" value="RNN vs Attention" style="text;html=1;fontFamily=Helvetica;fontSize=16;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="300" y="10" width="300" height="30" as="geometry"/>
+    </mxCell>
+
+    <!-- ══ LEFT: RNN ══ -->
+    <mxCell id="rnn_label" value="RNN（接力棒，容易忘記開頭）" style="text;html=1;fontFamily=Helvetica;fontSize=11;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="30" y="50" width="280" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- RNN word boxes -->
+    <mxCell id="r1" value="貓" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="30" y="120" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="r2" value="坐" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="110" y="120" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="r3" value="在" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="190" y="120" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="r4" value="椅子" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="270" y="120" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="r5" value="上" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="350" y="120" width="50" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- RNN arrows -->
+    <mxCell id="ra1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="r1" target="r2" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ra2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="r2" target="r3" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ra3" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="r3" target="r4" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="ra4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="r4" target="r5" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- faded arrow from r1 to r5 to show info loss -->
+    <mxCell id="ra5" value="資訊遞減" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#FF8C00;strokeWidth=1;dashed=1;endArrow=open;fontFamily=Helvetica;fontSize=9;fontColor=#FF8C00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" source="r1" target="r5" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="55" y="210"/>
+          <mxPoint x="375" y="210"/>
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="rnn_note" value="開頭「貓」的資訊傳到「上」時已衰減" style="text;html=1;fontFamily=Helvetica;fontSize=9;fillColor=none;strokeColor=none;fontColor=#FF8C00;" vertex="1" parent="1">
+      <mxGeometry x="30" y="225" width="300" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- divider -->
+    <mxCell id="div" style="edgeStyle=none;html=1;strokeColor=#CCCCCC;strokeWidth=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="450" y="50" as="sourcePoint"/>
+        <mxPoint x="450" y="280" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- ══ RIGHT: Attention ══ -->
+    <mxCell id="attn_label" value="Attention（直接看所有字）" style="text;html=1;fontFamily=Helvetica;fontSize=11;fontStyle=1;fillColor=none;strokeColor=none;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="490" y="50" width="380" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Attention word boxes -->
+    <mxCell id="a1" value="貓" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="490" y="90" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="a2" value="坐" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="620" y="150" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="a3" value="在" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="490" y="210" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="a4" value="椅子" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="750" y="90" width="50" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="a5" value="上" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Helvetica;fontSize=13;fontStyle=1;fontColor=#1E2761;" vertex="1" parent="1">
+      <mxGeometry x="750" y="210" width="50" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Attention edges from 坐 to all others -->
+    <mxCell id="aa1" value="0.8" style="html=1;strokeColor=#1E2761;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Helvetica;fontSize=9;fontColor=#1E2761;fontStyle=1;" edge="1" source="a2" target="a1" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="aa3" value="0.1" style="html=1;strokeColor=#AAAAAA;strokeWidth=1;endArrow=block;endFill=0;fontFamily=Helvetica;fontSize=9;fontColor=#AAAAAA;" edge="1" source="a2" target="a3" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="aa4" value="0.6" style="html=1;strokeColor=#1E2761;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Helvetica;fontSize=9;fontColor=#1E2761;fontStyle=1;" edge="1" source="a2" target="a4" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="aa5" value="0.5" style="html=1;strokeColor=#2D3E8A;strokeWidth=1.5;endArrow=block;endFill=1;fontFamily=Helvetica;fontSize=9;fontColor=#2D3E8A;" edge="1" source="a2" target="a5" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="attn_note" value="「坐」同時直接看所有字，不受距離限制" style="text;html=1;fontFamily=Helvetica;fontSize=9;fillColor=none;strokeColor=none;fontColor=#1B7B4E;" vertex="1" parent="1">
+      <mxGeometry x="490" y="285" width="330" height="20" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>
